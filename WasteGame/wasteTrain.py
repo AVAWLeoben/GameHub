@@ -1,436 +1,371 @@
 # -*- coding: utf-8 -*-
-"""
-Created on Mon May 26 20:52:10 2025
+"""WasteTrain: touch-friendly railway sandbox and delivery missions.
 
-@author: Admin
+Entry point used by GameHub: await wasteTrain.main(screen, clock).
+No additional artwork or third-party pathfinding packages are needed.
 """
-from GUI import Button
-import pygame
 import asyncio
-import random as rd
-
-# from pathfinding.core.grid import Grid as PFGrid
-# from pathfinding.finder.a_star import AStarFinder
-# from pathfinding.finder.breadth_first import BreadthFirstFinder
-# from numpy import zeros
-import math
 import heapq
-from collections import deque
+import math
+import random
+import pygame
 
-RUNNING = True
 FPS = 60
-SCREEN = None
-CLOCK = None
-TILESIZE = 50
-EVENTS = None
-N_TILES_HORZ = 0
-N_TILES_VERT = 0
-TILES = []
-
-# Images
-# BACKGROUND = None
+COLS, ROWS = 20, 14
+DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1))
+PALETTE = ((238, 113, 88), (92, 171, 234), (246, 193, 76), (167, 124, 219))
+GRASS = (113, 166, 108)
+DARK = (34, 54, 51)
+WHITE = (250, 247, 230)
 
 
-def ret():
-    global RUNNING
-    RUNNING = False
-
-
-def neighbors(pos, matrix):
-    x, y = pos
-    results = []
-    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-        nx, ny = x + dx, y + dy
-        if 0 <= nx < len(matrix[0]) and 0 <= ny < len(matrix):
-            if matrix[ny][nx]:  # walkable
-                results.append((nx, ny))
-    return results
-
-
-def heuristic(a, b):
-    return abs(a[0] - b[0]) + abs(a[1] - b[1])
-
-
-def astar(matrix, start, goal):
-    open_set = []
-    heapq.heappush(open_set, (0 + heuristic(start, goal), 0, start, [start]))
-    visited = set()
-
-    while open_set:
-        _, cost, current, path = heapq.heappop(open_set)
-        if current in visited:
+def route(start, end, allowed):
+    """A* on four-directional, player-built track cells."""
+    if start not in allowed or end not in allowed:
+        return []
+    heap = [(abs(start[0]-end[0])+abs(start[1]-end[1]), 0, start)]
+    parent = {start: None}
+    costs = {start: 0}
+    while heap:
+        _, cost, pos = heapq.heappop(heap)
+        if cost != costs.get(pos):
             continue
-        visited.add(current)
-
-        if current == goal:
-            return path
-
-        for neighbor in neighbors(current, matrix):
-            if neighbor not in visited:
-                heapq.heappush(open_set, (cost + 1 + heuristic(neighbor, goal), cost + 1, neighbor, path + [neighbor]))
-
-    return []  # no path found
-
-
-def bfs(matrix, start, goal):
-    queue = deque([(start, [start])])
-    visited = set([start])
-
-    while queue:
-        current, path = queue.popleft()
-
-        if current == goal:
-            return path
-
-        for neighbor in neighbors(current, matrix):
-            if neighbor not in visited:
-                visited.add(neighbor)
-                queue.append((neighbor, path + [neighbor]))
-
-    return []  # no path found
+        if pos == end:
+            result = []
+            while pos is not None:
+                result.append(pos)
+                pos = parent[pos]
+            return result[::-1]
+        for dx, dy in DIRS:
+            nxt = (pos[0]+dx, pos[1]+dy)
+            if nxt not in allowed:
+                continue
+            new_cost = cost+1
+            if new_cost < costs.get(nxt, 10**9):
+                costs[nxt] = new_cost
+                parent[nxt] = pos
+                h = abs(nxt[0]-end[0])+abs(nxt[1]-end[1])
+                heapq.heappush(heap, (new_cost+h, new_cost, nxt))
+    return []
 
 
-home_button = Button(10, 10, 100, 100, "assets/retBut.png", "assets/retBut_clicked.png", ret)
+class WasteTrain:
+    def __init__(self, screen):
+        self.screen = screen
+        self.w, self.h = screen.get_size()
+        # Reserve a toolbar on the right, keeping the board readable on iPads.
+        self.cell = max(12, min((self.w-185)//COLS, (self.h-85)//ROWS))
+        self.ox = max(8, (self.w-180-COLS*self.cell)//2)
+        self.oy = max(52, (self.h-ROWS*self.cell)//2)
+        self.font = pygame.font.Font(None, max(18, min(27, self.cell)))
+        self.small = pygame.font.Font(None, max(16, min(22, self.cell-2)))
+        self.big = pygame.font.Font(None, 34)
+        self.rng = random.Random()
+        self.tool = "build"
+        self.dragging = False
+        self.drag_last = None
+        self.train = None
+        self.train_path = []
+        self.train_progress = 0.0
+        self.deliveries = 0
+        self.score = 0
+        self.message = ""
+        self.message_until = 0
+        self.buttons = {}
+        self.exit_requested = False
+        self.home_rect = pygame.Rect(0, 0, 0, 0)
+        self.new_world()
 
+    def new_world(self):
+        self.obstacles = set()
+        self.stations = []
+        self.tracks = set()
+        self.train = None
+        self.train_path = []
+        self.train_progress = 0
+        self.deliveries = 0
+        self.score = 0
+        self.tool = "build"
+        # Keep station positions apart; reserve their immediate neighbors.
+        for i in range(4):
+            for _ in range(400):
+                pos = (self.rng.randrange(1, COLS-1), self.rng.randrange(1, ROWS-1))
+                if all(abs(pos[0]-p[0])+abs(pos[1]-p[1]) >= 8 for p in self.stations):
+                    self.stations.append(pos)
+                    break
+        if len(self.stations) < 4:
+            self.stations = [(2, 2), (COLS-3, 2), (2, ROWS-3), (COLS-3, ROWS-3)]
+        reserved = set(self.stations)
+        for x, y in self.stations:
+            reserved.update((x+dx, y+dy) for dx, dy in DIRS)
+        for y in range(ROWS):
+            for x in range(COLS):
+                pos = (x, y)
+                if pos not in reserved and self.rng.random() < 0.13:
+                    self.obstacles.add(pos)
+        self.source = 0
+        self.dest = 1
+        self.tracks.update(self.stations)
+        self.say("Connect the highlighted stations, then SEND TRAIN!")
 
-class Tile:
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-        self.nx = x // TILESIZE
-        self.ny = y // TILESIZE
-        self.w = TILESIZE
-        self.h = TILESIZE
-        self.rect = pygame.Rect(self.x, self.y, self.w, self.h)
-        self.hovered = False
-        self.clicked = False
-        self.color = pygame.Color(230, 230, 230)
-        self.type = None
-        self.image = None
+    def say(self, msg):
+        self.message = msg
+        self.message_until = pygame.time.get_ticks()+3500
 
-    def checkNeighbor(self, nx, ny):
-        if 0 <= nx < N_TILES_HORZ and 0 <= ny < N_TILES_VERT:
-            return TILES[ny][nx].clicked
+    def cell_rect(self, pos):
+        x, y = pos
+        return pygame.Rect(self.ox+x*self.cell, self.oy+y*self.cell, self.cell, self.cell)
+
+    def point_cell(self, pos):
+        x = (pos[0]-self.ox)//self.cell
+        y = (pos[1]-self.oy)//self.cell
+        if 0 <= x < COLS and 0 <= y < ROWS:
+            return int(x), int(y)
         return None
 
-    def isPlaceable(self):
-        results = [
-            self.checkNeighbor(self.nx, self.ny - 1),
-            self.checkNeighbor(self.nx, self.ny + 1),
-            self.checkNeighbor(self.nx + 1, self.ny),
-            self.checkNeighbor(self.nx - 1, self.ny),
-            self.checkNeighbor(self.nx - 1, self.ny - 1),
-            self.checkNeighbor(self.nx + 1, self.ny - 1),
-            self.checkNeighbor(self.nx - 1, self.ny + 1),
-            self.checkNeighbor(self.nx + 1, self.ny + 1),
+    def edit(self, pos):
+        if self.train is not None or pos is None:
+            return
+        if pos in self.obstacles or pos in self.stations:
+            return
+        if self.tool == "build":
+            self.tracks.add(pos)
+        else:
+            self.tracks.discard(pos)
+
+    def send(self):
+        if self.train is not None:
+            return
+        path = route(self.stations[self.source], self.stations[self.dest], self.tracks)
+        if len(path) < 2:
+            self.say("No connection yet! Build a track between the stations.")
+            return
+        self.train_path = path
+        self.train_progress = 0.0
+        self.train = True
+        self.say("Delivery underway!")
+
+    def next_mission(self):
+        self.deliveries += 1
+        self.score += 100
+        self.source = self.dest
+        candidates = [i for i in range(len(self.stations)) if i != self.source]
+        self.dest = self.rng.choice(candidates)
+        self.train = None
+        self.train_path = []
+        self.train_progress = 0.0
+        self.say("Delivered! +100 points. New destination highlighted.")
+
+    def update(self, dt):
+        if self.train is not None:
+            # Move at ~3 cells per second, independent of frame rate.
+            self.train_progress += 3.0 * dt
+            if self.train_progress >= len(self.train_path)-1:
+                self.next_mission()
+
+    def train_position(self, offset=0.0):
+        progress = max(0, self.train_progress-offset)
+        a = min(int(progress), len(self.train_path)-1)
+        b = min(a+1, len(self.train_path)-1)
+        t = progress-a
+        ax, ay = self.cell_rect(self.train_path[a]).center
+        bx, by = self.cell_rect(self.train_path[b]).center
+        return ax+(bx-ax)*t, ay+(by-ay)*t, math.atan2(by-ay, bx-ax)
+
+    def draw_train(self, center, angle, wagon=False):
+        size = self.cell*0.70
+        # Shape is constructed in local coordinates, then rotated to match travel.
+        ca, sa = math.cos(angle), math.sin(angle)
+        def pt(x, y):
+            return (int(center[0]+x*ca-y*sa), int(center[1]+x*sa+y*ca))
+        color = (247, 191, 80) if wagon else (218, 68, 63)
+        pygame.draw.polygon(self.screen, (39, 42, 44),
+                            [pt(-size*.48, -size*.34), pt(size*.48, -size*.34),
+                             pt(size*.48, size*.34), pt(-size*.48, size*.34)])
+        pygame.draw.polygon(self.screen, color,
+                            [pt(-size*.42, -size*.27), pt(size*.38, -size*.27),
+                             pt(size*.45, 0), pt(size*.38, size*.27),
+                             pt(-size*.42, size*.27)])
+        if not wagon:
+            pygame.draw.polygon(self.screen, (151, 224, 233),
+                                [pt(size*.05, -size*.20), pt(size*.30, -size*.20),
+                                 pt(size*.30, size*.20), pt(size*.05, size*.20)])
+            pygame.draw.circle(self.screen, (253, 243, 169), pt(size*.45, 0), max(2, self.cell//12))
+        else:
+            pygame.draw.line(self.screen, (114, 78, 38), pt(-size*.25, 0), pt(size*.25, 0), 3)
+
+    def draw(self):
+        s = self.screen
+        s.fill((215, 228, 203))
+        pygame.draw.rect(s, DARK, (0, 0, self.w, 43))
+        header = self.big.render("WASTE TRAIN", True, WHITE)
+        s.blit(header, (12, 7))
+        self.home_rect = pygame.Rect(self.w-112, 3, 105, 36)
+        pygame.draw.rect(s, (87, 117, 107), self.home_rect, border_radius=7)
+        home_label = self.small.render("HOME", True, WHITE)
+        s.blit(home_label, home_label.get_rect(center=self.home_rect.center))
+        board = pygame.Rect(self.ox, self.oy, COLS*self.cell, ROWS*self.cell)
+        pygame.draw.rect(s, GRASS, board, border_radius=7)
+        for y in range(ROWS):
+            for x in range(COLS):
+                pos = (x, y)
+                r = self.cell_rect(pos)
+                if (x+y)%2:
+                    pygame.draw.rect(s, (119, 174, 113), r)
+                pygame.draw.rect(s, (92, 146, 93), r, 1)
+                if pos in self.obstacles:
+                    cx, cy = r.center
+                    if (x*7+y)%3 == 0:
+                        pygame.draw.ellipse(s, (90, 98, 100), r.inflate(-self.cell*.18, -self.cell*.30))
+                        pygame.draw.ellipse(s, (140, 150, 146),
+                                            (cx-self.cell*.25, cy-self.cell*.25, self.cell*.35, self.cell*.22))
+                    else:
+                        pygame.draw.rect(s, (102, 74, 48),
+                                         (cx-self.cell*.06, cy, self.cell*.12, self.cell*.29))
+                        pygame.draw.circle(s, (40, 116, 69), (cx, cy-self.cell*.12), int(self.cell*.32))
+                        pygame.draw.circle(s, (55, 137, 76), (cx-self.cell*.12, cy-self.cell*.21), int(self.cell*.22))
+        # Track joins use the actual four-neighbor connections.
+        width = max(5, self.cell//5)
+        for pos in self.tracks:
+            cx, cy = self.cell_rect(pos).center
+            pygame.draw.circle(s, (78, 67, 58), (cx, cy), width//2+1)
+            for dx, dy in ((1, 0), (0, 1)):
+                other = (pos[0]+dx, pos[1]+dy)
+                if other in self.tracks:
+                    ex, ey = self.cell_rect(other).center
+                    pygame.draw.line(s, (75, 67, 62), (cx, cy), (ex, ey), width+4)
+                    pygame.draw.line(s, (210, 205, 178), (cx, cy), (ex, ey), max(2, width-3))
+                    for k in (0.2, 0.5, 0.8):
+                        mx, my = cx+(ex-cx)*k, cy+(ey-cy)*k
+                        nx, ny = -dy, dx
+                        pygame.draw.line(s, (104, 70, 49),
+                                         (mx-nx*width*.8, my-ny*width*.8),
+                                         (mx+nx*width*.8, my+ny*width*.8), max(2, self.cell//14))
+        for i, pos in enumerate(self.stations):
+            r = self.cell_rect(pos)
+            cx, cy = r.center
+            c = PALETTE[i]
+            pygame.draw.circle(s, (255, 255, 220) if i in (self.source, self.dest) else DARK,
+                               (cx, cy), int(self.cell*.47))
+            pygame.draw.circle(s, c, (cx, cy), int(self.cell*.39))
+            pygame.draw.rect(s, (247, 244, 220),
+                             (cx-self.cell*.22, cy-self.cell*.08, self.cell*.44, self.cell*.29),
+                             border_radius=2)
+            pygame.draw.polygon(s, DARK, [(cx-self.cell*.29, cy-self.cell*.08),
+                                          (cx, cy-self.cell*.32),
+                                          (cx+self.cell*.29, cy-self.cell*.08)])
+            label = self.small.render("ABCD"[i], True, DARK)
+            s.blit(label, label.get_rect(center=(cx, cy+self.cell*.12)))
+            if i == self.dest:
+                pygame.draw.circle(s, (255, 238, 90), (cx, cy), int(self.cell*.48), 3)
+        if self.train is not None and self.train_path:
+            for offset in (1.1, 0.55):
+                if self.train_progress > offset:
+                    x, y, a = self.train_position(offset)
+                    self.draw_train((x, y), a, wagon=True)
+            x, y, a = self.train_position()
+            self.draw_train((x, y), a)
+        # Right-hand toolbar.
+        px = max(self.ox+COLS*self.cell+10, self.w-169)
+        bw = min(158, self.w-px-7)
+        self.buttons = {}
+        def button(name, label, top, selected=False):
+            r = pygame.Rect(px, top, bw, 43)
+            self.buttons[name] = r
+            pygame.draw.rect(s, (76, 132, 109) if selected else (49, 77, 77), r, border_radius=8)
+            pygame.draw.rect(s, (220, 238, 212), r, 2, border_radius=8)
+            txt = self.small.render(label, True, WHITE)
+            s.blit(txt, txt.get_rect(center=r.center))
+        y0 = self.oy
+        button("build", "BUILD TRACK", y0, self.tool=="build")
+        button("erase", "ERASE TRACK", y0+49, self.tool=="erase")
+        button("send", "SEND TRAIN", y0+108)
+        button("reset", "NEW MAP", y0+165)
+        info = [
+            "MISSION",
+            "ABCD"[self.source] + "  ->  " + "ABCD"[self.dest],
+            "Score: " + str(self.score),
+            "Trips: " + str(self.deliveries),
         ]
-        num_occupied = sum(1 for r in results if r is True)
-        return num_occupied <= 9
+        for i, line in enumerate(info):
+            txt = self.small.render(line, True, DARK)
+            s.blit(txt, (px, y0+230+i*29))
+        if pygame.time.get_ticks() < self.message_until:
+            text = self.small.render(self.message, True, WHITE)
+            box = text.get_rect()
+            box.topleft = (max(10, self.ox), self.h-31)
+            bg = box.inflate(16, 8)
+            pygame.draw.rect(s, DARK, bg, border_radius=5)
+            s.blit(text, box)
+        pygame.display.flip()
 
-    def updateType(self):
-        if self.clicked:
-            up = self.checkNeighbor(self.nx, self.ny - 1)
-            down = self.checkNeighbor(self.nx, self.ny + 1)
-            right = self.checkNeighbor(self.nx + 1, self.ny)
-            left = self.checkNeighbor(self.nx - 1, self.ny)
-            # Now determine the tile type
-            if up and down and left and right:
-                self.type = "crossing"
-            elif left and right and not up and not down:
-                self.type = "straight-horizontal"
-            elif up and down and not left and not right:
-                self.type = "straight-vertical"
-            elif up and right:
-                self.type = "curve-ur"
-            elif up and left:
-                self.type = "curve-ul"
-            elif down and right:
-                self.type = "curve-dr"
-            elif down and left:
-                self.type = "curve-dl"
-            elif self.clicked:
-                self.type = "crossing"
-            else:
-                self.type = None  # fallback
+    def click(self, pos):
+        if self.home_rect.collidepoint(pos):
+            self.exit_requested = True
+            return False
+        for key, rect in self.buttons.items():
+            if rect.collidepoint(pos):
+                if key in ("build", "erase"):
+                    self.tool = key
+                elif key == "send":
+                    self.send()
+                elif key == "reset":
+                    self.new_world()
+                return False
+        cell = self.point_cell(pos)
+        if cell is not None:
+            self.edit(cell)
+            self.drag_last = cell
+            return True
+        return False
 
-    def update(self):
-        global GRID
-        mousePos = pygame.mouse.get_pos()
-        if self.rect.collidepoint(mousePos):
-            self.hovered = True
-            self.color = pygame.Color("black")
+    def drag(self, pos):
+        cell = self.point_cell(pos)
+        if cell is None or cell == self.drag_last:
+            return
+        # Fill skipped cells when a finger moves quickly.
+        if self.drag_last is not None:
+            x0, y0 = self.drag_last
+            x1, y1 = cell
+            steps = max(abs(x1-x0), abs(y1-y0))
+            for k in range(1, steps+1):
+                x = round(x0+(x1-x0)*k/steps)
+                y = round(y0+(y1-y0)*k/steps)
+                self.edit((x, y))
         else:
-            self.hovered = False
-            self.color = pygame.Color(230, 230, 230)
-        for event in EVENTS:
-            in_station = (self.nx in STATIONTILES_X) and (self.ny in STATIONTILES_Y)
-            if event.type == pygame.MOUSEBUTTONDOWN and not in_station:
-                if self.rect.collidepoint(event.pos) and self.isPlaceable() and self.clicked is False:
-                    self.clicked = True
-                    self.color = pygame.Color("red")
-                    self.type = "RailCrossing"
-                    self.image = pygame.transform.scale(RAILROAD_CROSSING_IMAGE, (TILESIZE, TILESIZE))
-                elif self.rect.collidepoint(event.pos) and self.clicked is True:
-                    self.clicked = False
-                    self.type = None
-
-        self.updateType()
-        if self.type is not None:
-            self.image = RAILROAD_IMAGES[self.type]
-
-        # Update NavGrid
-        if self.type is not None:
-            GRID[self.ny][self.nx] = 1
-        else:
-            GRID[self.ny][self.nx] = 0
-
-        if self.clicked:
-            print(GRID)
-
-    def draw(self):
-        if self.hovered:
-            pygame.draw.rect(SCREEN, self.color, self.rect, 1)  # 1 = border thickness
-        if self.type is not None:
-            SCREEN.blit(self.image, self.rect)
-        if TRAIN:
-            if TRAIN.target[0] == self.nx and TRAIN.target[1] == self.ny:
-                pygame.draw.circle(SCREEN, pygame.Color("green"), self.rect.center, 5)
-
-
-class Wagon:
-    def __init__(self, offset):
-        self.image = pygame.transform.scale(WAGON_IMAGE, (TILESIZE, TILESIZE))
-        self.rect = self.image.get_rect()
-        self.offset = offset  # how many trail steps behind the train
-        self.x, self.y = 0, 0
-
-    def update(self, trail):
-        if len(trail) > self.offset:
-            self.x, self.y = trail[-self.offset]
-            self.rect.topleft = (int(self.x), int(self.y))
-
-    def draw(self, screen, faceLeft):
-        img = pygame.transform.flip(self.image, 1, 0) if faceLeft else self.image
-        screen.blit(img, self.rect)
-
-
-class Train:
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-        self.image = pygame.transform.scale(pygame.image.load("assets/wasteTrain/train.png"), (TILESIZE, TILESIZE))
-        self.rect = self.image.get_rect()
-        self.onGrid = False
-        self.start = (self.x // TILESIZE, self.y // TILESIZE)
-        endtile = self.find_end_tile()
-        self.target = (endtile.nx, endtile.ny)
-        self.path = self.find_path(self.start, self.target)
-        self.speed = 4
-        self.faceLeft = False
-
-        self.trail = []  # Keep track of previous positions
-        self.max_trail_length = 100  # Ensure trail doesn't grow too big
-        self.num_wagons = sum(sum(row) for row in GRID) // 4
-        self.wagons = [Wagon((i + 1) * 10) for i in range(self.num_wagons)]
-
-    def find_end_tile(self):
-        for row in reversed(TILES):
-            for tile in reversed(row):
-                if tile.clicked:
-                    return tile
-        return None
-
-    # Your modified method:
-    def find_path(self, start, end):
-        matrix = [[1 if cell == 1 else 0 for cell in row] for row in GRID]
-
-        if sum(sum(row) for row in GRID) < 15:
-            path = astar(matrix, start, end)
-        else:
-            path = bfs(matrix, start, end)
-
-        self.path = path[1:]  # skip starting tile
-        return self.path
-
-    # def find_path_offline(self, start, end):
-    #     matrix = [[1 if cell == 1 else 0 for cell in row] for row in GRID.tolist()]
-    #     pf_grid = PFGrid(matrix=matrix)
-    #     start_node = pf_grid.node(start[0], start[1])
-    #     end_node = pf_grid.node(end[0], end[1])
-
-    #     if GRID.sum() < 15:
-    #         finder = AStarFinder()
-    #     else:
-    #         finder = BreadthFirstFinder()
-    #     path, _ = finder.find_path(start_node, end_node, pf_grid)
-    #     self.path = path[1:]  # exclude start node
-    #     return self.path
-
-    def findNewTargetTile(self):
-        clicked_tiles = [tile for row in TILES for tile in row if tile.clicked]
-        if clicked_tiles:
-            return rd.choice(clicked_tiles)
-        return None
-
-    def update(self):
-        self.num_wagons = sum(sum(row) for row in GRID) // 4
-        self.wagons = [Wagon((i + 1) * 10) for i in range(self.num_wagons)]
-        if self.path:
-            target_x, target_y = self.path[0]
-            target_x = target_x * TILESIZE
-            target_y = target_y * TILESIZE
-            dx = target_x - self.x
-            dy = target_y - self.y
-            dist = math.hypot(dx, dy)  # Fixed: swapped dx, dy
-            if dist > 0:
-                self.faceLeft = dx <= 0
-            if dist < self.speed:
-                self.x, self.y = target_x, target_y
-                self.path.pop(0)
-            else:
-                self.x += self.speed * dx / dist
-                self.y += self.speed * dy / dist
-            if len(self.path) == 0:
-                self.start = (self.x // TILESIZE, self.y // TILESIZE)
-                newTargetTile = self.findNewTargetTile()
-                self.target = (newTargetTile.x // TILESIZE, newTargetTile.y // TILESIZE)
-                self.path = self.find_path(self.start, self.target)
-        else:
-            print("No PATH FOUND")
-            # Try another tile
-            newTargetTile = self.findNewTargetTile()
-            if newTargetTile:
-                self.target = (newTargetTile.x // TILESIZE, newTargetTile.y // TILESIZE)
-                self.path = self.find_path(self.start, self.target)
-
-        self.rect.topleft = (int(self.x), int(self.y))
-
-        # Update trail
-        self.trail.append((self.x, self.y))
-        if len(self.trail) > self.max_trail_length:
-            self.trail.pop(0)
-
-        # Update wagons
-        for wagon in self.wagons:
-            wagon.update(self.trail)
-
-    def draw(self):
-        # Draw wagons first so they appear behind the train
-        for wagon in self.wagons:
-            wagon.draw(SCREEN, self.faceLeft)
-
-        if self.faceLeft:
-            draw_image = pygame.transform.flip(self.image, 1, 0)
-        else:
-            draw_image = self.image.copy()
-        SCREEN.blit(draw_image, self.rect)
-
-
-def loadImages():
-    global BACKGROUND, RAILROAD_CROSSING_IMAGE, RAILROAD_IMAGES, STATION_IMAGE, WAGON_IMAGE
-    BACKGROUND = pygame.image.load("assets/hungryHedgie/grass.png")
-    RAILROAD_CROSSING_IMAGE = pygame.image.load("assets/wasteTrain/rail_Crossing.png")
-    RAILROAD_VERTICAL_IMAGE = pygame.image.load("assets/wasteTrain/track.png")
-    RAILROAD_HORIZONTAL_IMAGE = pygame.transform.rotate(RAILROAD_VERTICAL_IMAGE, 90)
-    RAILROAD_CURVE_UL_IMAGE = pygame.image.load("assets/wasteTrain/rail_Crossing.png")
-    RAILROAD_CURVE_UR_IMAGE = pygame.transform.rotate(RAILROAD_CURVE_UL_IMAGE, -90)
-    RAILROAD_CURVE_DR_IMAGE = pygame.transform.rotate(RAILROAD_CURVE_UL_IMAGE, 180)
-    RAILROAD_CURVE_DL_IMAGE = pygame.transform.rotate(RAILROAD_CURVE_UL_IMAGE, 90)
-
-    RAILROAD_IMAGES = {
-        "crossing": pygame.transform.scale(RAILROAD_CROSSING_IMAGE, (TILESIZE, TILESIZE)),
-        "straight-horizontal": pygame.transform.scale(RAILROAD_HORIZONTAL_IMAGE, (TILESIZE, TILESIZE)),
-        "straight-vertical": pygame.transform.scale(RAILROAD_VERTICAL_IMAGE, (TILESIZE, TILESIZE)),
-        "curve-ur": pygame.transform.scale(RAILROAD_CURVE_UR_IMAGE, (TILESIZE, TILESIZE)),
-        "curve-ul": pygame.transform.scale(RAILROAD_CURVE_UL_IMAGE, (TILESIZE, TILESIZE)),
-        "curve-dr": pygame.transform.scale(RAILROAD_CURVE_DR_IMAGE, (TILESIZE, TILESIZE)),
-        "curve-dl": pygame.transform.scale(RAILROAD_CURVE_DL_IMAGE, (TILESIZE, TILESIZE)),
-    }
-
-    STATION_IMAGE = pygame.transform.scale(
-        pygame.image.load("assets/wasteTrain/station.png").convert_alpha(), (TILESIZE * 4, TILESIZE * 3)
-    )
-    WAGON_IMAGE = pygame.image.load("assets/wasteTrain/wagon.png")
-
-
-def createTiles():
-    global TILES, N_TILES_HORZ, N_TILES_VERT
-    N_TILES_HORZ = 800 // TILESIZE
-    N_TILES_VERT = 600 // TILESIZE
-
-    TILES = []
-    for y in range(N_TILES_VERT):
-        row = []
-        for x in range(N_TILES_HORZ):
-            row.append(Tile(x * TILESIZE, y * TILESIZE))
-        TILES.append(row)
-
-
-def find_start_tile():
-    for row in TILES:
-        for tile in row:
-            if tile.clicked:
-                return tile
-    return None
-
-
-def update():
-    global RUNNING, EVENTS, TRAIN
-    EVENTS = pygame.event.get()
-    home_button.update(EVENTS)
-    for row in TILES:
-        for tile in row:
-            tile.update()
-    if TRAIN is None:
-        track_tiles = [tile for row in TILES for tile in row if tile.clicked]
-        if len(track_tiles) >= 10:
-            first_track = find_start_tile()
-            TRAIN = Train(first_track.x, first_track.y)
-    if TRAIN is not None:
-        TRAIN.update()
-    for event in EVENTS:
-        if event.type == pygame.QUIT:
-            RUNNING = False
-
-
-def draw():
-    SCREEN.fill((10, 10, 30))
-    SCREEN.blit(BACKGROUND, (0, 0))
-    for row in TILES:
-        for tile in row:
-            tile.draw()
-    if TRAIN is not None:
-        TRAIN.draw()
-
-    SCREEN.blit(STATION_IMAGE, (TILESIZE * 3, TILESIZE * 2))
-    home_button.draw(SCREEN)
-    pygame.display.flip()
+            self.edit(cell)
+        self.drag_last = cell
 
 
 async def main(screen, clock):
-    global RUNNING, SCREEN, CLOCK, TILES, TRAIN
-    SCREEN = screen
-    CLOCK = clock
-    RUNNING = True
-    TRAIN = None
-
-    loadImages()
-    global STATIONTILES_X, STATIONTILES_Y
-    STATIONTILES_X = [3, 4, 5, 6]
-    STATIONTILES_Y = [3, 4]
-
-    global GRID
-    # GRID = zeros((600//TILESIZE,800//TILESIZE), dtype=int)
-    GRID = [[0 for _ in range(800 // TILESIZE)] for _ in range(600 // TILESIZE)]
-
-    print(GRID)
-    TILES = []
-    createTiles()
-
-    while RUNNING:
-        CLOCK.tick(FPS)
-        update()
-        draw()
+    game = WasteTrain(screen)
+    running = True
+    finger_id = None
+    while running:
+        dt = min(clock.tick(FPS)/1000.0, 0.05)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                running = False
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                game.dragging = game.click(event.pos)
+            elif event.type == pygame.MOUSEMOTION and game.dragging and event.buttons[0]:
+                game.drag(event.pos)
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                game.dragging = False
+                game.drag_last = None
+            elif event.type == pygame.FINGERDOWN and finger_id is None:
+                finger_id = event.finger_id
+                game.dragging = game.click((int(event.x*game.w), int(event.y*game.h)))
+            elif event.type == pygame.FINGERMOTION and event.finger_id == finger_id and game.dragging:
+                game.drag((int(event.x*game.w), int(event.y*game.h)))
+            elif event.type == pygame.FINGERUP and event.finger_id == finger_id:
+                finger_id = None
+                game.dragging = False
+                game.drag_last = None
+        if game.exit_requested:
+            running = False
+        game.update(dt)
+        game.draw()
         await asyncio.sleep(0)
-
-    return
