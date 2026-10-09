@@ -1,0 +1,64 @@
+name: Build and deploy GameHub
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out GameHub source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+
+      - name: Check game source and assets
+        shell: bash
+        run: |
+          test -f WasteGame/main.py || { echo 'Missing WasteGame/main.py'; exit 1; }
+          test -d WasteGame/assets || { echo 'Missing WasteGame/assets/'; exit 1; }
+          test -n "$(find WasteGame/assets -type f -print -quit)" || { echo 'WasteGame/assets is empty'; exit 1; }
+          test -f app_icon.png || { echo 'Missing app_icon.png'; exit 1; }
+
+      - name: Build Pygbag and apply iPad patches
+        run: python prepare_build_env.py
+
+      - name: Check generated web app
+        run: python verify_web_build.py
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload built browser game (not into Git history)
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: WasteGame/build/web
+          include-hidden-files: true
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
