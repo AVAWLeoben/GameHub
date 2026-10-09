@@ -324,7 +324,7 @@ def setup():
     HOME_BUTTON = Button(10, 10, 100, 100, "assets/retBut.png", "assets/retBut_clicked.png", ret)
 
     global BACKGROUND_IMAGE
-    BACKGROUND_IMAGE = pygame.image.load("assets/wastePizza/kitchen.png")
+    BACKGROUND_IMAGE = pygame.image.load("assets/wastePizza/kitchen.jpg")
     BACKGROUND_IMAGE = pygame.transform.scale(BACKGROUND_IMAGE, (800, 600))
 
     global PIZZA_IMAGE

@@ -271,7 +271,7 @@ def setup():
     player_a = 5
 
     # Load map
-    map_image_orig = pygame.image.load("assets/wastePilot/map_lrg.png").convert()
+    map_image_orig = pygame.image.load("assets/wastePilot/map_lrg.jpg").convert()
     map_image_orig = pygame.transform.scale_by(map_image_orig, (1, 1))
     map_width, map_height = map_image_orig.get_size()
 

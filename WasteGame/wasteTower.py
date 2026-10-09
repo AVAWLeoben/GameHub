@@ -241,7 +241,7 @@ class Crate:
 
 def loadImages():
     global BACKGROUND_IM, BACKGROUND_OFFSET_Y, CRATE_IM, CRANE_IMG, AIRCRAFT_IMAGES, BACKGROUND_IM_WHOLE
-    BACKGROUND_IM = pygame.image.load("assets/BuildTower/background.png")
+    BACKGROUND_IM = pygame.image.load("assets/BuildTower/background.jpg")
     BACKGROUND_IM_WHOLE = pygame.transform.scale(BACKGROUND_IM, (80, 250))
     BACKGROUND_OFFSET_Y = HEIGHT - BACKGROUND_IM.get_height()
     CRATE_IM = pygame.image.load("assets/BuildTower/crate.png")

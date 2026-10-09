@@ -67,7 +67,7 @@ class Button:
 # Wastebin and Point Classes
 # --------------------------
 class Wastebin:
-    IMAGES = {"full": pygame.image.load("assets/wasteRace/full.png"), "empty": pygame.image.load("assets/wasteRace/empty.png")}
+    IMAGES = {"full": pygame.image.load("assets/wasteBin_full.png"), "empty": pygame.image.load("assets/wasteBin_empty.png")}
 
     def __init__(self, x, y):
         self.x = x
@@ -140,7 +140,7 @@ def load_walkable_grid(path):
 
 
 class UserTruck:
-    IMAGE = pygame.image.load("assets/wasteRace/truck.png")
+    IMAGE = pygame.image.load("assets/truck.png")
 
     def __init__(self, x, y, max_speed=3.0, acceleration=0.2, deceleration=0.1, screen_width=800, screen_height=600):
         self.x = x
@@ -300,7 +300,7 @@ def bfs_next_step(grid, start, goal, max_search=1000):
 
 
 class Truck:
-    IMAGE = pygame.image.load("assets/wasteRace/truck.png")
+    IMAGE = pygame.image.load("assets/truck.png")
 
     def __init__(self, x, y, speed=2):
         self.x = x
@@ -405,7 +405,7 @@ def setup():
     START_POINT = Point(START_X, START_Y)
     GRID_MAP = pygame.image.load("assets/wasteRace/driveable_mask.png")
     GRID_MAP = pygame.transform.scale(GRID_MAP, (800, 600))
-    MAP_IMAGE = pygame.image.load("assets/wasteRace/road.png").convert()
+    MAP_IMAGE = pygame.image.load("assets/road.png").convert()
     MAP_IMAGE = pygame.transform.scale(MAP_IMAGE, (800, 600))
     # Buttons
     global BUTTONS

@@ -619,7 +619,7 @@ def setup():
     global HOME_BUTTON
     HOME_BUTTON = Button(10, 10, 100, 100, "assets/retBut.png", "assets/retBut_clicked.png", ret)
     global BACKGROUNDS
-    BACKGROUNDS = {"Sea": pygame.image.load("assets/jetStream/sea.png"), "Grass": pygame.image.load("assets/jetStream/grass.png")}
+    BACKGROUNDS = {"Sea": pygame.image.load("assets/jetStream/sea.png"), "Grass": pygame.image.load("assets/hungryHedgie/grass.png")}
 
     global FIGHTER_IMAGES
     FIGHTER_IMAGES = {

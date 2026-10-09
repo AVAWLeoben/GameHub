@@ -1,0 +1,77 @@
+{
+  "method": "SHA-256 identical bytes; no image transformations",
+  "original_bytes": 108941323,
+  "new_bytes": 101435328,
+  "removed_asset_bytes": 7506105,
+  "removed_assets_count": 17,
+  "changed_source_files": [
+    {
+      "file": "wasteTrain.py",
+      "replacements": {
+        "assets/wasteTrain/grass.png": 1
+      }
+    },
+    {
+      "file": "wasteTeroids.py",
+      "replacements": {
+        "assets/wasteTeroids/Asteroid.png": 1
+      }
+    },
+    {
+      "file": "wasteHog.py",
+      "replacements": {
+        "assets/wasteHog/sack.png": 1,
+        "assets/wasteHog/idle_christmas.png": 1
+      }
+    },
+    {
+      "file": "wasteJump.py",
+      "replacements": {
+        "assets/wasteJump/start.png": 2
+      }
+    },
+    {
+      "file": "wasteCollect.py",
+      "replacements": {
+        "dynamic wasteCollect/banana,can,paperbox": 1
+      }
+    },
+    {
+      "file": "jetStream.py",
+      "replacements": {
+        "assets/jetStream/grass.png": 1
+      }
+    },
+    {
+      "file": "wasteRace.py",
+      "replacements": {
+        "assets/wasteRace/road.png": 1,
+        "assets/wasteRace/truck.png": 2,
+        "assets/wasteRace/empty.png": 1,
+        "assets/wasteRace/full.png": 1
+      }
+    }
+  ],
+  "redirected_assets": {
+    "assets/wasteRace/road.png": "assets/road.png",
+    "assets/jetStream/grass.png": "assets/hungryHedgie/grass.png",
+    "assets/wasteTrain/grass.png": "assets/hungryHedgie/grass.png",
+    "assets/wasteJump/start.png": "assets/star.png",
+    "assets/player.png": "assets/card_1.png",
+    "assets/treasure.png": "assets/card_1.png",
+    "assets/wasteRace/truck.png": "assets/truck.png",
+    "assets/wasteRace/empty.png": "assets/wasteBin_empty.png",
+    "assets/wasteHog/sack.png": "assets/hungryHedgie/sack.png",
+    "assets/wasteRace/full.png": "assets/wasteBin_full.png",
+    "assets/wasteCollect/can.png": "assets/can.png",
+    "assets/wasteCollect/banana.png": "assets/banana.png",
+    "assets/wasteBird/idle_christmas.png": "assets/hungryHedgie/hedgie.png",
+    "assets/wasteHog/idle_christmas.png": "assets/hungryHedgie/hedgie.png",
+    "assets/wasteCollect/paperbox.png": "assets/paperbox.png",
+    "assets/wasteTeroids/Asteroid.png": "assets/Asteroid.png",
+    "assets/wasteHedge/idle.png": "assets/wasteHog/idle.png"
+  },
+  "all_remaining_assets_hash_unique": true,
+  "static_image_literal_paths_resolved": true,
+  "browser_gameplay_tested": false
+}

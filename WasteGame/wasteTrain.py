@@ -328,7 +328,7 @@ class Train:
 
 def loadImages():
     global BACKGROUND, RAILROAD_CROSSING_IMAGE, RAILROAD_IMAGES, STATION_IMAGE, WAGON_IMAGE
-    BACKGROUND = pygame.image.load("assets/wasteTrain/grass.png")
+    BACKGROUND = pygame.image.load("assets/hungryHedgie/grass.png")
     RAILROAD_CROSSING_IMAGE = pygame.image.load("assets/wasteTrain/rail_Crossing.png")
     RAILROAD_VERTICAL_IMAGE = pygame.image.load("assets/wasteTrain/track.png")
     RAILROAD_HORIZONTAL_IMAGE = pygame.transform.rotate(RAILROAD_VERTICAL_IMAGE, 90)

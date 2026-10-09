@@ -19,7 +19,7 @@ def ret():
 
 class Target:
     IMAGES = [
-        pygame.image.load("assets/wasteTeroids/Asteroid.png"),
+        pygame.image.load("assets/Asteroid.png"),
         pygame.image.load("assets/wasteTeroids/Asteroid2.png"),
         pygame.image.load("assets/wasteTeroids/Asteroid3.png"),
         pygame.image.load("assets/wasteTeroids/Asteroid4.png"),

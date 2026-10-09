@@ -208,7 +208,9 @@ def loadImages():
     ]
     for path in paths:
         if path.endswith(".png"):
-            path = "assets/wasteCollect/" + path
+            # Reuse the shared images instead of bundling duplicate copies.
+            folder = "assets/" if path in ("banana.png", "can.png", "paperbox.png") else "assets/wasteCollect/"
+            path = folder + path
             IMAGES.append(pygame.image.load(path))
 
 
@@ -223,7 +225,7 @@ async def main(screen, clock):
     SCORE = 0
     MAXOBJECTS = max(1, max(SCORE, 1) // 10)
     spawnNewObjects()
-    BACKGROUND = pygame.image.load("assets/wasteCollect/background/background.png")
+    BACKGROUND = pygame.image.load("assets/wasteCollect/background/background.jpg")
     BACKGROUND = pygame.transform.scale(BACKGROUND, (800, 600))
     while RUNNING:
         CLOCK.tick(FPS)

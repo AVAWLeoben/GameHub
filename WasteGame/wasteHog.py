@@ -57,7 +57,7 @@ class Background:
 
 class Santas_Bag:
     def __init__(self):
-        self.image = pygame.image.load("assets/wasteHog/sack.png")
+        self.image = pygame.image.load("assets/hungryHedgie/sack.png")
         self.x = SCREEN.get_width() - self.image.get_width()
         self.y = 0
         self.rect = self.image.get_rect(topleft=(self.x, self.y))
@@ -224,7 +224,7 @@ class Camera:
 
 class Player:
     def __init__(self,x,y,w=80,h=60):
-        self.image = pygame.image.load("assets/wasteHog/idle_christmas.png")
+        self.image = pygame.image.load("assets/hungryHedgie/hedgie.png")
         self.x = x
         self.y = y
         self.w = w

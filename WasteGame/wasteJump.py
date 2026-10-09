@@ -217,7 +217,7 @@ def setup():
     global START_BUTTON, HOME_BUTTON, IMAGES, FLOOR, FLOORUPPER, OBSTACLES, PLAYER, SCORE, BACKGROUND, BACKGROUND_OFFSET
     BACKGROUND_OFFSET = 0
     SCORE = 0
-    START_BUTTON = Button(400, 400, 100, 100, "assets/wasteJump/start.png", "assets/wasteJump/start.png", start_button)
+    START_BUTTON = Button(400, 400, 100, 100, "assets/star.png", "assets/star.png", start_button)
     HOME_BUTTON = Button(10, 10, 100, 100, "assets/retBut.png", "assets/retBut_clicked.png", ret)
     BACKGROUND = pygame.image.load("assets/wasteJump/background.png")
     FLOOR = pygame.Rect(0, 500, 800, 100)
