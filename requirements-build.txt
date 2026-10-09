@@ -1,0 +1,5 @@
+# Build-only tools installed into .venv-build/ by prepare_build_env.py.
+# Keep Pygbag 0.9.2: tested HTML post-processing expects its loader layout.
+# Versions are pinned for consistent output across machines.
+pygbag==0.9.2
+pygame-ce==2.5.8

@@ -1,0 +1,4 @@
+# Optional: after the GitHub Pages game is live, put its full direct URL below.
+# Example: https://YOUR-GITHUB-USERNAME.github.io/GameHub/
+# With that URL, your itch.io iframe can show a subtle link to install the direct web app.
+# Leave this file comments-only until your actual URL is known.
