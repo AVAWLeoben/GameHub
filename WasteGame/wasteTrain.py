@@ -1,4 +1,4 @@
-"""WasteTrain 2.2 — creative railway sandbox for young children.
+"""WasteTrain 2.3 — creative railway sandbox for young children.
 
 Classic grid building and finger-drawn spline rails coexist in one railway graph.
 Scenery/stations are loaded from assets/wasteTrain; grass keeps its old asset.
@@ -7,6 +7,8 @@ Drop-in GameHub entry point: await wasteTrain.main(screen, clock).
 Controls: TILES / DRAW / ERASE / MOVE, two-finger pan, NEW (twice to confirm).
 Station, bridge and horizontal tunnel ports are ready-made snap nodes.
 Tracks are generated in Pygame as connected polylines, not tile PNGs.
+Version 2.3: correctly scaled gauge, upright sprite rotation, continuous rides,
+zoom controls/mouse wheel/pinch and optional train-following camera.
 A tunnel is one continuous left-to-right structure with a hidden traversable
 rail edge; trains vanish beneath the hill and reappear on the other side.
 Trains automatically follow connected rail lines, without goals.
@@ -26,7 +28,11 @@ FPS = 60
 COLS, ROWS, CELL = 27, 20, 55
 WORLD_W, WORLD_H = COLS * CELL, ROWS * CELL
 TOPBAR = 70
-SNAP_RADIUS = 33.0
+SNAP_RADIUS = 39.0
+# Rail gauge and sleepers are intentionally about twice their previous size.
+RAIL_HALF_GAUGE = 12.0
+TIE_HALF_LENGTH = 20.0
+ZOOM_MAX = 1.55
 GUIDE_TIME_MS = 6500
 GRASS_FALLBACK = (119, 180, 105)
 BROWN = (124, 76, 39)
@@ -314,7 +320,7 @@ def rail_paths(network):
     return paths
 
 
-def rail_offsets(points, half_width=6.0):
+def rail_offsets(points, half_width=RAIL_HALF_GAUGE):
     """Miter-joined parallel rails, with safe handling of sharp turns."""
     if len(points)<2:
         return [],[]
@@ -351,16 +357,16 @@ def paint_rail_network(surface,network):
     # one segment's ballast covering its neighbor's rails at connections.
     for path in paths:
         if len(path)<2:continue
-        pygame.draw.lines(surface,(123,96,70),False,path,23)
+        pygame.draw.lines(surface,(123,96,70),False,path,44)
         for p in path:
-            pygame.draw.circle(surface,(123,96,70),(round(p[0]),round(p[1])),11)
-        pygame.draw.lines(surface,(212,185,132),False,path,18)
+            pygame.draw.circle(surface,(123,96,70),(round(p[0]),round(p[1])),22)
+        pygame.draw.lines(surface,(212,185,132),False,path,36)
         for p in path:
-            pygame.draw.circle(surface,(212,185,132),(round(p[0]),round(p[1])),9)
-    # Lay sleepers every 13 world pixels along each uninterrupted route.
+            pygame.draw.circle(surface,(212,185,132),(round(p[0]),round(p[1])),18)
+    # Lay sleepers every 15 world pixels along each uninterrupted route.
     # No extra 'first sleeper' at every classic-grid tile boundary.
     for path in paths:
-        distance_to_next=4.0
+        distance_to_next=5.0
         for a,b in zip(path,path[1:]):
             span=dst(a,b)
             if span<.001:continue
@@ -369,155 +375,195 @@ def paint_rail_network(surface,network):
             step=distance_to_next
             while step<=span+0.0001:
                 q=between(a,b,step/span)
-                p1=(q[0]+nx*10.5,q[1]+ny*10.5)
-                p2=(q[0]-nx*10.5,q[1]-ny*10.5)
-                pygame.draw.line(surface,(112,66,43),p1,p2,5)
-                pygame.draw.line(surface,(183,117,66),p1,p2,2)
-                step+=13.
+                p1=(q[0]+nx*TIE_HALF_LENGTH,q[1]+ny*TIE_HALF_LENGTH)
+                p2=(q[0]-nx*TIE_HALF_LENGTH,q[1]-ny*TIE_HALF_LENGTH)
+                pygame.draw.line(surface,(112,66,43),p1,p2,7)
+                pygame.draw.line(surface,(183,117,66),p1,p2,3)
+                step+=15.
             distance_to_next=step-span
     # Miter joins match adjacent track pieces exactly. Round endpoints prevent
     # 1px seams caused by integer rasterization at multiway junctions.
     for path in paths:
-        left,right=rail_offsets(path,6.)
+        left,right=rail_offsets(path,RAIL_HALF_GAUGE)
         for rail in (left,right):
             if len(rail)<2:continue
-            pygame.draw.lines(surface,(51,64,72),False,rail,5)
-            pygame.draw.lines(surface,(230,237,235),False,rail,2)
+            pygame.draw.lines(surface,(51,64,72),False,rail,7)
+            pygame.draw.lines(surface,(230,237,235),False,rail,3)
             for p in (rail[0],rail[-1]):
-                pygame.draw.circle(surface,(80,91,93),(round(p[0]),round(p[1])),3)
-                pygame.draw.circle(surface,(230,237,235),(round(p[0]),round(p[1])),1)
+                pygame.draw.circle(surface,(80,91,93),(round(p[0]),round(p[1])),4)
+                pygame.draw.circle(surface,(230,237,235),(round(p[0]),round(p[1])),2)
 
 
 class ToyTrain:
+    """A single continuous, unteleporting train on the connected rail graph.
+
+    Active rides persist when rails are edited. At a terminus, the new ride
+    starts at the SAME graph node or the train pauses; it never respawns on
+    a remote track, nor moves to another connected component unexpectedly.
+    """
+
     def __init__(self, net, stations, rng, focus=None):
         self.net, self.stations, self.rng = net, stations, rng
         self.focus = key(focus) if focus is not None else None
-        self.nodes=[]
-        self.distances=[]
-        self.length=0.0
-        self.travel=0.0
-        self.speed=105.0
-        self.destination=None
-        self.active=True
-        self.wagons=['wagon_passenger_red','wagon_passenger_blue','wagon_freight_green']
-        self.odometer=0.0
-        self.history=[]
+        self.pending_net = None
+        self.nodes = []
+        self.distances = []
+        self.length = 0.0
+        self.travel = 0.0
+        self.speed = 66.0  # Child-friendly: slow enough to follow by eye.
+        self.destination = None
+        self.active = True
+        self.wait_at_end = 0.0
+        self.stopped = False
+        self.wagons = ['wagon_passenger_red', 'wagon_passenger_blue',
+                       'wagon_freight_green']
+        self.odometer = 0.0
+        self.history = []
         self.choose_new_ride()
-        first=self.sample(0)
+        first = self.sample(0)
         if first is not None:
-            self.history=[(0.0,first)]
+            self.history = [(0.0, first)]
+
+    def queue_network(self, new_net):
+        """Use changed geometry after the current journey finishes."""
+        self.pending_net = new_net
+
+    def set_route(self, path):
+        self.nodes = path
+        self.distances = [0.0]
+        for a, b in zip(path, path[1:]):
+            self.distances.append(self.distances[-1] + dst(a, b))
+        self.length = self.distances[-1]
+        self.travel = 0.0
+        self.destination = path[-1]
+        self.stopped = False
 
     def choose_new_ride(self, source=None):
-        net=self.net
-        ports=[key(p) for p in self.stations]
-        components=[]
-        examined=set()
-        for node in net.graph:
-            if node in examined:
-                continue
-            component=net.reachable(node)
-            examined.update(component)
-            if len(component)>1:
-                components.append(component)
+        net = self.net
+        ports = [key(p) for p in self.stations]
+        # A source means the current train already exists. Never select a new
+        # disconnected component in that case.
+        if source is not None:
+            source = key(source)
+            if source not in net.graph or not net.graph[source]:
+                self.stopped = True
+                return False
+            components = [net.reachable(source)]
+        else:
+            components = []
+            examined = set()
+            for node in net.graph:
+                if node in examined:
+                    continue
+                component = net.reachable(node)
+                examined.update(component)
+                if len(component) > 1:
+                    components.append(component)
+            if self.focus is not None and components:
+                closest = min(net.graph, key=lambda p: dst(p, self.focus))
+                focused = [c for c in components if closest in c]
+                if focused and dst(closest, self.focus) <= CELL:
+                    components = focused
         if not components:
-            self.nodes=[]
-            self.length=0
-            return
-        if self.focus is not None and source is None and net.graph:
-            closest=min(net.graph, key=lambda p:dst(p,self.focus))
-            if dst(closest,self.focus)<=CELL:
-                focused=[component for component in components if closest in component]
-                if focused:
-                    components=focused
-        candidates=[]
-        # Prefer routes between stations, but also travel on standalone tracks.
+            self.stopped = True
+            return False
+        candidates = []
         for component in components:
-            stops=[s for s in ports if s in component and len(net.graph[s])>0]
-            if source in component:
-                start=source
-            elif stops:
-                start=self.rng.choice(stops)
-            else:
-                start=min(component)
-            stops=[s for s in stops if s!=start]
-            if stops:
-                for stop in stops:
-                    path=net.path(start,stop)
-                    length=sum(dst(a,b) for a,b in zip(path,path[1:]))
-                    if length >= CELL*1.6:
-                        bonus=50 if any(net.graph[a][b][1]=='tunnel' for a,b in zip(path,path[1:])) else 0
-                        candidates.append((length+bonus, path))
-            # Nearest available track dead end / distant point if no station route.
-            if not stops:
-                end=max(component,key=lambda p:dst(start,p))
-                path=net.path(start,end)
-                if len(path)>1:
-                    length=sum(dst(a,b) for a,b in zip(path,path[1:]))
-                    if length>=CELL*1.6:
+            stops = [p for p in ports if p in component and net.graph[p]]
+            start = source if source is not None else (
+                self.rng.choice(stops) if stops else min(component))
+            # Prefer rides that visit a different station; otherwise follow a
+            # connected track to its farthest point, including short ones.
+            targets = [p for p in stops if p != start]
+            if not targets:
+                farthest = max(component, key=lambda p: dst(start,p))
+                if farthest != start:
+                    targets = [farthest]
+                else:
+                    targets = [p for p in net.graph[start] if p != start]
+            for end in targets:
+                path = net.path(start, end)
+                if len(path) >= 2:
+                    length = sum(dst(a,b) for a,b in zip(path,path[1:]))
+                    if length > 1.0:
                         candidates.append((length,path))
         if not candidates:
-            self.nodes=[]
-            return
-        # Mix journeys instead of always picking the same longest route.
-        candidates.sort(key=lambda pair:pair[0],reverse=True)
-        self.nodes=self.rng.choice(candidates[:min(4,len(candidates))])[1]
-        self.destination=self.nodes[-1]
-        self.distances=[0.0]
-        for a,b in zip(self.nodes,self.nodes[1:]):
-            self.distances.append(self.distances[-1]+dst(a,b))
-        self.length=self.distances[-1]
-        self.travel=0.0
+            self.stopped = True
+            return False
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        chosen = self.rng.choice(candidates[:min(3,len(candidates))])[1]
+        assert source is None or chosen[0] == source, 'Route must remain continuous'
+        self.set_route(chosen)
+        return True
 
-    def update(self,dt):
-        if not self.active or len(self.nodes)<2:
+    def change_at_terminus(self):
+        endpoint = self.destination
+        if self.pending_net is not None:
+            pending = self.pending_net
+            self.pending_net = None
+            # Change networks only when the current endpoint still exists.
+            # Otherwise freeze in place, rather than jumping to a new segment.
+            if endpoint in pending.graph and pending.graph[endpoint]:
+                self.net = pending
+            else:
+                self.stopped = True
+                return
+        self.choose_new_ride(endpoint)
+
+    def update(self, dt):
+        if not self.active or self.stopped or len(self.nodes) < 2:
             return
-        remaining=self.speed*dt
-        while remaining>0.0001 and len(self.nodes)>=2:
-            delta=min(remaining,max(0.,self.length-self.travel))
-            self.travel+=delta
-            self.odometer+=delta
-            sampled=self.sample(self.travel)
+        if self.wait_at_end > 0.0:
+            self.wait_at_end -= dt
+            if self.wait_at_end <= 0.0:
+                self.change_at_terminus()
+            return
+        remaining = self.speed * dt
+        while remaining > 0.0001 and not self.stopped:
+            delta = min(remaining, max(0.0, self.length-self.travel))
+            self.travel += delta
+            self.odometer += delta
+            sampled = self.sample(self.travel)
             if sampled is not None:
                 self.history.append((self.odometer,sampled))
-            remaining-=delta
+            remaining -= delta
             if self.travel >= self.length-0.001:
-                self.choose_new_ride(self.destination)
-                if len(self.nodes)<2 or self.length<.001:
-                    break
-        # Keep just enough rail history for the last wagon plus a buffer.
-        cutoff=self.odometer-(len(self.wagons)*53+85)
-        while len(self.history)>2 and self.history[1][0]<cutoff:
+                self.wait_at_end = 0.5
+                break
+        cutoff = self.odometer - (len(self.wagons)*58 + 115)
+        while len(self.history) > 2 and self.history[1][0] < cutoff:
             self.history.pop(0)
 
-    def wagon_sample(self,offset):
-        """Follow recorded rails across station turns and tunnel transitions."""
-        wanted=self.odometer-offset
-        if wanted<0 or not self.history or wanted<self.history[0][0]:
+    def wagon_sample(self, offset):
+        """Return previous distance along the *actual traversed route*."""
+        wanted = self.odometer-offset
+        if wanted < 0 or not self.history or wanted < self.history[0][0]:
             return None
         for j in range(len(self.history)-1):
-            before,a=self.history[j]
-            after,b=self.history[j+1]
-            if wanted<=after:
-                t=max(0.,min(1.,(wanted-before)/max(.0001,after-before)))
-                p=between(a[0],b[0],t)
-                angle=-math.degrees(math.atan2(b[0][1]-a[0][1],b[0][0]-a[0][0])) if dst(a[0],b[0])>.01 else a[1]
-                kind=a[2] if t<0.5 else b[2]
+            before,a = self.history[j]
+            after,b = self.history[j+1]
+            if wanted <= after:
+                t = max(0.,min(1.,(wanted-before)/max(.0001,after-before)))
+                p = between(a[0],b[0],t)
+                # Angle of the *local traveled path*, not a random destination.
+                angle = (-math.degrees(math.atan2(b[0][1]-a[0][1],
+                            b[0][0]-a[0][0])) if dst(a[0],b[0]) > .01 else a[1])
+                kind = a[2] if t < 0.5 else b[2]
                 return p,angle,kind
         return self.history[-1][1]
 
     def sample(self, travelled):
-        if len(self.nodes)<2:
+        if len(self.nodes) < 2:
             return None
-        travelled=max(0.,min(self.length,travelled))
-        # Small track network, linear scan is faster than allocating bisectors.
+        travelled = max(0.,min(self.length,travelled))
         for i in range(len(self.nodes)-1):
-            start,end=self.distances[i:i+2]
-            if travelled<=end or i==len(self.nodes)-2:
-                t=(travelled-start)/max(.001,end-start)
-                a,b=self.nodes[i:i+2]
-                pos=between(a,b,t)
-                angle=-math.degrees(math.atan2(b[1]-a[1],b[0]-a[0]))
-                kind=self.net.graph[a][b][1]
+            start,end = self.distances[i:i+2]
+            if travelled <= end or i == len(self.nodes)-2:
+                t = (travelled-start)/max(.001,end-start)
+                a,b = self.nodes[i:i+2]
+                pos = between(a,b,t)
+                angle = -math.degrees(math.atan2(b[1]-a[1],b[0]-a[0]))
+                kind = self.net.graph[a][b][1]
                 return pos,angle,kind
         return None
 
@@ -528,6 +574,10 @@ class WasteTrainWorld:
         self.sw,self.sh=screen.get_size()
         self.viewport=pygame.Rect(0,TOPBAR,self.sw,max(1,self.sh-TOPBAR))
         self.camera=[65.,70.]
+        self.zoom=1.0
+        self.follow_train=False
+        self.world_canvas=None
+        self.draw_surface=None
         self.font=pygame.font.Font(None,22)
         self.titlefont=pygame.font.Font(None,28)
         self.rng=random.Random()
@@ -586,7 +636,7 @@ class WasteTrainWorld:
         """
         src=self.assets.get(sprite_name)
         if src is None:
-            self.draw_track((self.to_screen(a),self.to_screen(b)),self.screen)
+            self.draw_track((self.to_screen(a),self.to_screen(b)),self.draw_surface)
             return
         left,right=self.structure_anchors(sprite_name)
         span=right[0]-left[0]
@@ -598,10 +648,10 @@ class WasteTrainWorld:
             self.structure_cache[cache_key]=pygame.transform.smoothscale(src,(width,height))
         sprite=self.structure_cache[cache_key]
         x=round(a[0]-width*left[0]-self.camera[0])
-        y=round(a[1]-height*left[1]-self.camera[1]+TOPBAR)
+        y=round(a[1]-height*left[1]-self.camera[1])
         rect=pygame.Rect(x,y,width,height)
-        if rect.colliderect(self.viewport):
-            self.screen.blit(sprite,rect)
+        if rect.colliderect(self.draw_surface.get_rect()):
+            self.draw_surface.blit(sprite,rect)
 
     def asset_candidates(self,relative):
         """Pygbag often uses a virtual cwd; try both module and cwd assets."""
@@ -794,15 +844,32 @@ class WasteTrainWorld:
         self.camera[1]=70.0
         self.clamp_cam()
 
+    def minimum_zoom(self):
+        # At minimum zoom the world fills the viewport without stretching or
+        # exposing empty terrain beyond the map edges.
+        return min(1., max(0.48, self.viewport.width/WORLD_W,
+                           self.viewport.height/WORLD_H))
+
     def clamp_cam(self):
-        self.camera[0]=max(0.,min(float(max(0,WORLD_W-self.viewport.width)),self.camera[0]))
-        self.camera[1]=max(0.,min(float(max(0,WORLD_H-self.viewport.height)),self.camera[1]))
+        self.zoom=max(self.minimum_zoom(),min(ZOOM_MAX,self.zoom))
+        self.camera[0]=max(0.,min(float(max(0,WORLD_W-self.viewport.width/self.zoom)),self.camera[0]))
+        self.camera[1]=max(0.,min(float(max(0,WORLD_H-self.viewport.height/self.zoom)),self.camera[1]))
 
     def from_screen(self,p):
-        return (p[0]+self.camera[0],p[1]-TOPBAR+self.camera[1])
+        return (p[0]/self.zoom+self.camera[0],
+                (p[1]-TOPBAR)/self.zoom+self.camera[1])
 
     def to_screen(self,p):
-        return (p[0]-self.camera[0],p[1]-self.camera[1]+TOPBAR)
+        """World coordinates to the unscaled, camera-cropped rendering canvas."""
+        return (p[0]-self.camera[0],p[1]-self.camera[1])
+
+    def zoom_at(self,factor,screen_center):
+        """Zoom anchored at a finger/mouse location to avoid map jumping."""
+        old_point=self.from_screen(screen_center)
+        self.zoom=max(self.minimum_zoom(),min(ZOOM_MAX,self.zoom*factor))
+        self.camera[0]=old_point[0]-screen_center[0]/self.zoom
+        self.camera[1]=old_point[1]-(screen_center[1]-TOPBAR)/self.zoom
+        self.clamp_cam()
 
     def inside(self,p):
         return 0<=p[0]<WORLD_W and 0<=p[1]<WORLD_H
@@ -862,13 +929,21 @@ class WasteTrainWorld:
 
     def commit(self):
         if self.active_rail:
-            self.net.rebuild(self.grid,self.curves,self.station_ports,self.tunnels,self.bridge)
-            self.train=ToyTrain(self.net,self.station_ports,self.rng,
-                                focus=self.last_change_point)
-            self.train.active=True
-            self.train.wagons=self.rng.sample(
-                ('wagon_passenger_red','wagon_passenger_blue','wagon_freight_green',
-                 'wagon_logs','wagon_tanker_gold','wagon_coal_gray'),3)
+            new_net=RailNetwork()
+            new_net.rebuild(self.grid,self.curves,self.station_ports,self.tunnels,self.bridge)
+            self.net=new_net
+            if (self.train.active and not self.train.stopped
+                    and len(self.train.nodes) >= 2):
+                # Don't respawn the locomotive on every child tap! It finishes
+                # its present ride; the revised network is used at the next stop.
+                self.train.queue_network(self.net)
+            else:
+                self.train=ToyTrain(self.net,self.station_ports,self.rng,
+                                    focus=self.last_change_point)
+                self.train.active=True
+                self.train.wagons=self.rng.sample(
+                    ('wagon_passenger_red','wagon_passenger_blue','wagon_freight_green',
+                     'wagon_logs','wagon_tanker_gold','wagon_coal_gray'),3)
             self.refresh_track_layer()
         self.active_rail=None
 
@@ -880,6 +955,12 @@ class WasteTrainWorld:
                 if name in ('grid','free','erase','move'):
                     self.mode=name
                     self.guide_until=pygame.time.get_ticks()+GUIDE_TIME_MS
+                elif name=='follow':
+                    self.follow_train=not self.follow_train
+                elif name=='zoom_in':
+                    self.zoom_at(1.25,(self.sw/2,self.viewport.centery))
+                elif name=='zoom_out':
+                    self.zoom_at(1/1.25,(self.sw/2,self.viewport.centery))
                 elif name=='new':
                     now=pygame.time.get_ticks()
                     if getattr(self,'confirm_until',0)>now:
@@ -959,14 +1040,16 @@ class WasteTrainWorld:
         self.commit()
 
     def pan(self,dx,dy):
-        self.camera[0]-=dx
-        self.camera[1]-=dy
+        self.follow_train=False
+        self.camera[0]-=dx/self.zoom
+        self.camera[1]-=dy/self.zoom
         self.clamp_cam()
 
     def resize(self,screen):
         self.screen=screen
         self.sw,self.sh=screen.get_size()
         self.viewport=pygame.Rect(0,TOPBAR,self.sw,max(1,self.sh-TOPBAR))
+        self.world_canvas=None
         self.clamp_cam()
 
     def static_image(self,name,p,base_angle=0):
@@ -975,7 +1058,7 @@ class WasteTrainWorld:
             if name in ('station_old','station_blue','station_red','station_green'):
                 rect=pygame.Rect(0,0,140,76)
                 rect.midbottom=(int(self.to_screen(p)[0]),int(self.to_screen(p)[1]))
-                pygame.draw.rect(self.screen,(215,115,83),rect,border_radius=8)
+                pygame.draw.rect(self.draw_surface,(215,115,83),rect,border_radius=8)
             return
         if base_angle:
             cache_key=(name,base_angle)
@@ -992,8 +1075,8 @@ class WasteTrainWorld:
         r=pygame.Rect(round(sx-img.get_width()*anchor[0]),
                       round(sy-img.get_height()*anchor[1]),
                       img.get_width(),img.get_height())
-        if r.colliderect(self.viewport):
-            self.screen.blit(img,r)
+        if r.colliderect(self.draw_surface.get_rect()):
+            self.draw_surface.blit(img,r)
 
     def make_train_fallback(self,name):
         """Friendly procedural backup: never show cryptic red circles."""
@@ -1025,16 +1108,27 @@ class WasteTrainWorld:
             if name not in self.fallback_trains:
                 self.fallback_trains[name]=self.make_train_fallback(name)
             image=self.fallback_trains[name]
-        # The source side-on sprites face right at 0 degrees.
-        quant=int(round(angle/4.0))*4
-        k=(name,quant)
-        if k not in self.rotate_cache:
-            self.rotate_cache[k]=pygame.transform.rotate(image,quant)
-        rotated=self.rotate_cache[k]
+        # Generated sprites are side views, not overhead views. Rotating them
+        # through 180 degrees puts wheels on the roof. Instead, mirror the
+        # sprite when it faces left and tilt by at most 36 degrees for slopes.
+        # angle is the direction of forward motion in pygame rotation degrees.
+        rad=math.radians(angle)
+        dx=math.cos(rad)
+        dy=-math.sin(rad)
+        face_left=dx < -0.035
+        tilt=math.degrees(math.atan2(dy,max(0.2,abs(dx))))
+        tilt=max(-36.,min(36.,tilt))
+        spin=tilt if face_left else -tilt
+        quant=int(round(spin/3.0))*3
+        cache_key=(name,quant,face_left)
+        if cache_key not in self.rotate_cache:
+            oriented=pygame.transform.flip(image,True,False) if face_left else image
+            self.rotate_cache[cache_key]=pygame.transform.rotate(oriented,quant)
+        rotated=self.rotate_cache[cache_key]
         xy=self.to_screen(p)
         r=rotated.get_rect(center=(int(xy[0]),int(xy[1])))
-        if r.colliderect(self.viewport):
-            self.screen.blit(rotated,r)
+        if r.colliderect(self.draw_surface.get_rect()):
+            self.draw_surface.blit(rotated,r)
 
     def draw_track(self,points,surface):
         """Fallback for a structure whose image was not installed."""
@@ -1043,13 +1137,13 @@ class WasteTrainWorld:
         a,b=points[0],points[-1]
         if dst(a,b)<2:
             return
-        pygame.draw.line(surface,(128,87,54),a,b,21)
-        pygame.draw.line(surface,(218,197,147),a,b,16)
+        pygame.draw.line(surface,(128,87,54),a,b,44)
+        pygame.draw.line(surface,(218,197,147),a,b,36)
         for sign in (-1,1):
             nx,ny=-(b[1]-a[1])/dst(a,b),(b[0]-a[0])/dst(a,b)
-            shift=(nx*sign*6,ny*sign*6)
+            shift=(nx*sign*RAIL_HALF_GAUGE,ny*sign*RAIL_HALF_GAUGE)
             pygame.draw.line(surface,(52,65,70),(a[0]+shift[0],a[1]+shift[1]),
-                             (b[0]+shift[0],b[1]+shift[1]),4)
+                             (b[0]+shift[0],b[1]+shift[1]),6)
 
     def refresh_track_layer(self):
         self.track_layer=pygame.Surface((WORLD_W,WORLD_H),pygame.SRCALPHA)
@@ -1058,7 +1152,7 @@ class WasteTrainWorld:
         for name,p in self.scenery:
             if name=='pond':
                 continue
-            if self.near_track(p,31):
+            if self.near_track(p,45):
                 continue
             self.visible_scenery.append((name,p))
 
@@ -1072,21 +1166,35 @@ class WasteTrainWorld:
         return False
 
     def draw_world(self):
-        s=self.screen
-        s.set_clip(self.viewport)
-        # Copy only the visible part of the larger, original grass background.
+        # A camera-cropped, unscaled canvas keeps all sprite anchors, track
+        # widths, collision/snap points and rail geometry in WORLD coordinates.
+        # We then scale exactly once to the visible viewport. Rendering a large
+        # cached world (rather than zooming each sprite independently) avoids
+        # misalignment between classic/freeform rails and tunnel artwork.
+        vw=min(WORLD_W, max(1, int(math.ceil(self.viewport.width/self.zoom))))
+        vh=min(WORLD_H, max(1, int(math.ceil(self.viewport.height/self.zoom))))
+        # Keep a single backing surface; frequent pinch-zoom events should not
+        # allocate a several-megabyte framebuffer on every FINGERMOTION.
+        if self.world_canvas is None:
+            self.world_canvas=pygame.Surface((WORLD_W,WORLD_H)).convert()
+        s=self.world_canvas.subsurface(pygame.Rect(0,0,vw,vh))
+        self.draw_surface=s
+        s.fill(GRASS_FALLBACK)
+        s.set_clip(s.get_rect())
         box=pygame.Rect(round(self.camera[0]),round(self.camera[1]),
-                        min(self.sw,WORLD_W),min(self.viewport.height,WORLD_H))
-        s.blit(self.grass,(0,TOPBAR),box)
-        # Grid is an alpha overlay, never a field of opaque tiles.
-        if self.mode=='grid' and pygame.time.get_ticks()<self.guide_until:
-            s.blit(self.guide,(0,TOPBAR),box)
-        # Pond first, before rail/bridge.
+                        min(vw,WORLD_W-round(self.camera[0])),
+                        min(vh,WORLD_H-round(self.camera[1])))
+        if box.width>0 and box.height>0:
+            s.blit(self.grass,(0,0),box)
+            if self.mode=='grid' and pygame.time.get_ticks()<self.guide_until:
+                s.blit(self.guide,(0,0),box)
+        # Layer ordering: pond under rails; structures above tracks; trains on
+        # top except for hidden portions of tunnel segments.
         for name,p in self.scenery:
             if name=='pond':
                 self.static_image(name,p)
-        # Rails cached in one alpha surface after construction changes.
-        s.blit(self.track_layer,(0,TOPBAR),box)
+        if box.width>0 and box.height>0:
+            s.blit(self.track_layer,(0,0),box)
         self.draw_structure('bridge_horizontal',*self.bridge)
         for name,p in self.visible_scenery:
             self.static_image(name,p)
@@ -1094,14 +1202,11 @@ class WasteTrainWorld:
             self.static_image(name,self.pos(tile))
         for a,b in self.tunnels:
             self.draw_structure('tunnel_horizontal',a,b)
-        # Preview with a warm yellow line while the player draws a free curve.
         if len(self.stroke)>1:
             pygame.draw.lines(s,(255,231,99),False,[self.to_screen(q) for q in self.stroke],7)
         if self.train.active and len(self.train.nodes)>=2:
-            # Wagons at fixed distance behind the locomotive. Invisible when
-            # inside a tunnel (actual hidden graph edge), like the locomotive.
             for offset,name in reversed(list(enumerate(self.train.wagons,start=1))):
-                sampled=self.train.wagon_sample(offset*53)
+                sampled=self.train.wagon_sample(offset*58)
                 if sampled:
                     p,angle,kind=sampled
                     if kind!='tunnel':
@@ -1112,6 +1217,13 @@ class WasteTrainWorld:
                 if kind!='tunnel':
                     self.train_sprite(self.locomotive_name,p,angle)
         s.set_clip(None)
+        # No world-space rounding is applied to individual assets while
+        # zooming; this shared resize keeps all rail joins registered.
+        if s.get_size()==self.viewport.size:
+            self.screen.blit(s,self.viewport.topleft)
+        else:
+            result=pygame.transform.smoothscale(s,self.viewport.size)
+            self.screen.blit(result,self.viewport.topleft)
 
     def draw_button_icon(self,name,x,y,color):
         """Large pictograms make the tools readable before children can read."""
@@ -1141,6 +1253,11 @@ class WasteTrainWorld:
                       ((x,y-13),(x-5,y-6),(x+5,y-6)),
                       ((x,y+13),(x-5,y+6),(x+5,y+6))):
                 draw.polygon(self.screen,color,p)
+        elif name=='follow':
+            draw.rect(self.screen,color,(x-12,y-6,19,12),border_radius=3)
+            draw.rect(self.screen,color,(x+2,y-10,10,10),border_radius=2)
+            for cx in (x-7,x+7):
+                draw.circle(self.screen,color,(cx,y+8),4)
         elif name=='new':
             draw.arc(self.screen,color,(x-10,y-10,20,20),.3,5.3,4)
             draw.polygon(self.screen,color,[(x+11,y+2),(x+12,y-9),(x+2,y-3)])
@@ -1149,17 +1266,18 @@ class WasteTrainWorld:
         s=self.screen
         pygame.draw.rect(s,(41,91,72),(0,0,self.sw,TOPBAR))
         labels=(('home','HOME'),('grid','TILES'),('free','DRAW'),
-                ('erase','ERASE'),('move','MOVE'),('new','NEW'))
+                ('erase','ERASE'),('move','MOVE'),('follow','TRAIN'),('new','NEW'))
         gap=8
         width=max(44,min(122,(self.sw-gap*(len(labels)+1))//len(labels)))
         x=max(4,(self.sw-(len(labels)*width+(len(labels)-1)*gap))//2)
         colors={'home':(230,129,60),'grid':(56,160,223),'free':(89,168,126),
-                'erase':(239,159,80),'move':(137,127,208),'new':(213,94,90)}
+                'erase':(239,159,80),'move':(137,127,208),'follow':(77,145,129),
+                'new':(213,94,90)}
         self.buttons={}
         for name,text in labels:
             r=pygame.Rect(x,9,width,49)
             self.buttons[name]=r
-            selected=name==self.mode
+            selected=(self.follow_train if name=='follow' else name==self.mode)
             pygame.draw.rect(s,(255,245,196) if selected else colors[name],r,border_radius=13)
             pygame.draw.rect(s,(255,255,255),r,2,border_radius=13)
             color=DARK if selected else (255,255,255)
@@ -1180,9 +1298,20 @@ class WasteTrainWorld:
             pygame.draw.circle(s,(219,89,80),(int(x),int(y)),4)
         area=pygame.Rect(rect.left+self.camera[0]/WORLD_W*mw,
                          rect.top+self.camera[1]/WORLD_H*mh,
-                         self.viewport.width/WORLD_W*mw,
-                         self.viewport.height/WORLD_H*mh)
+                         self.viewport.width/self.zoom/WORLD_W*mw,
+                         self.viewport.height/self.zoom/WORLD_H*mh)
         pygame.draw.rect(s,(65,116,218),area,2,border_radius=3)
+        # Accessible large +/- buttons, also usable with mouse wheel and pinch.
+        for key,sign,index in (('zoom_out','-',0),('zoom_in','+',1)):
+            zr=pygame.Rect(rect.left+index*64,rect.top-53,57,44)
+            self.buttons[key]=zr
+            pygame.draw.rect(s,(53,130,167),zr,border_radius=10)
+            pygame.draw.rect(s,(255,255,255),zr,2,border_radius=10)
+            txt=self.titlefont.render(sign,True,(255,255,255))
+            s.blit(txt,txt.get_rect(center=zr.center))
+        scale_text=self.font.render(str(round(self.zoom*100))+'%',True,DARK)
+        # Mini-map shows the visible area, taking the zoom factor into account.
+        s.blit(scale_text,scale_text.get_rect(midbottom=(rect.centerx,rect.top+20)))
         if self.missing_assets:
             # Children still get a playable procedural fallback, but parents
             # can identify the missing-asset deployment without opening logs.
@@ -1200,6 +1329,16 @@ class WasteTrainWorld:
 
     def update(self,dt):
         self.train.update(dt)
+        if self.follow_train and self.train.active and len(self.train.nodes)>=2:
+            sampled=self.train.sample(self.train.travel)
+            if sampled is not None:
+                position=sampled[0]
+                target_x=position[0]-self.viewport.width/(2*self.zoom)
+                target_y=position[1]-self.viewport.height/(2*self.zoom)
+                smooth=min(1.0,5.0*dt)
+                self.camera[0]+=(target_x-self.camera[0])*smooth
+                self.camera[1]+=(target_y-self.camera[1])*smooth
+                self.clamp_cam()
 
     def draw(self):
         self.draw_world()
@@ -1217,6 +1356,7 @@ async def main(screen,clock):
     touches={}
     drawing_finger=None
     last_centroid=None
+    last_pinch_distance=None
     suppress_mouse_until=0
     mouse_drag=False
     while active:
@@ -1227,6 +1367,10 @@ async def main(screen,clock):
             elif event.type==pygame.KEYDOWN:
                 if event.key==pygame.K_ESCAPE:
                     active=False
+                elif event.key in (pygame.K_PLUS,pygame.K_EQUALS,pygame.K_KP_PLUS):
+                    world.zoom_at(1.2,(world.sw/2,world.viewport.centery))
+                elif event.key in (pygame.K_MINUS,pygame.K_KP_MINUS):
+                    world.zoom_at(1/1.2,(world.sw/2,world.viewport.centery))
                 elif event.key in (pygame.K_LEFT,pygame.K_RIGHT,pygame.K_UP,pygame.K_DOWN):
                     arrows={pygame.K_LEFT:(45,0),pygame.K_RIGHT:(-45,0),
                             pygame.K_UP:(0,45),pygame.K_DOWN:(0,-45)}
@@ -1245,6 +1389,8 @@ async def main(screen,clock):
                     drawing_finger=None
                     last_centroid=(sum(p[0] for p in touches.values())/len(touches),
                                    sum(p[1] for p in touches.values())/len(touches))
+                    pair=list(touches.values())[:2]
+                    last_pinch_distance=dst(pair[0],pair[1])
             elif event.type==pygame.FINGERMOTION and event.finger_id in touches:
                 p=finger_position(event,world)
                 touches[event.finger_id]=p
@@ -1252,6 +1398,11 @@ async def main(screen,clock):
                 if len(touches)>=2:
                     center=(sum(q[0] for q in touches.values())/len(touches),
                             sum(q[1] for q in touches.values())/len(touches))
+                    pair=list(touches.values())[:2]
+                    pinch_distance=dst(pair[0],pair[1])
+                    if last_pinch_distance and pinch_distance>25:
+                        world.zoom_at(pinch_distance/last_pinch_distance,center)
+                    last_pinch_distance=pinch_distance
                     if last_centroid is not None:
                         world.pan(center[0]-last_centroid[0],center[1]-last_centroid[1])
                     last_centroid=center
@@ -1265,6 +1416,14 @@ async def main(screen,clock):
                 touches.pop(event.finger_id,None)
                 suppress_mouse_until=pygame.time.get_ticks()+400
                 last_centroid=None
+                last_pinch_distance=None
+            elif event.type==pygame.MOUSEWHEEL:
+                # Wheel-up zooms in, wheel-down out; anchor at cursor.
+                try:
+                    pointer=pygame.mouse.get_pos()
+                except pygame.error:
+                    pointer=(world.sw/2,world.viewport.centery)
+                world.zoom_at(1.12**event.y,pointer)
             elif event.type==pygame.MOUSEBUTTONDOWN:
                 if getattr(event,'touch',False) or touches or pygame.time.get_ticks()<suppress_mouse_until:
                     continue
