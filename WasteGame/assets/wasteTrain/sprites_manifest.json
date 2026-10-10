@@ -1,0 +1,1646 @@
+{
+  "source_sheet": "a_clean_asset_sheet_style_image_on_a_transparent_b.png",
+  "sprites": [
+    {
+      "name": "station_blue",
+      "category": "stations",
+      "file": "stations/station_blue.png",
+      "kind": "station",
+      "size_px": [
+        418,
+        266
+      ],
+      "anchor": {
+        "mode": "bottom_center",
+        "px": [
+          209.0,
+          266
+        ],
+        "norm": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_norm": {
+        "platform_front": [
+          0.5,
+          0.96
+        ]
+      },
+      "entry_points_px": {
+        "platform_front": [
+          209.0,
+          255.36
+        ]
+      },
+      "source_box_on_sheet": [
+        28,
+        11,
+        446,
+        277
+      ],
+      "trimmed_top_left_on_sheet": [
+        28,
+        11
+      ]
+    },
+    {
+      "name": "station_red",
+      "category": "stations",
+      "file": "stations/station_red.png",
+      "kind": "station",
+      "size_px": [
+        434,
+        265
+      ],
+      "anchor": {
+        "mode": "bottom_center",
+        "px": [
+          217.0,
+          265
+        ],
+        "norm": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_norm": {
+        "platform_front": [
+          0.5,
+          0.96
+        ]
+      },
+      "entry_points_px": {
+        "platform_front": [
+          217.0,
+          254.4
+        ]
+      },
+      "source_box_on_sheet": [
+        466,
+        12,
+        900,
+        277
+      ],
+      "trimmed_top_left_on_sheet": [
+        466,
+        12
+      ]
+    },
+    {
+      "name": "station_green",
+      "category": "stations",
+      "file": "stations/station_green.png",
+      "kind": "station",
+      "size_px": [
+        432,
+        265
+      ],
+      "anchor": {
+        "mode": "bottom_center",
+        "px": [
+          216.0,
+          265
+        ],
+        "norm": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_norm": {
+        "platform_front": [
+          0.5,
+          0.96
+        ]
+      },
+      "entry_points_px": {
+        "platform_front": [
+          216.0,
+          254.4
+        ]
+      },
+      "source_box_on_sheet": [
+        919,
+        12,
+        1351,
+        277
+      ],
+      "trimmed_top_left_on_sheet": [
+        919,
+        12
+      ]
+    },
+    {
+      "name": "locomotive_red",
+      "category": "trains",
+      "file": "trains/locomotive_red.png",
+      "kind": "locomotive",
+      "size_px": [
+        231,
+        135
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          115.5,
+          67.5
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "front_coupler": [
+          0.97,
+          0.78
+        ],
+        "rear_coupler": [
+          0.03,
+          0.78
+        ]
+      },
+      "entry_points_px": {
+        "front_coupler": [
+          224.07,
+          105.3
+        ],
+        "rear_coupler": [
+          6.93,
+          105.3
+        ]
+      },
+      "source_box_on_sheet": [
+        1406,
+        24,
+        1637,
+        159
+      ],
+      "trimmed_top_left_on_sheet": [
+        1406,
+        24
+      ]
+    },
+    {
+      "name": "locomotive_blue",
+      "category": "trains",
+      "file": "trains/locomotive_blue.png",
+      "kind": "locomotive",
+      "size_px": [
+        238,
+        139
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          119.0,
+          69.5
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "front_coupler": [
+          0.97,
+          0.79
+        ],
+        "rear_coupler": [
+          0.03,
+          0.79
+        ]
+      },
+      "entry_points_px": {
+        "front_coupler": [
+          230.86,
+          109.81
+        ],
+        "rear_coupler": [
+          7.14,
+          109.81
+        ]
+      },
+      "source_box_on_sheet": [
+        1645,
+        22,
+        1883,
+        161
+      ],
+      "trimmed_top_left_on_sheet": [
+        1645,
+        22
+      ]
+    },
+    {
+      "name": "wagon_passenger_red",
+      "category": "trains",
+      "file": "trains/wagon_passenger_red.png",
+      "kind": "wagon",
+      "size_px": [
+        130,
+        108
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          65.0,
+          54.0
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left_coupler": [
+          0.02,
+          0.77
+        ],
+        "right_coupler": [
+          0.98,
+          0.77
+        ]
+      },
+      "entry_points_px": {
+        "left_coupler": [
+          2.6,
+          83.16
+        ],
+        "right_coupler": [
+          127.4,
+          83.16
+        ]
+      },
+      "source_box_on_sheet": [
+        1366,
+        171,
+        1496,
+        281
+      ],
+      "trimmed_top_left_on_sheet": [
+        1366,
+        173
+      ]
+    },
+    {
+      "name": "wagon_passenger_blue",
+      "category": "trains",
+      "file": "trains/wagon_passenger_blue.png",
+      "kind": "wagon",
+      "size_px": [
+        122,
+        108
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          61.0,
+          54.0
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left_coupler": [
+          0.02,
+          0.77
+        ],
+        "right_coupler": [
+          0.98,
+          0.77
+        ]
+      },
+      "entry_points_px": {
+        "left_coupler": [
+          2.44,
+          83.16
+        ],
+        "right_coupler": [
+          119.56,
+          83.16
+        ]
+      },
+      "source_box_on_sheet": [
+        1490,
+        171,
+        1612,
+        281
+      ],
+      "trimmed_top_left_on_sheet": [
+        1490,
+        173
+      ]
+    },
+    {
+      "name": "wagon_freight_green",
+      "category": "trains",
+      "file": "trains/wagon_freight_green.png",
+      "kind": "wagon",
+      "size_px": [
+        132,
+        110
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          66.0,
+          55.0
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left_coupler": [
+          0.02,
+          0.78
+        ],
+        "right_coupler": [
+          0.98,
+          0.78
+        ]
+      },
+      "entry_points_px": {
+        "left_coupler": [
+          2.64,
+          85.8
+        ],
+        "right_coupler": [
+          129.36,
+          85.8
+        ]
+      },
+      "source_box_on_sheet": [
+        1608,
+        171,
+        1740,
+        281
+      ],
+      "trimmed_top_left_on_sheet": [
+        1608,
+        171
+      ]
+    },
+    {
+      "name": "wagon_logs",
+      "category": "trains",
+      "file": "trains/wagon_logs.png",
+      "kind": "wagon",
+      "size_px": [
+        138,
+        105
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          69.0,
+          52.5
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left_coupler": [
+          0.02,
+          0.79
+        ],
+        "right_coupler": [
+          0.98,
+          0.79
+        ]
+      },
+      "entry_points_px": {
+        "left_coupler": [
+          2.76,
+          82.95
+        ],
+        "right_coupler": [
+          135.24,
+          82.95
+        ]
+      },
+      "source_box_on_sheet": [
+        1736,
+        171,
+        1874,
+        281
+      ],
+      "trimmed_top_left_on_sheet": [
+        1736,
+        176
+      ]
+    },
+    {
+      "name": "wagon_tanker_gold",
+      "category": "trains",
+      "file": "trains/wagon_tanker_gold.png",
+      "kind": "wagon",
+      "size_px": [
+        144,
+        110
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          72.0,
+          55.0
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left_coupler": [
+          0.02,
+          0.79
+        ],
+        "right_coupler": [
+          0.98,
+          0.79
+        ]
+      },
+      "entry_points_px": {
+        "left_coupler": [
+          2.88,
+          86.9
+        ],
+        "right_coupler": [
+          141.12,
+          86.9
+        ]
+      },
+      "source_box_on_sheet": [
+        1868,
+        171,
+        2012,
+        281
+      ],
+      "trimmed_top_left_on_sheet": [
+        1868,
+        171
+      ]
+    },
+    {
+      "name": "wagon_coal_gray",
+      "category": "trains",
+      "file": "trains/wagon_coal_gray.png",
+      "kind": "wagon",
+      "size_px": [
+        144,
+        110
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          72.0,
+          55.0
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left_coupler": [
+          0.02,
+          0.8
+        ],
+        "right_coupler": [
+          0.98,
+          0.8
+        ]
+      },
+      "entry_points_px": {
+        "left_coupler": [
+          2.88,
+          88.0
+        ],
+        "right_coupler": [
+          141.12,
+          88.0
+        ]
+      },
+      "source_box_on_sheet": [
+        2006,
+        171,
+        2150,
+        281
+      ],
+      "trimmed_top_left_on_sheet": [
+        2006,
+        171
+      ]
+    },
+    {
+      "name": "track_straight_h",
+      "category": "tracks",
+      "file": "tracks/track_straight_h.png",
+      "kind": "track",
+      "size_px": [
+        325,
+        90
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          162.5,
+          45.0
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left": [
+          0.0,
+          0.5
+        ],
+        "right": [
+          1.0,
+          0.5
+        ]
+      },
+      "entry_points_px": {
+        "left": [
+          0.0,
+          45.0
+        ],
+        "right": [
+          325.0,
+          45.0
+        ]
+      },
+      "source_box_on_sheet": [
+        41,
+        340,
+        366,
+        430
+      ],
+      "trimmed_top_left_on_sheet": [
+        41,
+        340
+      ]
+    },
+    {
+      "name": "track_straight_v",
+      "category": "tracks",
+      "file": "tracks/track_straight_v.png",
+      "kind": "track",
+      "size_px": [
+        98,
+        178
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          49.0,
+          89.0
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "top": [
+          0.5,
+          0.0
+        ],
+        "bottom": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_px": {
+        "top": [
+          49.0,
+          0.0
+        ],
+        "bottom": [
+          49.0,
+          178.0
+        ]
+      },
+      "source_box_on_sheet": [
+        410,
+        305,
+        508,
+        483
+      ],
+      "trimmed_top_left_on_sheet": [
+        410,
+        305
+      ]
+    },
+    {
+      "name": "track_curve_01",
+      "category": "tracks",
+      "file": "tracks/track_curve_01.png",
+      "kind": "track",
+      "size_px": [
+        167,
+        179
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          83.5,
+          89.5
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "top": [
+          0.15,
+          0.02
+        ],
+        "right": [
+          0.98,
+          0.8
+        ]
+      },
+      "entry_points_px": {
+        "top": [
+          25.05,
+          3.58
+        ],
+        "right": [
+          163.66,
+          143.2
+        ]
+      },
+      "source_box_on_sheet": [
+        552,
+        305,
+        719,
+        484
+      ],
+      "trimmed_top_left_on_sheet": [
+        552,
+        305
+      ]
+    },
+    {
+      "name": "track_curve_02",
+      "category": "tracks",
+      "file": "tracks/track_curve_02.png",
+      "kind": "track",
+      "size_px": [
+        143,
+        180
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          71.5,
+          90.0
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "top": [
+          0.82,
+          0.02
+        ],
+        "left": [
+          0.02,
+          0.8
+        ]
+      },
+      "entry_points_px": {
+        "top": [
+          117.26,
+          3.6
+        ],
+        "left": [
+          2.86,
+          144.0
+        ]
+      },
+      "source_box_on_sheet": [
+        715,
+        300,
+        858,
+        480
+      ],
+      "trimmed_top_left_on_sheet": [
+        715,
+        300
+      ]
+    },
+    {
+      "name": "track_curve_03",
+      "category": "tracks",
+      "file": "tracks/track_curve_03.png",
+      "kind": "track",
+      "size_px": [
+        123,
+        162
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          61.5,
+          81.0
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left": [
+          0.02,
+          0.18
+        ],
+        "bottom": [
+          0.82,
+          0.98
+        ]
+      },
+      "entry_points_px": {
+        "left": [
+          2.46,
+          29.16
+        ],
+        "bottom": [
+          100.86,
+          158.76
+        ]
+      },
+      "source_box_on_sheet": [
+        860,
+        300,
+        983,
+        462
+      ],
+      "trimmed_top_left_on_sheet": [
+        860,
+        300
+      ]
+    },
+    {
+      "name": "track_straight_v_alt",
+      "category": "tracks",
+      "file": "tracks/track_straight_v_alt.png",
+      "kind": "track",
+      "size_px": [
+        89,
+        180
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          44.5,
+          90.0
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "top": [
+          0.5,
+          0.0
+        ],
+        "bottom": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_px": {
+        "top": [
+          44.5,
+          0.0
+        ],
+        "bottom": [
+          44.5,
+          180.0
+        ]
+      },
+      "source_box_on_sheet": [
+        993,
+        300,
+        1082,
+        480
+      ],
+      "trimmed_top_left_on_sheet": [
+        993,
+        300
+      ]
+    },
+    {
+      "name": "track_curve_04",
+      "category": "tracks",
+      "file": "tracks/track_curve_04.png",
+      "kind": "track",
+      "size_px": [
+        129,
+        173
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          64.5,
+          86.5
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "right": [
+          0.98,
+          0.18
+        ],
+        "bottom": [
+          0.18,
+          0.98
+        ]
+      },
+      "entry_points_px": {
+        "right": [
+          126.42,
+          31.14
+        ],
+        "bottom": [
+          23.22,
+          169.54
+        ]
+      },
+      "source_box_on_sheet": [
+        1092,
+        304,
+        1221,
+        477
+      ],
+      "trimmed_top_left_on_sheet": [
+        1092,
+        304
+      ]
+    },
+    {
+      "name": "track_t_junction",
+      "category": "tracks",
+      "file": "tracks/track_t_junction.png",
+      "kind": "track",
+      "size_px": [
+        218,
+        181
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          109.0,
+          90.5
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left": [
+          0.0,
+          0.39
+        ],
+        "right": [
+          1.0,
+          0.39
+        ],
+        "bottom": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_px": {
+        "left": [
+          0.0,
+          70.59
+        ],
+        "right": [
+          218.0,
+          70.59
+        ],
+        "bottom": [
+          109.0,
+          181.0
+        ]
+      },
+      "source_box_on_sheet": [
+        1250,
+        301,
+        1468,
+        482
+      ],
+      "trimmed_top_left_on_sheet": [
+        1250,
+        301
+      ]
+    },
+    {
+      "name": "track_crossing",
+      "category": "tracks",
+      "file": "tracks/track_crossing.png",
+      "kind": "track",
+      "size_px": [
+        196,
+        183
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          98.0,
+          91.5
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left": [
+          0.0,
+          0.39
+        ],
+        "right": [
+          1.0,
+          0.39
+        ],
+        "top": [
+          0.5,
+          0.0
+        ],
+        "bottom": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_px": {
+        "left": [
+          0.0,
+          71.37
+        ],
+        "right": [
+          196.0,
+          71.37
+        ],
+        "top": [
+          98.0,
+          0.0
+        ],
+        "bottom": [
+          98.0,
+          183.0
+        ]
+      },
+      "source_box_on_sheet": [
+        1498,
+        303,
+        1694,
+        486
+      ],
+      "trimmed_top_left_on_sheet": [
+        1498,
+        303
+      ]
+    },
+    {
+      "name": "track_switch_right",
+      "category": "tracks",
+      "file": "tracks/track_switch_right.png",
+      "kind": "track",
+      "size_px": [
+        254,
+        165
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          127.0,
+          82.5
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left": [
+          0.0,
+          0.42
+        ],
+        "right": [
+          1.0,
+          0.42
+        ],
+        "bottom_left": [
+          0.24,
+          1.0
+        ]
+      },
+      "entry_points_px": {
+        "left": [
+          0.0,
+          69.3
+        ],
+        "right": [
+          254.0,
+          69.3
+        ],
+        "bottom_left": [
+          60.96,
+          165.0
+        ]
+      },
+      "source_box_on_sheet": [
+        1732,
+        302,
+        1986,
+        467
+      ],
+      "trimmed_top_left_on_sheet": [
+        1732,
+        302
+      ]
+    },
+    {
+      "name": "bridge_horizontal",
+      "category": "scenery",
+      "file": "scenery/bridge_horizontal.png",
+      "kind": "bridge",
+      "size_px": [
+        553,
+        227
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          276.5,
+          113.5
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left_port": [
+          0.012,
+          0.36
+        ],
+        "right_port": [
+          0.988,
+          0.36
+        ]
+      },
+      "entry_points_px": {
+        "left_port": [
+          6.64,
+          81.72
+        ],
+        "right_port": [
+          546.36,
+          81.72
+        ]
+      },
+      "source_box_on_sheet": [
+        6,
+        484,
+        559,
+        711
+      ],
+      "trimmed_top_left_on_sheet": [
+        6,
+        484
+      ],
+      "rail_behavior": {
+        "traversable": true,
+        "train_visibility": "visible",
+        "graph_edge_kind": "bridge"
+      }
+    },
+    {
+      "name": "tunnel_horizontal",
+      "category": "scenery",
+      "file": "scenery/tunnel_horizontal.png",
+      "kind": "tunnel",
+      "size_px": [
+        629,
+        231
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          314.5,
+          115.5
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left_port": [
+          0.015,
+          0.7
+        ],
+        "right_port": [
+          0.985,
+          0.7
+        ]
+      },
+      "entry_points_px": {
+        "left_port": [
+          9.44,
+          161.7
+        ],
+        "right_port": [
+          619.56,
+          161.7
+        ]
+      },
+      "source_box_on_sheet": [
+        566,
+        482,
+        1195,
+        713
+      ],
+      "trimmed_top_left_on_sheet": [
+        566,
+        482
+      ],
+      "special": {
+        "hide_train_between_nodes": true
+      },
+      "rail_behavior": {
+        "traversable": true,
+        "train_visibility": "hidden",
+        "graph_edge_kind": "tunnel"
+      }
+    },
+    {
+      "name": "pond_large",
+      "category": "scenery",
+      "file": "scenery/pond_large.png",
+      "kind": "scenery",
+      "size_px": [
+        370,
+        238
+      ],
+      "anchor": {
+        "mode": "bottom_center",
+        "px": [
+          185.0,
+          238
+        ],
+        "norm": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_norm": {},
+      "entry_points_px": {},
+      "source_box_on_sheet": [
+        1205,
+        472,
+        1575,
+        710
+      ],
+      "trimmed_top_left_on_sheet": [
+        1205,
+        472
+      ]
+    },
+    {
+      "name": "tree_broadleaf",
+      "category": "scenery",
+      "file": "scenery/tree_broadleaf.png",
+      "kind": "scenery",
+      "size_px": [
+        178,
+        200
+      ],
+      "anchor": {
+        "mode": "bottom_center",
+        "px": [
+          89.0,
+          200
+        ],
+        "norm": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_norm": {},
+      "entry_points_px": {},
+      "source_box_on_sheet": [
+        1603,
+        474,
+        1781,
+        674
+      ],
+      "trimmed_top_left_on_sheet": [
+        1603,
+        474
+      ]
+    },
+    {
+      "name": "tree_pine",
+      "category": "scenery",
+      "file": "scenery/tree_pine.png",
+      "kind": "scenery",
+      "size_px": [
+        123,
+        172
+      ],
+      "anchor": {
+        "mode": "bottom_center",
+        "px": [
+          61.5,
+          172
+        ],
+        "norm": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_norm": {},
+      "entry_points_px": {},
+      "source_box_on_sheet": [
+        1788,
+        485,
+        1911,
+        657
+      ],
+      "trimmed_top_left_on_sheet": [
+        1788,
+        485
+      ]
+    },
+    {
+      "name": "bush_flowering",
+      "category": "scenery",
+      "file": "scenery/bush_flowering.png",
+      "kind": "scenery",
+      "size_px": [
+        113,
+        92
+      ],
+      "anchor": {
+        "mode": "bottom_center",
+        "px": [
+          56.5,
+          92
+        ],
+        "norm": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_norm": {},
+      "entry_points_px": {},
+      "source_box_on_sheet": [
+        1927,
+        487,
+        2040,
+        579
+      ],
+      "trimmed_top_left_on_sheet": [
+        1927,
+        487
+      ]
+    },
+    {
+      "name": "rock_cluster",
+      "category": "scenery",
+      "file": "scenery/rock_cluster.png",
+      "kind": "scenery",
+      "size_px": [
+        116,
+        92
+      ],
+      "anchor": {
+        "mode": "bottom_center",
+        "px": [
+          58.0,
+          92
+        ],
+        "norm": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_norm": {},
+      "entry_points_px": {},
+      "source_box_on_sheet": [
+        2046,
+        505,
+        2162,
+        597
+      ],
+      "trimmed_top_left_on_sheet": [
+        2046,
+        505
+      ]
+    },
+    {
+      "name": "flower_patch_red_yellow",
+      "category": "scenery",
+      "file": "scenery/flower_patch_red_yellow.png",
+      "kind": "scenery",
+      "size_px": [
+        92,
+        69
+      ],
+      "anchor": {
+        "mode": "bottom_center",
+        "px": [
+          46.0,
+          69
+        ],
+        "norm": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_norm": {},
+      "entry_points_px": {},
+      "source_box_on_sheet": [
+        1735,
+        640,
+        1827,
+        709
+      ],
+      "trimmed_top_left_on_sheet": [
+        1735,
+        640
+      ]
+    },
+    {
+      "name": "flower_patch_white",
+      "category": "scenery",
+      "file": "scenery/flower_patch_white.png",
+      "kind": "scenery",
+      "size_px": [
+        45,
+        37
+      ],
+      "anchor": {
+        "mode": "bottom_center",
+        "px": [
+          22.5,
+          37
+        ],
+        "norm": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_norm": {},
+      "entry_points_px": {},
+      "source_box_on_sheet": [
+        1831,
+        672,
+        1876,
+        709
+      ],
+      "trimmed_top_left_on_sheet": [
+        1831,
+        672
+      ]
+    },
+    {
+      "name": "fence_short",
+      "category": "scenery",
+      "file": "scenery/fence_short.png",
+      "kind": "scenery",
+      "size_px": [
+        226,
+        123
+      ],
+      "anchor": {
+        "mode": "bottom_center",
+        "px": [
+          113.0,
+          123
+        ],
+        "norm": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_norm": {},
+      "entry_points_px": {},
+      "source_box_on_sheet": [
+        1939,
+        583,
+        2165,
+        706
+      ],
+      "trimmed_top_left_on_sheet": [
+        1939,
+        583
+      ]
+    },
+    {
+      "name": "pond",
+      "category": "scenery",
+      "file": "scenery/pond.png",
+      "kind": "scenery",
+      "size_px": [
+        370,
+        238
+      ],
+      "anchor": {
+        "mode": "bottom_center",
+        "px": [
+          185.0,
+          238
+        ],
+        "norm": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_norm": {},
+      "entry_points_px": {},
+      "source_box_on_sheet": [
+        1205,
+        472,
+        1575,
+        710
+      ],
+      "trimmed_top_left_on_sheet": [
+        1205,
+        472
+      ]
+    },
+    {
+      "name": "flower_bush",
+      "category": "scenery",
+      "file": "scenery/flower_bush.png",
+      "kind": "scenery",
+      "size_px": [
+        113,
+        92
+      ],
+      "anchor": {
+        "mode": "bottom_center",
+        "px": [
+          56.5,
+          92
+        ],
+        "norm": [
+          0.5,
+          1.0
+        ]
+      },
+      "entry_points_norm": {},
+      "entry_points_px": {},
+      "source_box_on_sheet": [
+        1927,
+        487,
+        2040,
+        579
+      ],
+      "trimmed_top_left_on_sheet": [
+        1927,
+        487
+      ]
+    },
+    {
+      "name": "bridge_rail",
+      "category": "scenery",
+      "file": "scenery/bridge_rail.png",
+      "kind": "bridge",
+      "size_px": [
+        553,
+        227
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          276.5,
+          113.5
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left_port": [
+          0.012,
+          0.36
+        ],
+        "right_port": [
+          0.988,
+          0.36
+        ]
+      },
+      "entry_points_px": {
+        "left_port": [
+          6.64,
+          81.72
+        ],
+        "right_port": [
+          546.36,
+          81.72
+        ]
+      },
+      "source_box_on_sheet": [
+        6,
+        484,
+        559,
+        711
+      ],
+      "trimmed_top_left_on_sheet": [
+        6,
+        484
+      ],
+      "rail_behavior": {
+        "traversable": true,
+        "train_visibility": "visible",
+        "graph_edge_kind": "bridge"
+      }
+    },
+    {
+      "name": "tunnel",
+      "category": "scenery",
+      "file": "scenery/tunnel.png",
+      "kind": "tunnel",
+      "size_px": [
+        629,
+        231
+      ],
+      "anchor": {
+        "mode": "center",
+        "px": [
+          314.5,
+          115.5
+        ],
+        "norm": [
+          0.5,
+          0.5
+        ]
+      },
+      "entry_points_norm": {
+        "left_port": [
+          0.015,
+          0.7
+        ],
+        "right_port": [
+          0.985,
+          0.7
+        ]
+      },
+      "entry_points_px": {
+        "left_port": [
+          9.44,
+          161.7
+        ],
+        "right_port": [
+          619.56,
+          161.7
+        ]
+      },
+      "source_box_on_sheet": [
+        566,
+        482,
+        1195,
+        713
+      ],
+      "trimmed_top_left_on_sheet": [
+        566,
+        482
+      ],
+      "special": {
+        "hide_train_between_nodes": true
+      },
+      "rail_behavior": {
+        "traversable": true,
+        "train_visibility": "hidden",
+        "graph_edge_kind": "tunnel"
+      }
+    }
+  ],
+  "version": "2.1",
+  "note": "PNG connection points are normalized to cropped source sprites and transformed into world coordinates by WasteTrainWorld.draw_structure."
+}
