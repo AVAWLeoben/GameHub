@@ -1,4 +1,4 @@
-"""WasteTrain 2.3 — creative railway sandbox for young children.
+"""WasteTrain 2.4 — creative railway sandbox for young children.
 
 Classic grid building and finger-drawn spline rails coexist in one railway graph.
 Scenery/stations are loaded from assets/wasteTrain; grass keeps its old asset.
@@ -7,8 +7,8 @@ Drop-in GameHub entry point: await wasteTrain.main(screen, clock).
 Controls: TILES / DRAW / ERASE / MOVE, two-finger pan, NEW (twice to confirm).
 Station, bridge and horizontal tunnel ports are ready-made snap nodes.
 Tracks are generated in Pygame as connected polylines, not tile PNGs.
-Version 2.3: correctly scaled gauge, upright sprite rotation, continuous rides,
-zoom controls/mouse wheel/pinch and optional train-following camera.
+Version 2.4: static world cached and resized only when zoom changes; camera
+movement uses cropped blits, and trains draw separately at the target zoom.
 A tunnel is one continuous left-to-right structure with a hidden traversable
 rail edge; trains vanish beneath the hill and reappear on the other side.
 Trains automatically follow connected rail lines, without goals.
@@ -33,6 +33,7 @@ SNAP_RADIUS = 39.0
 RAIL_HALF_GAUGE = 12.0
 TIE_HALF_LENGTH = 20.0
 ZOOM_MAX = 1.55
+ZOOM_STEP = 0.05  # Pinch zoom is accumulated smoothly but rendered in 5% levels.
 GUIDE_TIME_MS = 6500
 GRASS_FALLBACK = (119, 180, 105)
 BROWN = (124, 76, 39)
@@ -575,8 +576,13 @@ class WasteTrainWorld:
         self.viewport=pygame.Rect(0,TOPBAR,self.sw,max(1,self.sh-TOPBAR))
         self.camera=[65.,70.]
         self.zoom=1.0
+        self.zoom_goal=1.0  # Continuous accumulation; avoid dropping tiny pinch movements.
         self.follow_train=False
-        self.world_canvas=None
+        self.static_world=None  # The assembled full-resolution background.
+        self.static_zoom=None  # The background scaled to the current zoom.
+        self.static_zoom_key=None
+        self.grid_overlay=None  # Viewport-sized, subtle guide only when needed.
+        self.grid_overlay_key=None
         self.draw_surface=None
         self.font=pygame.font.Font(None,22)
         self.titlefont=pygame.font.Font(None,28)
@@ -755,6 +761,11 @@ class WasteTrainWorld:
         return ((tile[0]+.5)*CELL,(tile[1]+.5)*CELL)
 
     def new_world(self):
+        self.static_world=None
+        self.static_zoom=None
+        self.static_zoom_key=None
+        self.grid_overlay=None
+        self.grid_overlay_key=None
         self.grid=set()
         self.curves=[]
         # Original station is deliberately retained beside the new artworks.
@@ -850,8 +861,11 @@ class WasteTrainWorld:
         return min(1., max(0.48, self.viewport.width/WORLD_W,
                            self.viewport.height/WORLD_H))
 
+
     def clamp_cam(self):
-        self.zoom=max(self.minimum_zoom(),min(ZOOM_MAX,self.zoom))
+        lower=self.minimum_zoom()
+        self.zoom=max(lower,min(ZOOM_MAX,self.zoom))
+        self.zoom_goal=max(lower,min(ZOOM_MAX,self.zoom_goal))
         self.camera[0]=max(0.,min(float(max(0,WORLD_W-self.viewport.width/self.zoom)),self.camera[0]))
         self.camera[1]=max(0.,min(float(max(0,WORLD_H-self.viewport.height/self.zoom)),self.camera[1]))
 
@@ -860,16 +874,33 @@ class WasteTrainWorld:
                 (p[1]-TOPBAR)/self.zoom+self.camera[1])
 
     def to_screen(self,p):
-        """World coordinates to the unscaled, camera-cropped rendering canvas."""
+        """World coordinates on the native-resolution static-world canvas."""
         return (p[0]-self.camera[0],p[1]-self.camera[1])
 
+    def view_point(self,p):
+        """World coordinates on the final DISPLAY, including zoom and toolbar."""
+        return (self.viewport.left+(p[0]-self.camera[0])*self.zoom,
+                self.viewport.top+(p[1]-self.camera[1])*self.zoom)
+
     def zoom_at(self,factor,screen_center):
-        """Zoom anchored at a finger/mouse location to avoid map jumping."""
+        """Anchor pinch zoom to touch position, but only rescale per 5% step.
+
+        Accumulate fractional changes in zoom_goal so slow pinches still zoom.
+        """
+        if factor<=0 or not math.isfinite(factor):
+            return
         old_point=self.from_screen(screen_center)
-        self.zoom=max(self.minimum_zoom(),min(ZOOM_MAX,self.zoom*factor))
-        self.camera[0]=old_point[0]-screen_center[0]/self.zoom
-        self.camera[1]=old_point[1]-(screen_center[1]-TOPBAR)/self.zoom
+        lower=self.minimum_zoom()
+        self.zoom_goal=max(lower,min(ZOOM_MAX,self.zoom_goal*factor))
+        quantized=round(self.zoom_goal/ZOOM_STEP)*ZOOM_STEP
+        new_zoom=max(lower,min(ZOOM_MAX,round(quantized,4)))
+        if abs(new_zoom-self.zoom)<1e-5:
+            return
+        self.zoom=new_zoom
+        self.camera[0]=old_point[0]-(screen_center[0]-self.viewport.left)/self.zoom
+        self.camera[1]=old_point[1]-(screen_center[1]-self.viewport.top)/self.zoom
         self.clamp_cam()
+        self.grid_overlay_key=None
 
     def inside(self,p):
         return 0<=p[0]<WORLD_W and 0<=p[1]<WORLD_H
@@ -1049,7 +1080,8 @@ class WasteTrainWorld:
         self.screen=screen
         self.sw,self.sh=screen.get_size()
         self.viewport=pygame.Rect(0,TOPBAR,self.sw,max(1,self.sh-TOPBAR))
-        self.world_canvas=None
+        self.grid_overlay=None
+        self.grid_overlay_key=None
         self.clamp_cam()
 
     def static_image(self,name,p,base_angle=0):
@@ -1103,32 +1135,39 @@ class WasteTrainWorld:
         return img
 
     def train_sprite(self,name,p,angle):
+        """Draw the moving sprite on-screen at zoom, NOT on the static map.
+
+        Sprite rotations/scaling are cached per discrete angle and zoom level.
+        Side-on artwork is never turned upside down.
+        """
         image=self.assets.get(name)
         if image is None:
             if name not in self.fallback_trains:
                 self.fallback_trains[name]=self.make_train_fallback(name)
             image=self.fallback_trains[name]
-        # Generated sprites are side views, not overhead views. Rotating them
-        # through 180 degrees puts wheels on the roof. Instead, mirror the
-        # sprite when it faces left and tilt by at most 36 degrees for slopes.
-        # angle is the direction of forward motion in pygame rotation degrees.
         rad=math.radians(angle)
         dx=math.cos(rad)
         dy=-math.sin(rad)
-        face_left=dx < -0.035
+        face_left=dx<-0.035
         tilt=math.degrees(math.atan2(dy,max(0.2,abs(dx))))
         tilt=max(-36.,min(36.,tilt))
         spin=tilt if face_left else -tilt
         quant=int(round(spin/3.0))*3
-        cache_key=(name,quant,face_left)
-        if cache_key not in self.rotate_cache:
+        cache_key=(name,quant,face_left,round(self.zoom*1000))
+        sprite=self.rotate_cache.get(cache_key)
+        if sprite is None:
             oriented=pygame.transform.flip(image,True,False) if face_left else image
-            self.rotate_cache[cache_key]=pygame.transform.rotate(oriented,quant)
-        rotated=self.rotate_cache[cache_key]
-        xy=self.to_screen(p)
-        r=rotated.get_rect(center=(int(xy[0]),int(xy[1])))
-        if r.colliderect(self.draw_surface.get_rect()):
-            self.draw_surface.blit(rotated,r)
+            sprite=pygame.transform.rotate(oriented,quant)
+            if abs(self.zoom-1.0)>0.001:
+                dimensions=(max(1,round(sprite.get_width()*self.zoom)),
+                            max(1,round(sprite.get_height()*self.zoom)))
+                sprite=pygame.transform.smoothscale(sprite,dimensions)
+            # At most a handful of zoom levels should be retained on mobile.
+            self.rotate_cache[cache_key]=sprite
+        xy=self.view_point(p)
+        r=sprite.get_rect(center=(round(xy[0]),round(xy[1])))
+        if r.colliderect(self.viewport):
+            self.screen.blit(sprite,r)
 
     def draw_track(self,points,surface):
         """Fallback for a structure whose image was not installed."""
@@ -1146,6 +1185,10 @@ class WasteTrainWorld:
                              (b[0]+shift[0],b[1]+shift[1]),6)
 
     def refresh_track_layer(self):
+        # Geometry changes invalidate both static caches, never per-frame camera motion.
+        self.static_world=None
+        self.static_zoom=None
+        self.static_zoom_key=None
         self.track_layer=pygame.Surface((WORLD_W,WORLD_H),pygame.SRCALPHA)
         paint_rail_network(self.track_layer,self.net)
         self.visible_scenery=[]
@@ -1165,65 +1208,115 @@ class WasteTrainWorld:
                 return True
         return False
 
-    def draw_world(self):
-        # A camera-cropped, unscaled canvas keeps all sprite anchors, track
-        # widths, collision/snap points and rail geometry in WORLD coordinates.
-        # We then scale exactly once to the visible viewport. Rendering a large
-        # cached world (rather than zooming each sprite independently) avoids
-        # misalignment between classic/freeform rails and tunnel artwork.
-        vw=min(WORLD_W, max(1, int(math.ceil(self.viewport.width/self.zoom))))
-        vh=min(WORLD_H, max(1, int(math.ceil(self.viewport.height/self.zoom))))
-        # Keep a single backing surface; frequent pinch-zoom events should not
-        # allocate a several-megabyte framebuffer on every FINGERMOTION.
-        if self.world_canvas is None:
-            self.world_canvas=pygame.Surface((WORLD_W,WORLD_H)).convert()
-        s=self.world_canvas.subsurface(pygame.Rect(0,0,vw,vh))
-        self.draw_surface=s
-        s.fill(GRASS_FALLBACK)
-        s.set_clip(s.get_rect())
-        box=pygame.Rect(round(self.camera[0]),round(self.camera[1]),
-                        min(vw,WORLD_W-round(self.camera[0])),
-                        min(vh,WORLD_H-round(self.camera[1])))
-        if box.width>0 and box.height>0:
-            s.blit(self.grass,(0,0),box)
-            if self.mode=='grid' and pygame.time.get_ticks()<self.guide_until:
-                s.blit(self.guide,(0,0),box)
-        # Layer ordering: pond under rails; structures above tracks; trains on
-        # top except for hidden portions of tunnel segments.
-        for name,p in self.scenery:
-            if name=='pond':
+    def rebuild_static_world(self):
+        """Build everything immobile once, including rail geometry and art.
+
+        All static artwork uses its original world-space anchor. We temporarily
+        set the camera to zero while composing the whole native-size surface.
+        """
+        self.static_world=self.grass.copy()
+        previous_camera=self.camera[:]
+        previous_draw_surface=self.draw_surface
+        self.camera=[0.,0.]
+        self.draw_surface=self.static_world
+        try:
+            for name,p in self.scenery:
+                if name=='pond':
+                    self.static_image(name,p)
+            self.static_world.blit(self.track_layer,(0,0))
+            self.draw_structure('bridge_horizontal',*self.bridge)
+            for name,p in self.visible_scenery:
                 self.static_image(name,p)
-        if box.width>0 and box.height>0:
-            s.blit(self.track_layer,(0,0),box)
-        self.draw_structure('bridge_horizontal',*self.bridge)
-        for name,p in self.visible_scenery:
-            self.static_image(name,p)
-        for tile,name in self.stations:
-            self.static_image(name,self.pos(tile))
-        for a,b in self.tunnels:
-            self.draw_structure('tunnel_horizontal',a,b)
-        if len(self.stroke)>1:
-            pygame.draw.lines(s,(255,231,99),False,[self.to_screen(q) for q in self.stroke],7)
-        if self.train.active and len(self.train.nodes)>=2:
-            for offset,name in reversed(list(enumerate(self.train.wagons,start=1))):
-                sampled=self.train.wagon_sample(offset*58)
+            for tile,name in self.stations:
+                self.static_image(name,self.pos(tile))
+            for a,b in self.tunnels:
+                self.draw_structure('tunnel_horizontal',a,b)
+        finally:
+            self.camera=previous_camera
+            self.draw_surface=previous_draw_surface
+        self.static_zoom=None
+        self.static_zoom_key=None
+
+    def ensure_scaled_static(self):
+        """Rescale a static image ONLY when level changes, never per frame."""
+        if self.static_world is None:
+            self.rebuild_static_world()
+        zoom_key=round(self.zoom,4)
+        if self.static_zoom_key!=zoom_key or self.static_zoom is None:
+            if abs(self.zoom-1.)<0.0001:
+                self.static_zoom=self.static_world
+            else:
+                target=(max(1,round(WORLD_W*self.zoom)),
+                        max(1,round(WORLD_H*self.zoom)))
+                self.static_zoom=pygame.transform.smoothscale(self.static_world,target)
+            self.static_zoom_key=zoom_key
+            # No persistent multizoom surfaces: memory usage stays bounded.
+            # Rotated train sprites are small; remove old zoom entries as well.
+            self.rotate_cache={k:v for k,v in self.rotate_cache.items()
+                               if len(k)!=4 or k[-1]==round(self.zoom*1000)}
+
+    def draw_grid_overlay(self):
+        """Subtle alpha guide; cached per camera pixel/zoom, not scaled per frame."""
+        if self.mode!='grid' or pygame.time.get_ticks()>=self.guide_until:
+            return
+        scale=self.zoom
+        # Pixel alignment makes panning smooth and prevents redraw on subpixel
+        # camera changes that have no visible effect.
+        ox=round(-self.camera[0]*scale)
+        oy=round(-self.camera[1]*scale)
+        tag=(ox,oy,round(scale,4),self.viewport.size)
+        if self.grid_overlay_key!=tag or self.grid_overlay is None:
+            w,h=self.viewport.size
+            overlay=pygame.Surface((w,h),pygame.SRCALPHA)
+            shade=(255,255,238,30)
+            for n in range(COLS+1):
+                x=round(n*CELL*scale+ox)
+                if 0<=x<w:
+                    pygame.draw.line(overlay,shade,(x,0),(x,h))
+            for n in range(ROWS+1):
+                y=round(n*CELL*scale+oy)
+                if 0<=y<h:
+                    pygame.draw.line(overlay,shade,(0,y),(w,y))
+            self.grid_overlay=overlay
+            self.grid_overlay_key=tag
+        self.screen.blit(self.grid_overlay,self.viewport.topleft)
+
+    def draw_world(self):
+        """One source-rectangle blit per frame, not software smoothscale.
+
+        The camera can follow moving trains at 60 FPS without resampling a
+        million-pixel world. Only zoom changes or track edits rebuild caches.
+        """
+        self.ensure_scaled_static()
+        self.screen.fill(GRASS_FALLBACK,self.viewport)
+        source=pygame.Rect(round(self.camera[0]*self.zoom),
+                           round(self.camera[1]*self.zoom),
+                           self.viewport.width,self.viewport.height)
+        source=source.clip(self.static_zoom.get_rect())
+        if source.width and source.height:
+            self.screen.blit(self.static_zoom,self.viewport.topleft,source)
+        previous_clip=self.screen.get_clip()
+        self.screen.set_clip(self.viewport)
+        try:
+            self.draw_grid_overlay()
+            if len(self.stroke)>1:
+                pygame.draw.lines(self.screen,(255,231,99),False,
+                    [self.view_point(q) for q in self.stroke],
+                    max(2,round(7*self.zoom)))
+            if self.train.active and len(self.train.nodes)>=2:
+                for offset,name in reversed(list(enumerate(self.train.wagons,start=1))):
+                    sampled=self.train.wagon_sample(offset*58)
+                    if sampled:
+                        p,angle,kind=sampled
+                        if kind!='tunnel':
+                            self.train_sprite(name,p,angle)
+                sampled=self.train.sample(self.train.travel)
                 if sampled:
                     p,angle,kind=sampled
                     if kind!='tunnel':
-                        self.train_sprite(name,p,angle)
-            sampled=self.train.sample(self.train.travel)
-            if sampled:
-                p,angle,kind=sampled
-                if kind!='tunnel':
-                    self.train_sprite(self.locomotive_name,p,angle)
-        s.set_clip(None)
-        # No world-space rounding is applied to individual assets while
-        # zooming; this shared resize keeps all rail joins registered.
-        if s.get_size()==self.viewport.size:
-            self.screen.blit(s,self.viewport.topleft)
-        else:
-            result=pygame.transform.smoothscale(s,self.viewport.size)
-            self.screen.blit(result,self.viewport.topleft)
+                        self.train_sprite(self.locomotive_name,p,angle)
+        finally:
+            self.screen.set_clip(previous_clip)
 
     def draw_button_icon(self,name,x,y,color):
         """Large pictograms make the tools readable before children can read."""
