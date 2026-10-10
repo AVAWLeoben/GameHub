@@ -1,4 +1,4 @@
-"""WasteTrain 2.0 — creative railway sandbox for young children.
+"""WasteTrain 2.2 — creative railway sandbox for young children.
 
 Classic grid building and finger-drawn spline rails coexist in one railway graph.
 Scenery/stations are loaded from assets/wasteTrain; grass keeps its old asset.
@@ -6,6 +6,7 @@ Drop-in GameHub entry point: await wasteTrain.main(screen, clock).
 
 Controls: TILES / DRAW / ERASE / MOVE, two-finger pan, NEW (twice to confirm).
 Station, bridge and horizontal tunnel ports are ready-made snap nodes.
+Tracks are generated in Pygame as connected polylines, not tile PNGs.
 A tunnel is one continuous left-to-right structure with a hidden traversable
 rail edge; trains vanish beneath the hill and reappear on the other side.
 Trains automatically follow connected rail lines, without goals.
@@ -267,6 +268,126 @@ class RailNetwork:
         return visited
 
 
+
+def rail_paths(network):
+    """Join degree-two rail nodes into continuous polylines.
+
+    Grid tracks and free-drawn curves use the SAME path collection. Sleepers
+    keep their spacing around bends, rather than starting over at each tile.
+    Tunnel/bridge interiors are handled by their dedicated artwork.
+    """
+    neighbors = {}
+    for a, links in network.graph.items():
+        for b, (distance, kind) in links.items():
+            if kind != 'normal' or distance < 0.01:
+                continue
+            neighbors.setdefault(a, set()).add(b)
+    visited=set()
+    paths=[]
+    def edge(a,b):
+        return (a,b) if a<b else (b,a)
+    def walk(a,b):
+        chain=[a,b]
+        visited.add(edge(a,b))
+        prev,cur=a,b
+        for _ in range(len(neighbors)+2):
+            nexts=neighbors.get(cur,set())
+            if len(nexts)!=2:
+                break
+            nextnode=next((n for n in nexts if n!=prev), None)
+            if nextnode is None or edge(cur,nextnode) in visited:
+                break
+            visited.add(edge(cur,nextnode))
+            chain.append(nextnode)
+            prev,cur=cur,nextnode
+        return chain
+    for a in sorted(neighbors):
+        if len(neighbors[a]) != 2:
+            for b in sorted(neighbors[a]):
+                if edge(a,b) not in visited:
+                    paths.append(walk(a,b))
+    # Closed loops have no degree!=2 starting point.
+    for a in sorted(neighbors):
+        for b in sorted(neighbors[a]):
+            if edge(a,b) not in visited:
+                paths.append(walk(a,b))
+    return paths
+
+
+def rail_offsets(points, half_width=6.0):
+    """Miter-joined parallel rails, with safe handling of sharp turns."""
+    if len(points)<2:
+        return [],[]
+    normals=[]
+    for a,b in zip(points,points[1:]):
+        length=max(.0001,dst(a,b))
+        normals.append((-(b[1]-a[1])/length,(b[0]-a[0])/length))
+    plus=[];minus=[]
+    for i,p in enumerate(points):
+        if i==0:
+            vx,vy=normals[0];scale=half_width
+        elif i==len(points)-1:
+            vx,vy=normals[-1];scale=half_width
+        else:
+            nx,ny=normals[i-1];mx,my=normals[i]
+            sx,sy=nx+mx,ny+my
+            mag=math.hypot(sx,sy)
+            if mag<0.001:
+                vx,vy=mx,my;scale=half_width
+            else:
+                vx,vy=sx/mag,sy/mag
+                # At 90deg the miter extends ~sqrt(2)*rail width.
+                dot=max(.50,abs(vx*mx+vy*my))
+                scale=min(half_width*2.,half_width/dot)
+        plus.append((p[0]+vx*scale,p[1]+vy*scale))
+        minus.append((p[0]-vx*scale,p[1]-vy*scale))
+    return plus,minus
+
+
+def paint_rail_network(surface,network):
+    """Layered continuous rail geometry. No per-tile rail/sleeper resets."""
+    paths=rail_paths(network)
+    # Paint ALL ballast before ANY sleepers or metallic rails. This avoids
+    # one segment's ballast covering its neighbor's rails at connections.
+    for path in paths:
+        if len(path)<2:continue
+        pygame.draw.lines(surface,(123,96,70),False,path,23)
+        for p in path:
+            pygame.draw.circle(surface,(123,96,70),(round(p[0]),round(p[1])),11)
+        pygame.draw.lines(surface,(212,185,132),False,path,18)
+        for p in path:
+            pygame.draw.circle(surface,(212,185,132),(round(p[0]),round(p[1])),9)
+    # Lay sleepers every 13 world pixels along each uninterrupted route.
+    # No extra 'first sleeper' at every classic-grid tile boundary.
+    for path in paths:
+        distance_to_next=4.0
+        for a,b in zip(path,path[1:]):
+            span=dst(a,b)
+            if span<.001:continue
+            vx=(b[0]-a[0])/span;vy=(b[1]-a[1])/span
+            nx,ny=-vy,vx
+            step=distance_to_next
+            while step<=span+0.0001:
+                q=between(a,b,step/span)
+                p1=(q[0]+nx*10.5,q[1]+ny*10.5)
+                p2=(q[0]-nx*10.5,q[1]-ny*10.5)
+                pygame.draw.line(surface,(112,66,43),p1,p2,5)
+                pygame.draw.line(surface,(183,117,66),p1,p2,2)
+                step+=13.
+            distance_to_next=step-span
+    # Miter joins match adjacent track pieces exactly. Round endpoints prevent
+    # 1px seams caused by integer rasterization at multiway junctions.
+    for path in paths:
+        left,right=rail_offsets(path,6.)
+        for rail in (left,right):
+            if len(rail)<2:continue
+            pygame.draw.lines(surface,(51,64,72),False,rail,5)
+            pygame.draw.lines(surface,(230,237,235),False,rail,2)
+            for p in (rail[0],rail[-1]):
+                pygame.draw.circle(surface,(80,91,93),(round(p[0]),round(p[1])),3)
+                pygame.draw.circle(surface,(230,237,235),(round(p[0]),round(p[1])),1)
+
+
 class ToyTrain:
     def __init__(self, net, stations, rng, focus=None):
         self.net, self.stations, self.rng = net, stations, rng
@@ -423,20 +544,24 @@ class WasteTrainWorld:
         self.assets=self.load_assets()
         self.structure_cache={}
         self.rotate_cache={}
+        self.fallback_trains={}
         self.make_grass()
         self.make_grid_guide()
         self.new_world()
 
     def load_sprite_manifest(self):
-        """Read sprite anchors and rail ports from the shipped asset metadata."""
-        path=os.path.join(ASSETS, 'sprites_manifest.json')
-        try:
-            with open(path, encoding='utf-8') as f:
-                data=json.load(f)
-            return {entry['name']:entry for entry in data['sprites']}
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            print('WasteTrain: metadata fallback:', error)
-            return {}
+        """Read sprite anchors and rail ports from module/cwd asset paths."""
+        for path in (os.path.join(ASSETS,'sprites_manifest.json'),
+                     os.path.join('assets','wasteTrain','sprites_manifest.json'),
+                     os.path.join('WasteGame','assets','wasteTrain','sprites_manifest.json')):
+            try:
+                with open(path,encoding='utf-8') as f:
+                    data=json.load(f)
+                return {entry['name']:entry for entry in data['sprites']}
+            except (OSError,ValueError,KeyError,TypeError):
+                continue
+        print('WasteTrain: sprite metadata missing; using default anchors')
+        return {}
 
     def structure_anchors(self, sprite_name):
         """Normalized rail endpoints; default coordinates match supplied PNGs."""
@@ -478,7 +603,16 @@ class WasteTrainWorld:
         if rect.colliderect(self.viewport):
             self.screen.blit(sprite,rect)
 
+    def asset_candidates(self,relative):
+        """Pygbag often uses a virtual cwd; try both module and cwd assets."""
+        parts=relative.split('/')
+        return [os.path.join(ASSETS,*parts),
+                os.path.join('assets','wasteTrain',*parts),
+                os.path.join('WasteGame','assets','wasteTrain',*parts)]
+
     def load_assets(self):
+        # Old artwork remains available as a station; the legacy track images
+        # and old train/wagon files are not needed by this renderer.
         asset_files={
             'station_old':'station.png',
             'station_blue':'stations/station_blue.png',
@@ -489,12 +623,10 @@ class WasteTrainWorld:
             'rock_cluster':'scenery/rock_cluster.png',
             'flower_bush':'scenery/flower_bush.png',
             'pond':'scenery/pond.png',
-            'bridge_rail':'scenery/bridge_rail.png',
             'tunnel_horizontal':'scenery/tunnel_horizontal.png',
             'bridge_horizontal':'scenery/bridge_horizontal.png',
-            'flower_patch_red_yellow':'scenery/flower_patch_red_yellow.png',
-            'flower_patch_white':'scenery/flower_patch_white.png',
-            'bush_flowering':'scenery/bush_flowering.png',
+            'flower_patch':'scenery/flower_patch.png',
+            'grass_tuft':'scenery/grass_tuft.png',
             'locomotive_red':'trains/locomotive_red.png',
             'locomotive_blue':'trains/locomotive_blue.png',
             'wagon_passenger_red':'trains/wagon_passenger_red.png',
@@ -504,40 +636,46 @@ class WasteTrainWorld:
             'wagon_logs':'trains/wagon_logs.png',
             'wagon_coal_gray':'trains/wagon_coal_gray.png',
         }
-        # Trim image alpha so generated art with wide transparent margins scales
-        # correctly and uses little GPU memory on iPad.
         sizes={
             'station_old':(245,163),'station_blue':(220,160),
             'station_red':(220,160),'station_green':(220,160),
             'tree_broadleaf':(105,105),'tree_pine':(76,114),
             'rock_cluster':(110,83),'flower_bush':(62,49),
-            'pond':(270,185),'bridge_rail':(254,127),
-            # Structures are rescaled later to match their rail port distance.
+            'pond':(270,185),
             'tunnel_horizontal':(629,231),'bridge_horizontal':(553,227),
-            'flower_patch_red_yellow':(55,40), 'flower_patch_white':(42,34),
-            'bush_flowering':(66,53),
-            'locomotive_red':(88,67),'locomotive_blue':(88,67),
-            'wagon_passenger_red':(74,53),
-            'wagon_passenger_blue':(74,53),'wagon_freight_green':(68,50),
-            'wagon_tanker_gold':(70,54),'wagon_logs':(72,52),
-            'wagon_coal_gray':(70,52),
+            'flower_patch':(55,40), 'grass_tuft':(42,34),
+            # Locomotive and wagons have similar wheel-center heights.
+            'locomotive_red':(91,57),'locomotive_blue':(91,57),
+            'wagon_passenger_red':(74,49),
+            'wagon_passenger_blue':(74,49),'wagon_freight_green':(70,49),
+            'wagon_tanker_gold':(74,49),'wagon_logs':(74,49),
+            'wagon_coal_gray':(74,49),
         }
         result={}
+        self.missing_assets=[]
         for name,relative in asset_files.items():
-            path=os.path.join(ASSETS,*relative.split('/'))
-            try:
-                image=pygame.image.load(path).convert_alpha()
-                box=image.get_bounding_rect(min_alpha=12)
-                if box.width and box.height:
-                    image=image.subsurface(box).copy()
-                width,height=sizes[name]
-                # Preserve sprite proportions within desired allocation.
-                factor=min(width/max(1,image.get_width()),height/max(1,image.get_height()))
-                wh=(max(1,round(image.get_width()*factor)),max(1,round(image.get_height()*factor)))
-                result[name]=pygame.transform.smoothscale(image,wh)
-            except (OSError,pygame.error) as error:
-                print('WasteTrain: missing optional sprite',relative,error)
+            sprite=None
+            for path in self.asset_candidates(relative):
+                try:
+                    sprite=pygame.image.load(path).convert_alpha()
+                    break
+                except (OSError,pygame.error):
+                    continue
+            if sprite is None:
+                self.missing_assets.append(relative)
                 result[name]=None
+                continue
+            bounds=sprite.get_bounding_rect(min_alpha=10)
+            if bounds.width>0 and bounds.height>0:
+                sprite=sprite.subsurface(bounds).copy()
+            width,height=sizes[name]
+            scale=min(width/max(1,sprite.get_width()), height/max(1,sprite.get_height()))
+            dimensions=(max(1,round(sprite.get_width()*scale)),
+                        max(1,round(sprite.get_height()*scale)))
+            result[name]=pygame.transform.smoothscale(sprite,dimensions)
+        if self.missing_assets:
+            print('WasteTrain missing sprites (upload the entire assets/wasteTrain folder):',
+                  ', '.join(self.missing_assets))
         return result
 
     def make_grass(self):
@@ -605,36 +743,41 @@ class WasteTrainWorld:
         self.scenery=[]
         protected=[self.pos(t) for t in self.pinned]
         protected.extend(self.pos(t) for t in self.no_build)
-        # Pond goes below the bridge, and the rail bridge overlays it.
         pond_center=((self.bridge[0][0]+self.bridge[1][0])/2,
                      self.bridge[0][1]+47)
         self.scenery.append(('pond',pond_center))
-        # The tunnel sprite itself contains the rocks and hillside, so no
-        # separate boulder PNG should cover the entrances.
         for a,b in self.tunnels:
             for x in range(round(a[0]-30),round(b[0]+31),40):
                 protected.append((x,a[1]-45))
-        sizes={'tree_broadleaf':74,'tree_pine':70,'rock_cluster':67,
-               'flower_bush':35,'flower_patch_red_yellow':24,
-               'flower_patch_white':23,'bush_flowering':35}
+        # A few obvious colorful items within the FIRST viewport make the
+        # playground feel alive before a child pans around the larger world.
+        starter=[('tree_broadleaf',(8*CELL,8*CELL)),
+                 ('tree_pine',(6*CELL,11*CELL)),
+                 ('flower_bush',(9*CELL,11*CELL)),
+                 ('rock_cluster',(6*CELL,14*CELL)),
+                 ('flower_bush',(9*CELL,3*CELL)),
+                 ('flower_patch',(11*CELL,12*CELL))]
+        self.scenery.extend(starter)
+        sizes={'tree_broadleaf':69,'tree_pine':62,'rock_cluster':58,
+               'flower_bush':31,'flower_patch':22,
+               'grass_tuft':20}
         weights=('tree_broadleaf','tree_pine','rock_cluster','flower_bush',
-                 'flower_bush','bush_flowering','flower_patch_red_yellow',
-                 'flower_patch_white')
-        for _ in range(280):
+                 'flower_bush','flower_patch',
+                 'grass_tuft')
+        for _ in range(450):
             name=self.rng.choice(weights)
             p=(self.rng.randint(35,WORLD_W-35),self.rng.randint(42,WORLD_H-35))
-            if any(dst(p,q)<sizes[name]+12 for q in protected):
+            if any(dst(p,q)<sizes[name]+10 for q in protected):
                 continue
-            if any(dst(p,q)<(sizes[name]+sizes.get(n,40))*.53 for n,q in self.scenery):
+            if any(dst(p,q)<(sizes[name]+sizes.get(n,40))*.54 for n,q in self.scenery):
                 continue
-            # Don't obscure either tunnel or the bridge/pond railway.
             if any(a[0]-50<p[0]<b[0]+50 and a[1]-110<p[1]<a[1]+50
                    for a,b in self.tunnels):
                 continue
             if abs(p[1]-self.bridge[0][1])<90 and self.bridge[0][0]-55<p[0]<self.bridge[1][0]+55:
                 continue
             self.scenery.append((name,p))
-            if len(self.scenery)>=85:
+            if len(self.scenery)>=100:
                 break
 
         self.net=RailNetwork()
@@ -831,7 +974,7 @@ class WasteTrainWorld:
         if img is None:
             if name in ('station_old','station_blue','station_red','station_green'):
                 rect=pygame.Rect(0,0,140,76)
-                rect.midbottom=(int(p[0]),int(p[1]))
+                rect.midbottom=(int(self.to_screen(p)[0]),int(self.to_screen(p)[1]))
                 pygame.draw.rect(self.screen,(215,115,83),rect,border_radius=8)
             return
         if base_angle:
@@ -839,21 +982,51 @@ class WasteTrainWorld:
             if cache_key not in self.rotate_cache:
                 self.rotate_cache[cache_key]=pygame.transform.rotate(img,base_angle)
             img=self.rotate_cache[cache_key]
-        pos=self.to_screen(p)
+        sx,sy=self.to_screen(p)
+        meta=self.sprite_manifest.get(name,{})
+        anchor=meta.get('anchor',{}).get('norm',
+            [.5,1.] if name.startswith('station') or name.startswith('tree') else [.5,.5])
+        # station platform artwork sits a few pixels above the prebuilt stub.
         if name.startswith('station'):
-            rect=img.get_rect(midbottom=(int(pos[0]),int(pos[1]-7)))
+            sy-=7
+        r=pygame.Rect(round(sx-img.get_width()*anchor[0]),
+                      round(sy-img.get_height()*anchor[1]),
+                      img.get_width(),img.get_height())
+        if r.colliderect(self.viewport):
+            self.screen.blit(img,r)
+
+    def make_train_fallback(self,name):
+        """Friendly procedural backup: never show cryptic red circles."""
+        engine=name.startswith('locomotive')
+        width,height=(83,49) if engine else (67,42)
+        img=pygame.Surface((width,height),pygame.SRCALPHA)
+        color=(223,65,64) if engine or 'red' in name else (
+            (63,148,237) if 'blue' in name else
+            (62,184,105) if 'green' in name else (235,187,53))
+        pygame.draw.rect(img,(56,56,66),(3,height-14,width-6,7),border_radius=3)
+        pygame.draw.rect(img,color,(5,12,width-10,height-26),border_radius=6)
+        pygame.draw.rect(img,(251,201,64),(5,height-17,width-10,4))
+        if engine:
+            pygame.draw.rect(img,(69,92,126),(9,4,24,16),border_radius=3)
+            pygame.draw.rect(img,(119,224,239),(16,8,11,10))
+            pygame.draw.rect(img,(75,77,88),(53,2,12,19),border_radius=3)
+            pygame.draw.circle(img,(245,223,94),(width-8,height//2),5)
         else:
-            rect=img.get_rect(center=(int(pos[0]),int(pos[1])))
-        if rect.colliderect(self.viewport):
-            self.screen.blit(img,rect)
+            for x in (16,35):
+                pygame.draw.rect(img,(133,221,242),(x,17,13,10),border_radius=2)
+        for x in ((17,48,69) if engine else (19,49)):
+            pygame.draw.circle(img,(51,57,76),(x,height-9),7)
+            pygame.draw.circle(img,(246,191,53),(x,height-9),3)
+        return img
 
     def train_sprite(self,name,p,angle):
         image=self.assets.get(name)
         if image is None:
-            pygame.draw.circle(self.screen,(231,72,62),tuple(map(int,self.to_screen(p))),14)
-            return
-        # Source locomotives and wagons point to the right at 0 degrees.
-        quant=round(angle/6.)*6
+            if name not in self.fallback_trains:
+                self.fallback_trains[name]=self.make_train_fallback(name)
+            image=self.fallback_trains[name]
+        # The source side-on sprites face right at 0 degrees.
+        quant=int(round(angle/4.0))*4
         k=(name,quant)
         if k not in self.rotate_cache:
             self.rotate_cache[k]=pygame.transform.rotate(image,quant)
@@ -864,55 +1037,28 @@ class WasteTrainWorld:
             self.screen.blit(rotated,r)
 
     def draw_track(self,points,surface):
+        """Fallback for a structure whose image was not installed."""
         if len(points)<2:
             return
-        # Draw rails in world coordinates once; the camera only blits a crop.
-        pix=points
-        if len(pix)==2 and dst(pix[0],pix[1])<4:
+        a,b=points[0],points[-1]
+        if dst(a,b)<2:
             return
-        pygame.draw.lines(surface,(184,153,111),False,pix,19)
-        pygame.draw.lines(surface,(215,191,145),False,pix,15)
-        acc=0.0
-        for a,b in zip(points,points[1:]):
-            length=dst(a,b)
-            if length<.01:
-                continue
-            nx,ny=-(b[1]-a[1])/length,(b[0]-a[0])/length
-            t=(14.0-acc%14.0)%14.0
-            while t<=length:
-                q=between(a,b,t)
-                pygame.draw.line(surface,BROWN,
-                    (q[0]+nx*10,q[1]+ny*10),
-                    (q[0]-nx*10,q[1]-ny*10),4)
-                t+=14.0
-            acc+=length
-        for sign in (-1.,1.):
-            points2=[]
-            for j,p in enumerate(points):
-                a=points[max(0,j-1)];b=points[min(len(points)-1,j+1)]
-                length=max(.001,dst(a,b))
-                nx,ny=-(b[1]-a[1])/length,(b[0]-a[0])/length
-                points2.append((p[0]+nx*sign*6,p[1]+ny*sign*6))
-            pygame.draw.lines(surface,(61,72,75),False,points2,4)
-            pygame.draw.lines(surface,(214,223,224),False,points2,2)
+        pygame.draw.line(surface,(128,87,54),a,b,21)
+        pygame.draw.line(surface,(218,197,147),a,b,16)
+        for sign in (-1,1):
+            nx,ny=-(b[1]-a[1])/dst(a,b),(b[0]-a[0])/dst(a,b)
+            shift=(nx*sign*6,ny*sign*6)
+            pygame.draw.line(surface,(52,65,70),(a[0]+shift[0],a[1]+shift[1]),
+                             (b[0]+shift[0],b[1]+shift[1]),4)
 
     def refresh_track_layer(self):
         self.track_layer=pygame.Surface((WORLD_W,WORLD_H),pygame.SRCALPHA)
-        # Geometry comes from the shared network, but curve polylines are drawn
-        # once as a continuous shape to avoid visible sleeper duplication.
-        for a,b,kind,group in self.net.visible_segments:
-            if kind=='normal' and group[0]!='curve':
-                self.draw_track((a,b),self.track_layer)
-        for curve in self.curves:
-            self.draw_track(curve,self.track_layer)
-        # The bridge PNG already includes rails, so do not paint a second
-        # procedural track over it; its route still exists in the graph.
+        paint_rail_network(self.track_layer,self.net)
         self.visible_scenery=[]
-        permanent_rocks=set()
         for name,p in self.scenery:
             if name=='pond':
                 continue
-            if p not in permanent_rocks and self.near_track(p,39):
+            if self.near_track(p,31):
                 continue
             self.visible_scenery.append((name,p))
 
@@ -964,7 +1110,7 @@ class WasteTrainWorld:
             if sampled:
                 p,angle,kind=sampled
                 if kind!='tunnel':
-                    self.train_sprite('locomotive_red',p,angle)
+                    self.train_sprite(self.locomotive_name,p,angle)
         s.set_clip(None)
 
     def draw_button_icon(self,name,x,y,color):
@@ -1037,6 +1183,13 @@ class WasteTrainWorld:
                          self.viewport.width/WORLD_W*mw,
                          self.viewport.height/WORLD_H*mh)
         pygame.draw.rect(s,(65,116,218),area,2,border_radius=3)
+        if self.missing_assets:
+            # Children still get a playable procedural fallback, but parents
+            # can identify the missing-asset deployment without opening logs.
+            label=self.font.render('Missing art: upload assets/wasteTrain folders',True,(255,255,255))
+            x=10; y=self.sh-30
+            pygame.draw.rect(s,(154,51,45),(x-5,y-3,label.get_width()+10,26),border_radius=5)
+            s.blit(label,(x,y))
         now=pygame.time.get_ticks()
         if getattr(self,'confirm_until',0)>now:
             text=self.font.render('Tap NEW again to start a new world', True, CREAM)
