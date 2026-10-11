@@ -1,10 +1,10 @@
-"""WasteKart 1.4.4 - kart-selection, animated item-box, and results polish.
+"""WasteKart 1.5 - smaller race karts and optional multiplayer interactions.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
 
 Original four-cup, sixteen-course art resides in assets/WasteKart.
-Races use 16 original tracks. Kart-to-kart interactions are future additions.
+Races use 16 original tracks. Interactions add gentle drafting and bumping.
 """
 import asyncio
 import bisect
@@ -48,8 +48,20 @@ RACE_LINE_OPACITY = 67
 GHOST_LINE_OPACITY = 42
 # Player action buttons live at the corners of the playfield, leaving Home
 # and Pause untouched while keeping each child's button easy to find.
-ACTION_BUTTON_SIZE = (124, 56)
+ACTION_BUTTON_SIZE = (132, 74)
 ACTION_BUTTON_SLOTS = ('tl', 'tr', 'bl', 'br')
+# The original 56x42 karts looked oversized in four-player races. 38x28 is
+# 68% of that footprint (about 50% *too large* means divide by 1.5).
+RACE_KART_SIZE = (38, 28)
+# Gameplay is world-coordinate based; these are NOT the sprite's pixel sizes.
+DRAFT_MIN = 26.0
+DRAFT_MAX = 102.0
+DRAFT_HALF_WIDTH = 25.0
+DRAFT_SPEED_FACTOR = 1.13
+BUMP_DISTANCE = 29.0
+BUMP_COOLDOWN = 0.65
+BUMP_EFFECT_SECONDS = 0.44
+BUMP_MIN_TIME = 1.0  # No impacts among karts still gathered at the starting grid.
 
 
 def clamp(value, lo, hi):
@@ -429,7 +441,10 @@ class Racer:
         self.speed=0.0
         self.start_modifier=1.0
         self.start_effect_left=0.0
-        self.modifiers=[]       # Future slipstreaming / kart interaction hook.
+        self.modifiers=[]       # Future per-kart bonuses (separate from interactions).
+        self.interaction_factor=1.0
+        self.drafting=False
+        self.bump_fx_left=0.0
         self.held_powerup=None
         self.powerup_kind=None
         self.powerup_left=0.0
@@ -499,7 +514,8 @@ class Racer:
         if self.powerup_left>0 and self.powerup_kind in POWERUP_MULTIPLIER:
             temporary*=POWERUP_MULTIPLIER[self.powerup_kind]
             self.powerup_left=max(0.0,self.powerup_left-dt)
-        desired=track.max_speed*bend*(ROAD_FACTOR if road else GRASS_FACTOR)*min(1.95,temporary)
+        desired=(track.max_speed*bend*(ROAD_FACTOR if road else GRASS_FACTOR)
+                 *min(1.95,temporary)*self.interaction_factor)
         for modifier in self.modifiers:
             desired*=modifier
         response=3.1 if desired>self.speed else 5.2
@@ -558,6 +574,7 @@ class WasteKartGame:
         self.laps=1
         self.reflex_start=True
         self.powerups_enabled=False  # Independent of the reflex start toggle.
+        self.interactions_enabled=True  # Optional gentle kart drafting / bumping.
         self.show_racing_lines=False  # Default uncluttered, especially for 4 players.
         self.reaction_status=[]
         self.reaction_times=[]
@@ -579,6 +596,7 @@ class WasteKartGame:
         self.time_left=self.draw_seconds
         self.routes=[]
         self.racers=[]
+        self.bump_cooldowns={}  # (low player, high player) -> next allowed time.
         self.elapsed=0.0
         self.countdown=0.0
         self.paused=False
@@ -655,7 +673,7 @@ class WasteKartGame:
     def player_action_rects(self):
         """Stable corners of the track view for 1-4 local player buttons."""
         w,h = ACTION_BUTTON_SIZE
-        margin = 10
+        margin = 8
         left = TRACK_RECT.left + margin
         right = TRACK_RECT.right - margin - w
         top = TRACK_RECT.top + margin
@@ -814,20 +832,26 @@ class WasteKartGame:
         self.button((412,426,156,40),'OFF',('reflex',False),selected=not self.reflex_start,size=27)
         self.button((582,426,165,40),'ON!',('reflex',True),selected=self.reflex_start,size=27)
 
-        # Independent switches fit above the original NEXT button, without
-        # crowding or shrinking any touch target on the 800x600 canvas.
-        self.panel((40,480,347,54))
-        self.text('POWER-UPS',(127,506),23,YELLOW)
-        self.button((216,486,76,41),'OFF',('powerups',False),
-                    selected=not self.powerups_enabled,size=23)
-        self.button((300,486,76,41),'ON',('powerups',True),
-                    selected=self.powerups_enabled,size=23)
-        self.panel((399,480,361,54))
-        self.text('RACE LINES',(466,506),22,YELLOW)
-        self.button((537,486,91,41),'HIDE',('lines',False),
-                    selected=not self.show_racing_lines,size=23)
-        self.button((646,486,101,41),'SHOW',('lines',True),
-                    selected=self.show_racing_lines,size=23)
+        # Three independent feature switches, each with full-height 41px touch
+        # targets, even on a shared iPad. Interactions only affect humans.
+        self.panel((40,480,233,54))
+        self.text('ITEMS',(85,506),20,YELLOW)
+        self.button((137,486,61,41),'OFF',('powerups',False),
+                    selected=not self.powerups_enabled,size=20)
+        self.button((204,486,61,41),'ON',('powerups',True),
+                    selected=self.powerups_enabled,size=20)
+        self.panel((283,480,233,54))
+        self.text('LINES',(329,506),20,YELLOW)
+        self.button((380,486,61,41),'OFF',('lines',False),
+                    selected=not self.show_racing_lines,size=20)
+        self.button((447,486,61,41),'ON',('lines',True),
+                    selected=self.show_racing_lines,size=20)
+        self.panel((526,480,234,54))
+        self.text('BUMP',(568,506),20,YELLOW)
+        self.button((624,486,61,41),'OFF',('interactions',False),
+                    selected=not self.interactions_enabled,size=20)
+        self.button((692,486,61,41),'ON',('interactions',True),
+                    selected=self.interactions_enabled,size=20)
         self.button((255,543,290,46),'CHOOSE CUP  >',('state','tracks'),selected=True,size=26)
         self.home()
 
@@ -1052,8 +1076,8 @@ class WasteKartGame:
         key=('race',kart_id,quant)
         if key not in self.kart_rotation_cache:
             img=self.kart_images[kart_id]
-            # Slightly larger display size suits the new kart art better.
-            scaled=pygame.transform.smoothscale(img,(56,42))
+            # Selection previews stay large; only the racing karts are smaller.
+            scaled=pygame.transform.smoothscale(img,RACE_KART_SIZE)
             self.kart_rotation_cache[key]=pygame.transform.rotate(scaled,-quant)
         return self.kart_rotation_cache[key]
 
@@ -1070,12 +1094,12 @@ class WasteKartGame:
         ux,uy=math.cos(r.heading),math.sin(r.heading)
         nx,ny=-uy,ux
         # The kart artwork points toward +x before rotating with the tangent.
-        base=(center[0]-ux*20,center[1]-uy*20)
+        base=(center[0]-ux*15,center[1]-uy*15)
         power=clamp((r.start_modifier-1.0)/0.45,0.0,1.0)
         life=clamp(r.start_effect_left/REACTION_EFFECT_SECONDS,0.0,1.0)
         flicker=math.sin(self.elapsed*29.0+r.index*2.4)*3.0
-        extent=(14.0+17.0*power+flicker)*(0.55+0.45*life)
-        breadth=6.5+2.0*power
+        extent=(12.0+14.0*power+flicker)*(0.55+0.45*life)
+        breadth=5.0+1.7*power
         def at(back,side):
             return (round(base[0]-ux*back+nx*side),
                     round(base[1]-uy*back+ny*side))
@@ -1101,27 +1125,27 @@ class WasteKartGame:
         if r.powerup_kind=='turbo':
             # Strong, hot exhaust flames with gold sparks behind the bumper.
             for side in (-7,7):
-                root=(center[0]-ux*19+nx*side,center[1]-uy*19+ny*side)
+                root=(center[0]-ux*14+nx*side*.74,center[1]-uy*14+ny*side*.74)
                 flick=math.sin(t*29+side+r.index)*5
                 def at(back,width):
                     return (round(root[0]-ux*back+nx*width),
                             round(root[1]-uy*back+ny*width))
                 pygame.draw.polygon(self.canvas,(247,70,43),
-                    [at(0,-5),at(31+flick,0),at(0,5)])
+                    [at(0,-4),at(25+flick,0),at(0,4)])
                 pygame.draw.polygon(self.canvas,(255,209,61),
-                    [at(0,-2.5),at(21+flick*.5,0),at(0,2.5)])
-                pygame.draw.circle(self.canvas,(255,244,133),at(38+flick,0),3)
+                    [at(0,-2.5),at(18+flick*.5,0),at(0,2.5)])
+                pygame.draw.circle(self.canvas,(255,244,133),at(32+flick,0),3)
         else:
             # Tailwind is a cool turquoise airflow, NOT another orange flame.
             for side in (-1,1):
                 for k in range(3):
                     shift=(t*47+k*20+r.index*9)%59
-                    side_dist=side*(17+math.sin(t*8+k)*3)
+                    side_dist=side*(12+math.sin(t*8+k)*2)
                     a=(round(center[0]-ux*(10+shift)+nx*side_dist),
                        round(center[1]-uy*(10+shift)+ny*side_dist))
                     b=(round(a[0]-ux*(11+k*2)),round(a[1]-uy*(11+k*2)))
                     pygame.draw.line(self.canvas,(74,235,234),a,b,3 if k==0 else 2)
-            pygame.draw.circle(self.canvas,(161,255,243),center,27,2)
+            pygame.draw.circle(self.canvas,(161,255,243),center,21,2)
 
     def draw_powerup_icon(self,kind,center,size=34):
         """Recognizable, text-free icons for children who cannot read yet.
@@ -1177,42 +1201,44 @@ class WasteKartGame:
                         -0.55,0.55,2)
 
     def draw_item_buttons(self):
-        """One big pictorial item button per child, always in their kart color."""
-        gap=7
-        width=int((780-gap*(self.players-1))/self.players)
-        for index,racer in enumerate(self.racers):
-            x=10+index*(width+gap)
-            rect=pygame.Rect(x,547,width,47)
-            held=racer.held_powerup
-            active=(racer.powerup_kind if racer.powerup_left>0 else None)
-            kind=held if held is not None else active
-            border=POWERUP_COLORS[kind] if kind else PALETTE[racer.kart_id]
-            pygame.draw.rect(self.canvas,(31,44,67),rect,border_radius=11)
-            pygame.draw.rect(self.canvas,border,rect,3,border_radius=11)
-            self.text(f'P{index+1}',(rect.left+27,rect.centery-3),23,
-                      PALETTE[racer.kart_id])
-            icon_center=(rect.centerx+9,rect.centery-3)
-            self.draw_powerup_icon(kind,icon_center,34)
+        """Four fixed corner locations shared with the reflex-start buttons.
+
+        Never use the legacy bottom action bar: for one to four children, each
+        player's entire button stays in the same playfield corner throughout
+        the countdown and the race.
+        """
+        rects = self.player_action_rects()
+        for index, racer in enumerate(self.racers):
+            rect = rects[index]
+            held = racer.held_powerup
+            active = racer.powerup_kind if racer.powerup_left > 0 else None
+            kind = held if held is not None else active
+            border = POWERUP_COLORS[kind] if kind else PALETTE[racer.kart_id]
+
+            pygame.draw.rect(self.canvas, (15, 23, 39), rect.move(0, 3), border_radius=16)
+            pygame.draw.rect(self.canvas, (39, 51, 73), rect, border_radius=16)
+            pygame.draw.rect(self.canvas, border, rect, 4, border_radius=16)
+            badge = (rect.left+17, rect.top+17)
+            pygame.draw.circle(self.canvas, PALETTE[racer.kart_id], badge, 13)
+            self.text(str(index+1), badge, 19, INK)
+            icon_center = (rect.centerx+5, rect.centery-6)
+            self.draw_powerup_icon(kind, icon_center, 45)
+
             if held is not None:
-                # Small pulsing spark: a collected item is ready to tap.
-                beat=math.sin(self.elapsed*9+index)*3
-                pygame.draw.circle(self.canvas,(255,251,172),
-                    (round(icon_center[0]+18+beat),round(icon_center[1]-13)),3)
+                sparkle = 3 + round(2*abs(math.sin(self.elapsed*8+index)))
+                pygame.draw.circle(self.canvas, (255, 250, 164),
+                                   (rect.right-16, rect.top+15), sparkle)
+                self.text('TAP!', (rect.centerx, rect.bottom-11), 17, WHITE)
             elif active is not None:
-                # Clockwise remaining-duration halo around the active icon.
-                fraction=clamp(racer.powerup_left/POWERUP_DURATION[active],0,1)
-                ring=pygame.Rect(icon_center[0]-20,icon_center[1]-20,40,40)
-                if fraction>.01:
-                    pygame.draw.arc(self.canvas,border,ring,
-                                    -math.pi/2,-math.pi/2+2*math.pi*fraction,3)
-            progress=clamp(racer.distance/max(1,racer.total_length),0,1)
-            pygame.draw.line(self.canvas,(70,83,112),(rect.left+11,rect.bottom-7),
-                             (rect.right-11,rect.bottom-7),3)
-            if progress>0:
-                pygame.draw.line(self.canvas,PALETTE[racer.kart_id],
-                                 (rect.left+11,rect.bottom-7),
-                                 (round(rect.left+11+(rect.width-22)*progress),rect.bottom-7),3)
-            self.action_buttons.append((rect,('powerup_press',index)))
+                fraction = clamp(racer.powerup_left/POWERUP_DURATION[active], 0, 1)
+                ring = pygame.Rect(icon_center[0]-27, icon_center[1]-27, 54, 54)
+                if fraction > 0.01:
+                    pygame.draw.arc(self.canvas, border, ring,
+                                    -math.pi/2, -math.pi/2+2*math.pi*fraction, 4)
+                self.text('GO!', (rect.centerx, rect.bottom-11), 17, WHITE)
+            else:
+                self.text('?', (rect.centerx, rect.bottom-11), 18, MUTED)
+            self.action_buttons.append((rect, ('powerup_press', index)))
 
     def display_racers(self):
         ordered=([self.active_ghost] if self.active_ghost is not None else [])+self.racers
@@ -1220,7 +1246,7 @@ class WasteKartGame:
             xy=self.world_to_screen(r.pos)
             # Shadows, outlined friendly cartoon karts and a player number.
             if not r.is_ghost:
-                pygame.draw.ellipse(self.canvas,(21,28,38),(xy[0]-23,xy[1]+6,46,15))
+                pygame.draw.ellipse(self.canvas,(21,28,38),(xy[0]-17,xy[1]+6,34,11))
             img=self.racer_image(r.kart_id,r.heading)
             if r.is_ghost:
                 key=('ghost',r.kart_id,int(round(math.degrees(r.heading)/6))*6%360)
@@ -1231,12 +1257,13 @@ class WasteKartGame:
             center=(int(xy[0]),int(xy[1]))
             self.boost_flame(r,center)
             self.powerup_visuals(r,center)
+            self.draw_interaction_effect(r,center)
             self.canvas.blit(img,img.get_rect(center=center))
             if r.is_ghost:continue
-            dot=(center[0],center[1]-23)
-            pygame.draw.circle(self.canvas,(20,31,52),dot,11)
-            pygame.draw.circle(self.canvas,PALETTE[r.kart_id],dot,9)
-            self.text(str(r.index+1),dot,19,(23,28,41))
+            dot=(center[0],center[1]-18)
+            pygame.draw.circle(self.canvas,(20,31,52),dot,9)
+            pygame.draw.circle(self.canvas,PALETTE[r.kart_id],dot,7)
+            self.text(str(r.index+1),dot,16,(23,28,41))
 
     def race_page(self):
         self.map_base()
@@ -1264,7 +1291,6 @@ class WasteKartGame:
         for index,r in enumerate(self.racers):
             left=10+index*w
             label=f'P{index+1}  '+('FINISH!' if r.finished else f'LAP {min(self.laps,r.completed_laps+1)}/{self.laps}')
-            if item_buttons:continue
             self.text(label,(left+8,552),22,PALETTE[r.kart_id],align='left')
             trackrect=pygame.Rect(round(left+6),574,round(w-22),12)
             pygame.draw.rect(self.canvas,(57,72,100),trackrect,border_radius=6)
@@ -1306,27 +1332,35 @@ class WasteKartGame:
         self.text(f'{max(1,math.ceil(GREEN_AT-self.countdown))}',(400,358),56,YELLOW)
 
     def draw_reflex_buttons(self):
-        """Large, independent, color-coded buttons for 1–4 local players."""
-        gap=10
-        width=min(182,int((766-(self.players-1)*gap)/self.players))
-        total=self.players*width+(self.players-1)*gap
-        left=(LOGICAL_W-total)//2
-        for player in range(self.players):
-            rect=(left+player*(width+gap),454,width,79)
-            color=PALETTE[self.kart_ids[player]]
-            status=self.reaction_status[player]
-            if status=='early':label=f'P{player+1} EARLY'
-            elif status=='boost':label=f'P{player+1} BOOST!'
-            elif status=='late':label=f'P{player+1} OK'
-            else:label=f'P{player+1} TAP!'
-            disabled=status!='waiting'
-            # Retain each player's color after a press; do not gray out the button.
-            self.button(rect,label,('reflex_press',player) if not disabled else None,
-                        color=color,selected=False,size=25)
-        if self.state=='countdown':
-            self.text('WAIT FOR GREEN!',(400,431),27,YELLOW)
+        """Draw each child's reaction button in their permanent playfield corner."""
+        for player, rect in enumerate(self.player_action_rects()):
+            color = PALETTE[self.kart_ids[player]]
+            status = self.reaction_status[player]
+            pygame.draw.rect(self.canvas, (15, 23, 39), rect.move(0, 3), border_radius=16)
+            pygame.draw.rect(self.canvas, (42, 56, 80), rect, border_radius=16)
+            pygame.draw.rect(self.canvas, color, rect, 4, border_radius=16)
+            badge = (rect.left+17, rect.top+17)
+            pygame.draw.circle(self.canvas, color, badge, 13)
+            self.text(str(player+1), badge, 19, INK)
+            if status == 'early':
+                self.text('EARLY', (rect.centerx, rect.centery), 27, (255, 166, 165))
+                footer = 'WAIT!'
+            elif status == 'boost':
+                self.text('BOOST!', (rect.centerx, rect.centery), 25, YELLOW)
+                pygame.draw.circle(self.canvas, YELLOW, (rect.right-17,rect.top+17), 6)
+                footer = 'FAST!'
+            elif status == 'late':
+                self.text('OK!', (rect.centerx,rect.centery), 30, WHITE)
+                footer = 'READY'
+            else:
+                self.draw_tap_icon((rect.centerx,rect.centery-4), 27, WHITE)
+                footer = 'TAP!'
+                self.action_buttons.append((rect, ('reflex_press', player)))
+            self.text(footer, (rect.centerx,rect.bottom-12), 18, WHITE)
+        if self.state == 'countdown':
+            self.text('WAIT FOR GREEN!', (400,431), 27, YELLOW)
         else:
-            self.text('TAP NOW FOR A BOOST!',(400,431),27,YELLOW)
+            self.text('TAP YOUR CORNER FOR A BOOST!', (400,431), 27, YELLOW)
 
     def celebrate(self):
         self.confetti=[]
@@ -1549,6 +1583,7 @@ class WasteKartGame:
         self.ghost_target_time=None
         self.racers=[Racer(i,self.kart_ids[i],self.routes[i],laps=self.laps)
                      for i in range(self.players)]
+        self.bump_cooldowns={}
         # Respawn each box for each new race; all players share each box.
         for box in self.pickups:
             box.hidden_until=0.0
@@ -1592,6 +1627,97 @@ class WasteKartGame:
         # Runs with power-ups ON are not compared with item-free time trials.
         return (self.cup*4+self.track_index,self.laps,
                 bool(self.powerups_enabled),bool(self.reflex_start))
+
+    def update_interactions(self, dt):
+        """Pairwise, deterministic slipstreaming and gentle kart bumps.
+
+        No route coordinates are altered. A child always gets the line they
+        drew; other karts only influence speed, with brief visual effects.
+        Ghost karts are excluded, and the whole mechanic can be switched off.
+        Pairwise checks are O(n²) for at most four players (six comparisons).
+        """
+        for racer in self.racers:
+            racer.drafting=False
+            racer.interaction_factor=1.0
+            racer.bump_fx_left=max(0.0,racer.bump_fx_left-dt)
+        if not self.interactions_enabled or self.players<2:
+            return
+        for i,a in enumerate(self.racers):
+            if a.finished:
+                continue
+            for b in self.racers[i+1:]:
+                if b.finished:
+                    continue
+                dx=b.pos[0]-a.pos[0]
+                dy=b.pos[1]-a.pos[1]
+                separation=math.hypot(dx,dy)
+                if separation>DRAFT_MAX+3.0:
+                    continue
+                # Drafting only works behind a moving kart, facing the same
+                # direction. Side-by-side, opposite, or crossing karts do not
+                # create unrealistic turbo wind. Neither benefit can stack.
+                alignment=(math.cos(a.heading)*math.cos(b.heading)+
+                           math.sin(a.heading)*math.sin(b.heading))
+                if (alignment>0.86 and separation>=DRAFT_MIN and
+                        self.elapsed>BUMP_MIN_TIME):
+                    for follower,leader in ((a,b),(b,a)):
+                        ux,uy=math.cos(leader.heading),math.sin(leader.heading)
+                        ahead=((leader.pos[0]-follower.pos[0])*ux+
+                               (leader.pos[1]-follower.pos[1])*uy)
+                        sideways=abs((leader.pos[0]-follower.pos[0])*(-uy)+
+                                    (leader.pos[1]-follower.pos[1])*ux)
+                        if (DRAFT_MIN<=ahead<=DRAFT_MAX and
+                                sideways<=DRAFT_HALF_WIDTH and leader.speed>65.0):
+                            follower.drafting=True
+                            follower.interaction_factor=max(
+                                follower.interaction_factor,DRAFT_SPEED_FACTOR)
+                # A gentle 'bonk': don't bounce a child off the authored line.
+                # Use a cooldown so two karts travelling together aren't
+                # permanently slowed or showered with endless sparks.
+                if separation<BUMP_DISTANCE and self.elapsed>BUMP_MIN_TIME:
+                    pair=(a.index,b.index)
+                    if self.elapsed>=self.bump_cooldowns.get(pair,0.0):
+                        self.bump_cooldowns[pair]=self.elapsed+BUMP_COOLDOWN
+                        for racer in (a,b):
+                            racer.bump_fx_left=BUMP_EFFECT_SECONDS
+                        # The kart that approaches from behind slows more;
+                        # the leader gets a tiny nudge. For a side impact,
+                        # both slow equally. Interaction is intentionally soft.
+                        projection=(dx*math.cos(a.heading)+dy*math.sin(a.heading))
+                        if alignment>0.65 and abs(projection)>BUMP_DISTANCE*.28:
+                            leader=b if projection>0 else a
+                            follower=a if projection>0 else b
+                            follower.speed*=0.66
+                            leader.speed=min(leader.speed*1.04,self.track.max_speed*1.5)
+                        else:
+                            a.speed*=0.78
+                            b.speed*=0.78
+
+    def draw_interaction_effect(self,r,center):
+        """Small, allocation-free wake and impact stars under the kart."""
+        if (r.is_ghost or self.state!='race' or not self.interactions_enabled):
+            return
+        ux,uy=math.cos(r.heading),math.sin(r.heading)
+        nx,ny=-uy,ux
+        if r.drafting:
+            wobble=math.sin(self.elapsed*14+r.index)*2
+            for side in (-1,1):
+                lateral=side*(11+wobble)
+                a=(round(center[0]-ux*16+nx*lateral),
+                   round(center[1]-uy*16+ny*lateral))
+                b=(round(center[0]-ux*29+nx*lateral*1.15),
+                   round(center[1]-uy*29+ny*lateral*1.15))
+                pygame.draw.line(self.canvas,(117,243,243),a,b,2)
+        if r.bump_fx_left>0:
+            strength=r.bump_fx_left/BUMP_EFFECT_SECONDS
+            radius=7+round(8*strength)
+            x,y=center
+            for step in range(5):
+                angle=step*math.tau/5+self.elapsed*3
+                dx,dy=math.cos(angle),math.sin(angle)
+                q=(round(x+dx*radius),round(y+dy*radius))
+                q2=(round(x+dx*(radius+4)),round(y+dy*(radius+4)))
+                pygame.draw.line(self.canvas,(255,231,122),q,q2,2)
 
     def try_collect_powerups(self, racer, previous):
         """Fast moving karts cannot skip a box between two 60FPS frames."""
@@ -1667,6 +1793,7 @@ class WasteKartGame:
         elif name=='laps':self.laps=value
         elif name=='reflex':self.reflex_start=bool(value)
         elif name=='powerups':self.powerups_enabled=bool(value)
+        elif name=='interactions':self.interactions_enabled=bool(value)
         elif name=='lines':self.show_racing_lines=bool(value)
         elif name=='state':
             self.state=value
@@ -1773,6 +1900,7 @@ class WasteKartGame:
         elif self.state=='race':
             if not self.paused:
                 self.elapsed+=dt
+                self.update_interactions(dt)
                 for racer in self.racers:
                     before=racer.pos
                     racer.update(dt,self.elapsed,self.track)
