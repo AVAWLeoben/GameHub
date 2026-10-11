@@ -1,10 +1,10 @@
-"""WasteKart 1.3.2 - visible reflex boosts and disappearing driven trails.
+"""WasteKart 1.4 - optional collectible power-ups and animated question boxes.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
 
 Original four-cup, sixteen-course art resides in assets/WasteKart.
-Races use 16 original tracks. Power-ups and kart collisions are future additions.
+Races use 16 original tracks. Kart-to-kart interactions are future additions.
 """
 import asyncio
 import bisect
@@ -37,6 +37,11 @@ REACTION_WINDOW = 1.5       # Seconds after green; no penalty if a child simply 
 REACTION_EFFECT_SECONDS = 3.0
 EARLY_START_MODIFIER = 0.82 # A gentle, temporary false-start penalty.
 TRAIL_CHUNK_WORLD = 240.0  # Pre-render short route spans, not whole paths every frame.
+POWERUP_RESPAWN = 7.0      # Same shared box disappears temporarily for all players.
+POWERUP_PICKUP_RADIUS = 23.0  # World pixels: must draw near a box, not just follow road center.
+POWERUP_DURATION = {'turbo': 3.2, 'tailwind': 6.0}
+POWERUP_MULTIPLIER = {'turbo': 1.48, 'tailwind': 1.20}
+POWERUP_COLORS = {'turbo': (255, 169, 59), 'tailwind': (91, 239, 240)}
 
 
 def clamp(value, lo, hi):
@@ -321,6 +326,25 @@ class AheadTrail:
                 paint_trail_section(surface,screen_points,self.color,self.width,
                                     self.ghost,phase)
 
+class PowerupBox:
+    """Shared road pickup: collecting it hides it even when the kart is full."""
+    def __init__(self, pos, slot):
+        self.pos=tuple(pos)
+        self.slot=slot
+        self.hidden_until=0.0
+        self.picked_at=-100.0
+
+    def available(self, now):
+        return now >= self.hidden_until
+
+    def collect(self, now):
+        if not self.available(now):
+            return False
+        self.picked_at=now
+        self.hidden_until=now+POWERUP_RESPAWN
+        return True
+
+
 class Track:
     def __init__(self,entry):
         self.entry=entry
@@ -335,12 +359,42 @@ class Track:
         self.centerline_route=Route(self.centerline+[self.centerline[0]])
         mask_path=os.path.join(ASSET_ROOT,*entry['road_mask'].split('/'))
         self.mask=pygame.image.load(mask_path).convert()
+        self.pickup_positions=self.find_pickup_positions()
 
     def on_road(self,point):
         x,y=int(point[0]),int(point[1])
         if not (0<=x<MAP_W and 0<=y<MAP_H):return False
         # A single O(1) lookup, even with four karts on iPad.
         return self.mask.get_at((x,y))[0] > 127
+
+    def find_pickup_positions(self):
+        """Offset boxes from the ideal line but keep them ON the road.
+
+        Fixed fractions and alternating sides mean predictable, fair positions
+        across all drawing turns and a replay. Road mask validates each site.
+        """
+        route=self.centerline_route
+        spots=[]
+        for slot,fraction in enumerate((.09,.21,.34,.47,.60,.73,.86)):
+            p,angle,_=route.sample(route.length*fraction)
+            nx,ny=-math.sin(angle),math.cos(angle)
+            # 70-79% of road half-width: centerline misses each pickup.
+            side=1 if slot%2==0 else -1
+            found=None
+            for sign in (side,-side):
+                for factor in (.77,.71,.65):
+                    lateral=self.road_half_width*factor*sign
+                    candidate=(p[0]+nx*lateral,p[1]+ny*lateral)
+                    if (28<candidate[0]<MAP_W-28 and
+                            28<candidate[1]<MAP_H-28 and
+                            self.on_road(candidate) and
+                            all(length(candidate,other)>70 for other in spots)):
+                        found=candidate
+                        break
+                if found is not None:break
+            if found is not None:spots.append(found)
+        return spots
+
 
 class Racer:
     """One vehicle drives its entire child-drawn multi-lap spline ONCE."""
@@ -360,7 +414,13 @@ class Racer:
         self.speed=0.0
         self.start_modifier=1.0
         self.start_effect_left=0.0
-        self.modifiers=[]       # Future pickups/slipstreaming hook.
+        self.modifiers=[]       # Future slipstreaming / kart interaction hook.
+        self.held_powerup=None
+        self.powerup_kind=None
+        self.powerup_left=0.0
+        self.used_powerups=[]
+        self.ghost_powerups=[]
+        self.ghost_powerups_index=0
         self.finished=False
         self.finish_time=None
         self.pos,self.heading,_=route.sample(0)
@@ -380,6 +440,22 @@ class Racer:
             self.start_modifier=1.12+0.33*quickness
         self.start_effect_left=REACTION_EFFECT_SECONDS
 
+    def activate_powerup(self, when):
+        """Spend one held power-up; a second pickup can be saved for later."""
+        if self.finished or self.held_powerup is None or self.powerup_left>0:
+            return False
+        kind=self.held_powerup
+        self.held_powerup=None
+        self.start_powerup(kind)
+        self.used_powerups.append((round(when,3),kind))
+        return True
+
+    def start_powerup(self, kind):
+        if kind not in POWERUP_DURATION or self.finished:
+            return
+        self.powerup_kind=kind
+        self.powerup_left=POWERUP_DURATION[kind]
+
     def route_sample(self, distance):
         """Traverse the entire unique drawing, never wrap or teleport."""
         return self.route.sample(distance)
@@ -390,6 +466,14 @@ class Racer:
             if self.ghost_reaction < 0 or elapsed >= self.ghost_reaction:
                 self.apply_start_reaction(self.ghost_reaction)
                 self.ghost_reaction_applied=True
+        if self.is_ghost:
+            # Replay item activations at their original times, but do not
+            # touch shared boxes or alter other players' inventories.
+            while self.ghost_powerups_index<len(self.ghost_powerups):
+                trigger,kind=self.ghost_powerups[self.ghost_powerups_index]
+                if elapsed < trigger:break
+                self.start_powerup(kind)
+                self.ghost_powerups_index+=1
         pos,heading,bend=self.route_sample(self.distance)
         road=track.on_road(pos)
         temporary=1.0
@@ -397,7 +481,10 @@ class Racer:
             temporary+=((self.start_modifier-1.0)
                         * self.start_effect_left/REACTION_EFFECT_SECONDS)
             self.start_effect_left=max(0.0,self.start_effect_left-dt)
-        desired=track.max_speed*bend*(ROAD_FACTOR if road else GRASS_FACTOR)*temporary
+        if self.powerup_left>0 and self.powerup_kind in POWERUP_MULTIPLIER:
+            temporary*=POWERUP_MULTIPLIER[self.powerup_kind]
+            self.powerup_left=max(0.0,self.powerup_left-dt)
+        desired=track.max_speed*bend*(ROAD_FACTOR if road else GRASS_FACTOR)*min(1.95,temporary)
         for modifier in self.modifiers:
             desired*=modifier
         response=3.1 if desired>self.speed else 5.2
@@ -455,9 +542,7 @@ class WasteKartGame:
         self.draw_seconds=60
         self.laps=1
         self.reflex_start=True
-        # Power-ups are not yet implemented; keep the mode setting separate
-        # so a later release can expose an independent ON/OFF toggle.
-        self.powerups_enabled=False
+        self.powerups_enabled=False  # Independent of the reflex start toggle.
         self.reaction_status=[]
         self.reaction_times=[]
         self.cup_stage=0
@@ -486,6 +571,9 @@ class WasteKartGame:
         self.map_surface=None
         self.race_routes_layer=None  # Legacy field; used only during transition.
         self.race_trails=[]      # AheadTrail for each player (+ optional ghost).
+        self.pickups=[]          # Fresh shared boxes for each race; stable during drawing.
+        self.item_box_clock=0.0
+        self.question_mark=None
         self.draw_routes_layer=None
         self.draw_routes_layer_key=None
         self.track=None
@@ -516,6 +604,8 @@ class WasteKartGame:
         if index not in self.track_cache:
             self.track_cache[index]=Track(self.catalog['tracks'][index])
         self.track=self.track_cache[index]
+        self.pickups=([PowerupBox(p,i) for i,p in enumerate(self.track.pickup_positions)]
+                      if self.powerups_enabled else [])
         img=pygame.image.load(self.track.image_path).convert()
         self.map_surface=pygame.transform.smoothscale(img,TRACK_RECT.size)
 
@@ -607,19 +697,21 @@ class WasteKartGame:
         for i,(seconds,label) in enumerate(((15,'15 SEC'),(30,'30 SEC'),(60,'60 SEC'),(None,'NO LIMIT'))):
             self.button((60+i*174,330,156,41),label,('time',seconds),selected=self.draw_seconds==seconds,size=23)
 
-        self.panel((40,389,347,123))
-        self.text('HOW MANY LAPS?',(213,407),25,YELLOW)
-        self.button((54,440,154,58),'1 LAP',('laps',1),selected=self.laps==1,size=28)
-        self.button((219,440,154,58),'3 LAPS',('laps',3),selected=self.laps==3,size=28)
+        self.panel((40,389,347,85))
+        self.text('HOW MANY LAPS?',(213,404),24,YELLOW)
+        self.button((54,426,154,40),'1 LAP',('laps',1),selected=self.laps==1,size=27)
+        self.button((219,426,154,40),'3 LAPS',('laps',3),selected=self.laps==3,size=27)
 
-        self.panel((399,389,361,123))
-        self.text('REFLEX START?',(579,407),25,YELLOW)
-        self.button((412,440,156,58),'OFF',('reflex',False),selected=not self.reflex_start,size=29)
-        self.button((582,440,165,58),'ON!',('reflex',True),selected=self.reflex_start,size=29)
+        self.panel((399,389,361,85))
+        self.text('REFLEX START?',(579,404),24,YELLOW)
+        self.button((412,426,156,40),'OFF',('reflex',False),selected=not self.reflex_start,size=27)
+        self.button((582,426,165,40),'ON!',('reflex',True),selected=self.reflex_start,size=27)
 
-        # No placeholder toggle that misleadingly claims to enable absent items.
-        self.text('POWER-UPS: COMING LATER (OFF)',(400,528),20,MUTED)
-        self.button((255,542,290,48),'CHOOSE CUP  >',('state','tracks'),selected=True,size=26)
+        self.panel((40,480,720,54))
+        self.text('POWER-UPS?',(165,506),26,YELLOW)
+        self.button((306,485,203,43),'OFF',('powerups',False),selected=not self.powerups_enabled,size=27)
+        self.button((526,485,211,43),'ON!',('powerups',True),selected=self.powerups_enabled,size=27)
+        self.button((255,543,290,46),'CHOOSE CUP  >',('state','tracks'),selected=True,size=26)
         self.home()
 
     def tracks_page(self):
@@ -710,6 +802,48 @@ class WasteKartGame:
             for p in (points[0],points[-1]):
                 pygame.draw.circle(self.canvas,color,(round(p[0]),round(p[1])),5)
 
+    def draw_powerup_boxes(self, race=False):
+        """Lightweight rotating / bobbing MK-style cubes, drawn procedurally.
+
+        No textures loaded, no per-frame rotation or scaling allocations.
+        The shared respawn clock is race elapsed time, NOT drawing time.
+        """
+        if not self.powerups_enabled or not self.pickups:return
+        if self.question_mark is None:
+            self.question_mark=self.font(30).render('?',True,(255,251,220))
+        t=self.item_box_clock
+        for box in self.pickups:
+            x,y=self.world_to_screen(box.pos)
+            if race and not box.available(self.elapsed):
+                age=self.elapsed-box.picked_at
+                if 0<=age<.48:
+                    radius=round(8+age*48)
+                    pygame.draw.circle(self.canvas,(255,226,130),(round(x),round(y)),radius,3)
+                    pygame.draw.circle(self.canvas,(147,237,248),(round(x),round(y)),max(3,radius-6),2)
+                continue
+            phase=t*3.0+box.slot*.91
+            bob=math.sin(phase)*3.2
+            cx,cy=round(x),round(y+bob)
+            # Fake 3D rotating cube: face narrows and grows while a side face
+            # flips from left to right. All colors contrast with the road.
+            spin=math.sin(phase)
+            wide=10+round(7*abs(math.cos(phase)))
+            depth=7 if spin>=0 else -7
+            pts=[(cx-wide,cy-13),(cx+wide,cy-13),(cx+wide,cy+13),(cx-wide,cy+13)]
+            side=[pts[1],(pts[1][0]+depth,pts[1][1]-5),
+                  (pts[2][0]+depth,pts[2][1]-5),pts[2]] if spin>=0 else [
+                  pts[0],(pts[0][0]+depth,pts[0][1]-5),
+                  (pts[3][0]+depth,pts[3][1]-5),pts[3]]
+            pygame.draw.ellipse(self.canvas,(37,35,71),(cx-17,cy+14,34,8))
+            pygame.draw.polygon(self.canvas,(67,187,228),side)
+            pygame.draw.polygon(self.canvas,(144,86,211),pts)
+            pygame.draw.polygon(self.canvas,(218,176,255),pts,3)
+            pygame.draw.line(self.canvas,(255,238,173),(cx-wide+4,cy-9),(cx+wide-3,cy-9),2)
+            mark=self.question_mark
+            self.canvas.blit(mark,mark.get_rect(center=(cx,cy+1)))
+            glint=(cx+wide+depth+3,cy-15)
+            pygame.draw.circle(self.canvas,(255,251,177),glint,2+(int(t*5+box.slot)%2))
+
     def draw_start(self):
         if not self.track:return
         center=self.world_to_screen(self.track.centerline[0])
@@ -766,6 +900,7 @@ class WasteKartGame:
         self.map_base()
         self.ensure_draw_routes_layer()
         self.canvas.blit(self.draw_routes_layer,(0,0))
+        self.draw_powerup_boxes()
         color=PALETTE[self.kart_ids[self.draw_player]]
         if len(self.draft)>1:self.draw_route(self.draft,color,6)
         self.draw_start()
@@ -821,6 +956,67 @@ class WasteKartGame:
         pygame.draw.circle(self.canvas,(255,186,74),at(spark,breadth*.6),2)
         pygame.draw.circle(self.canvas,(255,212,93),at(spark+6,-breadth*.45),2)
 
+    def powerup_visuals(self,r,center):
+        """Distinct continuous effects make both boost types unambiguous."""
+        if (r.is_ghost or r.finished or self.state!='race' or
+                r.powerup_left<=0 or r.powerup_kind not in POWERUP_DURATION):
+            return
+        ux,uy=math.cos(r.heading),math.sin(r.heading)
+        nx,ny=-uy,ux
+        t=self.elapsed
+        if r.powerup_kind=='turbo':
+            # Strong, hot exhaust flames with gold sparks behind the bumper.
+            for side in (-7,7):
+                root=(center[0]-ux*19+nx*side,center[1]-uy*19+ny*side)
+                flick=math.sin(t*29+side+r.index)*5
+                def at(back,width):
+                    return (round(root[0]-ux*back+nx*width),
+                            round(root[1]-uy*back+ny*width))
+                pygame.draw.polygon(self.canvas,(247,70,43),
+                    [at(0,-5),at(31+flick,0),at(0,5)])
+                pygame.draw.polygon(self.canvas,(255,209,61),
+                    [at(0,-2.5),at(21+flick*.5,0),at(0,2.5)])
+                pygame.draw.circle(self.canvas,(255,244,133),at(38+flick,0),3)
+        else:
+            # Tailwind is a cool turquoise airflow, NOT another orange flame.
+            for side in (-1,1):
+                for k in range(3):
+                    shift=(t*47+k*20+r.index*9)%59
+                    side_dist=side*(17+math.sin(t*8+k)*3)
+                    a=(round(center[0]-ux*(10+shift)+nx*side_dist),
+                       round(center[1]-uy*(10+shift)+ny*side_dist))
+                    b=(round(a[0]-ux*(11+k*2)),round(a[1]-uy*(11+k*2)))
+                    pygame.draw.line(self.canvas,(74,235,234),a,b,3 if k==0 else 2)
+            pygame.draw.circle(self.canvas,(161,255,243),center,27,2)
+
+    def draw_item_buttons(self):
+        """One large tappable action per player, same slots as reflex start."""
+        gap=7
+        width=int((780-gap*(self.players-1))/self.players)
+        for index,racer in enumerate(self.racers):
+            x=10+index*(width+gap)
+            rect=pygame.Rect(x,547,width,47)
+            if racer.held_powerup is not None:
+                label=f'P{index+1}  {racer.held_powerup.upper()}!'
+                border=POWERUP_COLORS[racer.held_powerup]
+            elif racer.powerup_left>0:
+                label=f'P{index+1}  {racer.powerup_kind.upper()} {racer.powerup_left:.1f}s'
+                border=POWERUP_COLORS[racer.powerup_kind]
+            else:
+                label=f'P{index+1}  FIND [?]'
+                border=PALETTE[racer.kart_id]
+            pygame.draw.rect(self.canvas,(36,49,77),rect,border_radius=11)
+            pygame.draw.rect(self.canvas,border,rect,3,border_radius=11)
+            self.text(label,(rect.centerx,rect.centery-3),22,WHITE)
+            progress=clamp(racer.distance/max(1,racer.total_length),0,1)
+            pygame.draw.line(self.canvas,(70,83,112),(rect.left+11,rect.bottom-7),
+                             (rect.right-11,rect.bottom-7),3)
+            if progress>0:
+                pygame.draw.line(self.canvas,PALETTE[racer.kart_id],
+                                 (rect.left+11,rect.bottom-7),
+                                 (round(rect.left+11+(rect.width-22)*progress),rect.bottom-7),3)
+            self.action_buttons.append((rect,('powerup_press',index)))
+
     def display_racers(self):
         ordered=([self.active_ghost] if self.active_ghost is not None else [])+self.racers
         for r in ordered:
@@ -837,6 +1033,7 @@ class WasteKartGame:
                 img=self.kart_rotation_cache[key]
             center=(int(xy[0]),int(xy[1]))
             self.boost_flame(r,center)
+            self.powerup_visuals(r,center)
             self.canvas.blit(img,img.get_rect(center=center))
             if r.is_ghost:continue
             dot=(center[0],center[1]-23)
@@ -850,6 +1047,7 @@ class WasteKartGame:
         # sections disappear immediately, including during lap 2 and lap 3.
         for racer,trail in self.race_trails:
             trail.draw(self.canvas,racer.distance)
+        self.draw_powerup_boxes(race=self.state=='race')
         self.draw_start()
         self.display_racers()
         pygame.draw.rect(self.canvas,INK,(0,0,LOGICAL_W,73))
@@ -860,10 +1058,15 @@ class WasteKartGame:
             self.text(f'{self.elapsed:05.1f}s',(704,28),38,WHITE)
             self.text(f'{self.laps} LAP'+('S' if self.laps>1 else '')+(' - GHOST' if self.active_ghost else ' - DRAWN ROADS'),(396,58),24,MUTED)
         pygame.draw.rect(self.canvas,INK,(0,544,LOGICAL_W,56))
+        item_buttons=(self.powerups_enabled and self.state=='race' and
+                      not self.paused and (not self.reflex_start or self.elapsed>=REACTION_WINDOW))
+        if item_buttons:
+            self.draw_item_buttons()
         w=(LOGICAL_W-24)/max(1,len(self.racers))
         for index,r in enumerate(self.racers):
             left=10+index*w
             label=f'P{index+1}  '+('FINISH!' if r.finished else f'LAP {min(self.laps,r.completed_laps+1)}/{self.laps}')
+            if item_buttons:continue
             self.text(label,(left+8,552),22,PALETTE[r.kart_id],align='left')
             trackrect=pygame.Rect(round(left+6),574,round(w-22),12)
             pygame.draw.rect(self.canvas,(57,72,100),trackrect,border_radius=6)
@@ -1124,15 +1327,20 @@ class WasteKartGame:
         self.ghost_target_time=None
         self.racers=[Racer(i,self.kart_ids[i],self.routes[i],laps=self.laps)
                      for i in range(self.players)]
+        # Respawn each box for each new race; all players share each box.
+        for box in self.pickups:
+            box.hidden_until=0.0
+            box.picked_at=-100.0
         self.reaction_status=['waiting']*self.players
         self.reaction_times=[None]*self.players
         self.active_ghost=None
         if self.players==1:
-            record=self.ghost_records.get((self.cup*4+self.track_index,self.laps))
+            record=self.ghost_records.get(self.ghost_key())
             if record is not None:
                 self.ghost_target_time=record['time']
                 self.active_ghost=Racer(-1,record['kart_id'],Route(record['points'],record.get('lap_boundaries')),True,laps=self.laps)
                 self.active_ghost.ghost_reaction=record.get('reaction')
+                self.active_ghost.ghost_powerups=list(record.get('powerup_uses',[]))
         # Cached cropped route spans: only the current span is dynamically
         # drawn each frame, and traveled geometry is never displayed again.
         self.race_routes_layer=None
@@ -1157,6 +1365,33 @@ class WasteKartGame:
         self.cup_history=[]
         self.begin_new_race()
 
+    def ghost_key(self):
+        # Runs with power-ups ON are not compared with item-free time trials.
+        return (self.cup*4+self.track_index,self.laps,
+                bool(self.powerups_enabled),bool(self.reflex_start))
+
+    def try_collect_powerups(self, racer, previous):
+        """Fast moving karts cannot skip a box between two 60FPS frames."""
+        if not self.powerups_enabled or racer.is_ghost or racer.finished:
+            return
+        for box in self.pickups:
+            if (box.available(self.elapsed) and
+                    segment_near_point(previous,racer.pos,box.pos)<=POWERUP_PICKUP_RADIUS):
+                box.collect(self.elapsed)
+                if racer.held_powerup is None:
+                    racer.held_powerup=self.rng.choice(('turbo','tailwind'))
+                # If the kart is already carrying an item, the box STILL
+                # despawns but the existing inventory is never replaced.
+
+    def activate_held_powerup(self, player):
+        if (not self.powerups_enabled or self.state!='race' or self.paused or
+                not 0<=player<len(self.racers)):
+            return False
+        # Reuse the same button as the reflex test AFTER its timing window.
+        if self.reflex_start and self.elapsed<REACTION_WINDOW:
+            return False
+        return self.racers[player].activate_powerup(self.elapsed)
+
     def finish_race(self):
         self.state='results'
         # A frozen finish order is used to award 9/6/3/1 exactly once.
@@ -1166,13 +1401,14 @@ class WasteKartGame:
             self.cup_history.append([next(r.finish_time for r in self.racers if r.index==i) for i in range(self.players)])
         # Ghost is the best previous race in this session, not stored on disk.
         if self.players==1:
-            key=(self.cup*4+self.track_index,self.laps)
+            key=self.ghost_key()
             r=self.racers[0]
             best=self.ghost_records.get(key)
             if best is None or r.finish_time<best['time']:
                 self.ghost_records[key]={'time':r.finish_time,'points':list(r.route.points),
                                          'lap_boundaries':list(r.route.lap_boundaries),
-                                         'kart_id':r.kart_id,'reaction':self.reaction_times[0]}
+                                         'kart_id':r.kart_id,'reaction':self.reaction_times[0],
+                                         'powerup_uses':list(r.used_powerups)}
                 self.new_best=True
         self.celebrate()
 
@@ -1207,6 +1443,7 @@ class WasteKartGame:
         elif name=='time':self.draw_seconds=value
         elif name=='laps':self.laps=value
         elif name=='reflex':self.reflex_start=bool(value)
+        elif name=='powerups':self.powerups_enabled=bool(value)
         elif name=='state':
             self.state=value
             if value=='karts':self.kart_player=0
@@ -1224,6 +1461,7 @@ class WasteKartGame:
             elif self.race_mode=='cup':self.start_championship()
             else:self.begin_new_race()
         elif name=='reflex_press':self.press_reflex(value)
+        elif name=='powerup_press':self.activate_held_powerup(value)
         elif name=='start_draw':self.begin_draw()
         elif name=='clear':
             self.draft=[self.track.centerline[0]]
@@ -1265,6 +1503,14 @@ class WasteKartGame:
                 if self.state in ('race','countdown'):
                     self.paused=not self.paused
                 else:self.running=False
+            elif event.key in (pygame.K_1,pygame.K_2,pygame.K_3,pygame.K_4):
+                # Desktop accessibility/testing: number keys mirror each
+                # player's colored action button (iPad still uses touch).
+                player=event.key-pygame.K_1
+                if self.state=='countdown' or (self.reflex_start and self.state=='race'
+                                                and self.elapsed<REACTION_WINDOW):
+                    self.press_reflex(player)
+                else:self.activate_held_powerup(player)
             elif event.key==pygame.K_SPACE:
                 if self.state=='draw':self.finish_draw()
                 elif self.state in ('race','countdown'):self.paused=not self.paused
@@ -1289,6 +1535,7 @@ class WasteKartGame:
         elif t==pygame.MOUSEMOTION:self.finger_motion(mouse,pos)
 
     def update(self,dt):
+        self.item_box_clock+=dt
         if self.state=='draw':
             if self.time_left is not None:
                 self.time_left-=dt
@@ -1303,7 +1550,9 @@ class WasteKartGame:
             if not self.paused:
                 self.elapsed+=dt
                 for racer in self.racers:
+                    before=racer.pos
                     racer.update(dt,self.elapsed,self.track)
+                    self.try_collect_powerups(racer,before)
                 if self.active_ghost is not None:
                     self.active_ghost.update(dt,self.elapsed,self.track)
                 if self.racers and all(r.finished for r in self.racers):
