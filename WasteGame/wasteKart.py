@@ -1,4 +1,4 @@
-"""WasteKart 1.3.1 - optional reflex start and three independently drawn laps.
+"""WasteKart 1.3.2 - visible reflex boosts and disappearing driven trails.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
@@ -36,6 +36,7 @@ GREEN_AT = 3.0
 REACTION_WINDOW = 1.5       # Seconds after green; no penalty if a child simply waits.
 REACTION_EFFECT_SECONDS = 3.0
 EARLY_START_MODIFIER = 0.82 # A gentle, temporary false-start penalty.
+TRAIL_CHUNK_WORLD = 240.0  # Pre-render short route spans, not whole paths every frame.
 
 
 def clamp(value, lo, hi):
@@ -223,6 +224,103 @@ class Route:
         bend=self.curve_factors[j]*(1-t)+self.curve_factors[j+1]*t
         return lerp(a,b,t),angle,bend
 
+
+def subroute_points(route, start_distance, end_distance):
+    """Exact route portion [start, end] by arc length, with interpolated ends.
+
+    Keeping slices separate preserves future portions of a three-lap route,
+    even if a later lap drives exactly on top of an earlier one.
+    """
+    if len(route.points)<2 or route.length<1e-5:
+        return []
+    start=clamp(float(start_distance),0.0,route.length)
+    end=clamp(float(end_distance),start,route.length)
+    if end-start<1e-5:
+        return []
+    lo=bisect.bisect_right(route.accumulated,start)
+    hi=bisect.bisect_left(route.accumulated,end)
+    return ([route.sample(start)[0]] +
+            route.points[lo:hi] +
+            [route.sample(end)[0]])
+
+
+def paint_trail_section(surface, points, color, width, dashed=False, phase=0.0):
+    """Paint a screen-space path segment, respecting dashed distance phase."""
+    if len(points)<2:return
+    if not dashed:
+        pygame.draw.lines(surface,color,False,points,width)
+        return
+    walked=float(phase)
+    dash_length=11.0
+    for a,b in zip(points,points[1:]):
+        span=length(a,b)
+        if span<1e-5:continue
+        used=0.0
+        while used<span-1e-5:
+            remainder=dash_length-(walked%dash_length)
+            step=min(span-used,max(1e-4,remainder))
+            if int(walked/dash_length)%2==0:
+                pygame.draw.line(surface,color,lerp(a,b,used/span),
+                                 lerp(a,b,(used+step)/span),width)
+            used+=step
+            walked+=step
+
+
+class AheadTrail:
+    """Display ONLY the route still ahead of one kart.
+
+    Completed 240-world-pixel spans use immutable, tightly cropped alpha
+    surfaces. The single span containing the kart is drawn partially each
+    frame; earlier spans are simply skipped. This avoids CPU-heavy full-route
+    drawing while preserving overlapping future laps and intersections.
+    """
+    def __init__(self,route,color,to_screen,ghost=False):
+        self.route=route
+        self.color=color
+        self.ghost=ghost
+        self.width=2 if ghost else 3
+        self.to_screen=to_screen
+        self.spans=[]
+        if len(route.points)<2 or route.length<1e-5:
+            return
+        # Distance boundaries are constant and stable during the whole race.
+        count=math.ceil(route.length/TRAIL_CHUNK_WORLD)
+        for i in range(count):
+            start=i*TRAIL_CHUNK_WORLD
+            end=min(route.length,(i+1)*TRAIL_CHUNK_WORLD)
+            world_points=subroute_points(route,start,end)
+            screen_points=[to_screen(point) for point in world_points]
+            if len(screen_points)<2:continue
+            padding=5
+            xmin=math.floor(min(point[0] for point in screen_points))-padding
+            ymin=math.floor(min(point[1] for point in screen_points))-padding
+            xmax=math.ceil(max(point[0] for point in screen_points))+padding
+            ymax=math.ceil(max(point[1] for point in screen_points))+padding
+            image=pygame.Surface((max(1,xmax-xmin+1),max(1,ymax-ymin+1)),pygame.SRCALPHA)
+            shifted=[(x-xmin,y-ymin) for x,y in screen_points]
+            phase=start*TRACK_RECT.width/MAP_W
+            paint_trail_section(image,shifted,color,self.width,ghost,phase)
+            self.spans.append((start,end,image,(xmin,ymin)))
+
+    def draw(self,surface,travelled):
+        if not self.spans:return
+        pos=clamp(travelled,0.0,self.route.length)
+        if pos>=self.route.length-1e-4:return
+        # Only the current chunk needs per-frame geometry; every future chunk
+        # is a cached cropped-surface blit. No drawn portion remains behind.
+        first=min(len(self.spans)-1,int(pos/TRAIL_CHUNK_WORLD))
+        for i in range(first,len(self.spans)):
+            start,end,image,screen_xy=self.spans[i]
+            if end<=pos+1e-5:continue
+            if pos<=start+1e-5:
+                surface.blit(image,screen_xy)
+            else:
+                points=subroute_points(self.route,pos,end)
+                screen_points=[self.to_screen(point) for point in points]
+                phase=pos*TRACK_RECT.width/MAP_W
+                paint_trail_section(surface,screen_points,self.color,self.width,
+                                    self.ghost,phase)
+
 class Track:
     def __init__(self,entry):
         self.entry=entry
@@ -386,7 +484,8 @@ class WasteKartGame:
         self.results_time=0.0
         self.kart_picks=[0,1,2,3]
         self.map_surface=None
-        self.race_routes_layer=None
+        self.race_routes_layer=None  # Legacy field; used only during transition.
+        self.race_trails=[]      # AheadTrail for each player (+ optional ghost).
         self.draw_routes_layer=None
         self.draw_routes_layer_key=None
         self.track=None
@@ -689,6 +788,39 @@ class WasteKartGame:
             self.kart_rotation_cache[key]=pygame.transform.rotate(scaled,-quant)
         return self.kart_rotation_cache[key]
 
+    def boost_flame(self,r,center):
+        """Cartoon exhaust behind a successful reflex start, not a false start.
+
+        Procedural polygons add no artwork files or per-frame image transforms.
+        The flame points backwards along the kart's spline tangent, and its
+        length flickers while the three-second start modifier is active.
+        """
+        if (r.is_ghost or r.finished or self.state!='race' or
+                r.start_modifier<=1.0 or r.start_effect_left<=0.0):
+            return
+        ux,uy=math.cos(r.heading),math.sin(r.heading)
+        nx,ny=-uy,ux
+        # The kart artwork points toward +x before rotating with the tangent.
+        base=(center[0]-ux*20,center[1]-uy*20)
+        power=clamp((r.start_modifier-1.0)/0.45,0.0,1.0)
+        life=clamp(r.start_effect_left/REACTION_EFFECT_SECONDS,0.0,1.0)
+        flicker=math.sin(self.elapsed*29.0+r.index*2.4)*3.0
+        extent=(14.0+17.0*power+flicker)*(0.55+0.45*life)
+        breadth=6.5+2.0*power
+        def at(back,side):
+            return (round(base[0]-ux*back+nx*side),
+                    round(base[1]-uy*back+ny*side))
+        pygame.draw.polygon(self.canvas,(246,91,48),
+            [at(-3,-breadth),at(extent,0),at(-3,breadth)])
+        pygame.draw.polygon(self.canvas,(255,165,55),
+            [at(-1,-breadth*.63),at(extent*.72,0),at(-1,breadth*.63)])
+        pygame.draw.polygon(self.canvas,(255,241,129),
+            [at(-1,-breadth*.33),at(extent*.45,0),at(-1,breadth*.33)])
+        # Two small trailing sparks make the movement visible even at 1x.
+        spark=extent+5.0+4.0*abs(math.sin(self.elapsed*18.0+r.index))
+        pygame.draw.circle(self.canvas,(255,186,74),at(spark,breadth*.6),2)
+        pygame.draw.circle(self.canvas,(255,212,93),at(spark+6,-breadth*.45),2)
+
     def display_racers(self):
         ordered=([self.active_ghost] if self.active_ghost is not None else [])+self.racers
         for r in ordered:
@@ -704,6 +836,7 @@ class WasteKartGame:
                     self.kart_rotation_cache[key]=faded
                 img=self.kart_rotation_cache[key]
             center=(int(xy[0]),int(xy[1]))
+            self.boost_flame(r,center)
             self.canvas.blit(img,img.get_rect(center=center))
             if r.is_ghost:continue
             dot=(center[0],center[1]-23)
@@ -713,8 +846,10 @@ class WasteKartGame:
 
     def race_page(self):
         self.map_base()
-        if self.race_routes_layer is not None:
-            self.canvas.blit(self.race_routes_layer,(0,0))
+        # Draw each kart's untraveled route separately. Previously driven
+        # sections disappear immediately, including during lap 2 and lap 3.
+        for racer,trail in self.race_trails:
+            trail.draw(self.canvas,racer.distance)
         self.draw_start()
         self.display_racers()
         pygame.draw.rect(self.canvas,INK,(0,0,LOGICAL_W,73))
@@ -998,17 +1133,16 @@ class WasteKartGame:
                 self.ghost_target_time=record['time']
                 self.active_ghost=Racer(-1,record['kart_id'],Route(record['points'],record.get('lap_boundaries')),True,laps=self.laps)
                 self.active_ghost.ghost_reaction=record.get('reaction')
-        # Draw tracks ONCE, rather than redrawing 3 x 4 dense splines at 60 FPS.
-        old_canvas=self.canvas
-        self.race_routes_layer=pygame.Surface((LOGICAL_W,LOGICAL_H),pygame.SRCALPHA)
-        self.canvas=self.race_routes_layer
-        try:
-            if self.active_ghost is not None:
-                self.draw_route(self.active_ghost.route.points,(176,194,218),2,dashed=True)
-            for racer in self.racers:
-                self.draw_route(racer.route.points,PALETTE[racer.kart_id],3)
-        finally:
-            self.canvas=old_canvas
+        # Cached cropped route spans: only the current span is dynamically
+        # drawn each frame, and traveled geometry is never displayed again.
+        self.race_routes_layer=None
+        self.race_trails=[]
+        if self.active_ghost is not None:
+            self.race_trails.append((self.active_ghost,AheadTrail(
+                self.active_ghost.route,(176,194,218),self.world_to_screen,ghost=True)))
+        for racer in self.racers:
+            self.race_trails.append((racer,AheadTrail(
+                racer.route,PALETTE[racer.kart_id],self.world_to_screen)))
 
     def begin_new_race(self):
         if self.race_mode=='cup':self.track_index=self.cup_stage
