@@ -28,8 +28,6 @@ PUCK_RADIUS = 20.0
 PUCK_MAX_SPEED = 1050.0
 INITIAL_PUCK_SPEED = 365.0
 PADDLE_MAX_SPEED = 2450.0
-AI_MAX_SPEED = 530.0  # Can reach the puck, but slower than a human paddle.
-AI_SHOT_SPEED_LIMIT = 650.0  # A gentle, beatable opponent for young children.
 # If the puck nearly stops travelling horizontally, give it a gentle push
 # instead of allowing endless rallies to freeze. No position teleporting.
 IDLE_PUCK_X_SPEED = 34.0
@@ -61,6 +59,17 @@ PADDLE_PALETTE = (
     ('PURPLE', (167, 119, 237)),
     ('PINK', (245, 119, 188)),
 )
+
+# Three child-friendly computer skill levels, selected with stars in the
+# one-player menu. These parameters affect paddle movement and awareness,
+# never the player's paddle speed or the puck's physical collision rules.
+# The easiest level deliberately leaves a clear lane through the center of
+# the goal, making success achievable for very young players.
+AI_LEVELS = {
+    1: {'name': 'EASY',   'speed': 205.0, 'reaction': 0.28, 'shot_limit': 300.0},
+    2: {'name': 'MEDIUM', 'speed': 320.0, 'reaction': 0.16, 'shot_limit': 460.0},
+    3: {'name': 'FAST',   'speed': 530.0, 'reaction': 0.04, 'shot_limit': 650.0},
+}
 
 
 def clamp(x, lo, hi):
@@ -113,6 +122,8 @@ class Hockey:
         self.running = True
         self.scene = 'menu'
         self.mode = 2
+        self.difficulty = 1  # One star is the child-friendly default.
+        self.ai_reaction_elapsed = 0.0
         self.duration = 60
         # Defaults match the original yellow / blue sides.
         self.paddle_colors = [2, 5]
@@ -221,6 +232,7 @@ class Hockey:
         self.puck = {'pos': [MID_X, MID_Y], 'vel': [0.0, 0.0]}
         self.serve_timer = 0.65
         self.puck_idle_seconds = 0.0
+        self.ai_reaction_elapsed = 10.0  # React immediately on first update.
         self.serve_direction = random.choice((-1, 1))
         self.clear_input()
 
@@ -287,6 +299,9 @@ class Hockey:
                     self.mode = 1
                 elif name == 'two':
                     self.mode = 2
+                elif name.startswith('difficulty_'):
+                    if self.mode == 1:
+                        self.difficulty = int(name.rsplit('_', 1)[-1])
                 elif name == 'one_min':
                     self.duration = 60
                 elif name == 'two_min':
@@ -403,45 +418,71 @@ class Hockey:
         return low + (phase if phase <= span else 2.0 * span - phase)
 
     def update_ai(self, dt):
-        """Beatable goalkeeper that *hits* the puck instead of shadowing it.
+        """Computer paddle strategy, adjusted for the selected star level.
 
-        When the puck enters the CPU half, the AI moves just BEHIND it (on
-        its right), within collision range, then pushes left. When the puck is
-        approaching from the player half, the AI holds a defensive line and
-        predicts its incoming y. No instant paddle movement or magic hits.
+        One star intentionally plays *away from the center of its goal* while
+        defending, giving small children a real opportunity to score. It still
+        approaches slow pucks and can hit them back, so endless games continue.
+        Two stars plays a modest defender; three uses predictive interception.
+        All movements use the ordinary paddle collision system, not magic hits.
         """
+        self.ai_reaction_elapsed += dt
+        level = AI_LEVELS[self.difficulty]
+        if self.ai_reaction_elapsed < level['reaction']:
+            return
+        self.ai_reaction_elapsed = 0.0
         x, y = self.puck['pos']
         vx, vy = self.puck['vel']
-        cpu_x, cpu_y = self.paddles[1]['pos']
-        if x > TABLE_RIGHT - 95 and cpu_x < x + 25:
-            # Can't get to the right of this puck without moving through the
-            # back wall. Retreat rather than knocking it into our own goal.
-            # The gentle stuck-puck rescue then returns it toward midfield.
-            target_x = TABLE_RIGHT - 165.0
-            target_y = MID_Y
-        elif x >= MID_X + 18:
-            # 72 px (the old gap) is larger than the 56 px collision radius.
-            # Approach within ~30 px to make an actual physical strike.
-            striking_gap = 29.0
-            # Aim a little toward the table center, so the puck returns with
-            # a useful angle rather than only moving up and down.
-            aim_y = y + clamp(y - MID_Y, -110, 110) * 0.14
-            target_x = x + striking_gap
-            target_y = aim_y
-            # If the puck is near the CPU's wall, the paddle cannot reach its
-            # right side. Move to the closest legal spot rather than oscillate.
-            if x > TABLE_RIGHT - PADDLE_RADIUS - PUCK_RADIUS - 4:
-                target_x = TABLE_RIGHT - PADDLE_RADIUS - 3
-                target_y = y + (34 if y < MID_Y else -34)
-        elif vx > 25:
-            # Incoming puck: keep a defensive line and intercept its path.
-            defend_x = TABLE_RIGHT - 145.0
-            target_x = defend_x
-            target_y = self.predict_intercept_y(defend_x)
+
+        if self.difficulty == 1:
+            # A safe, conspicuous scoring lane straight through the middle.
+            # Alternate which corner the CPU guards after each goal, so the
+            # game feels lively without becoming an unbeatable goalkeeper.
+            side = 1 if sum(self.score) % 2 == 0 else -1
+            home_y = MID_Y + side * 119
+            home_x = TABLE_RIGHT - 100
+            if x > MID_X + 120 and abs(vx) < 175 and x < TABLE_RIGHT - 75:
+                # The puck has slowed in the CPU half: move around and give
+                # it a gentle push back, rather than shadowing indefinitely.
+                target_x = x + 33
+                target_y = y + clamp(y - MID_Y, -90, 90) * 0.12
+            else:
+                # Intentionally imperfect tracking; direct central shots
+                # must be able to pass without a miraculous late save.
+                target_x = home_x
+                target_y = home_y + clamp(y - MID_Y, -110, 110) * 0.12
+        elif self.difficulty == 2:
+            if x >= MID_X + 70 and vx < 230:
+                target_x = x + 40
+                target_y = y + clamp(y - MID_Y, -110, 110) * 0.10
+            elif vx > 35:
+                target_x = TABLE_RIGHT - 108
+                # Partly predictable goalkeeper with a small bias toward one
+                # post. Unlike three stars, it does not cover every lane.
+                side = 1 if sum(self.score) % 2 == 0 else -1
+                target_y = (MID_Y + side * 60 +
+                            (self.predict_intercept_y(target_x) - MID_Y) * 0.58)
+            else:
+                target_x = TABLE_RIGHT - 115
+                target_y = MID_Y + (y - MID_Y) * 0.56
         else:
-            # Relax near the goal when the puck is on the player's side.
-            target_x = TABLE_RIGHT - 133.0
-            target_y = MID_Y + (y - MID_Y) * 0.42
+            # Experienced players: quick shots, position prediction, and
+            # active offense once the puck reaches the computer side.
+            if x > TABLE_RIGHT - 95 and self.paddles[1]['pos'][0] < x + 25:
+                target_x, target_y = TABLE_RIGHT - 165, MID_Y
+            elif x >= MID_X + 18:
+                target_x = x + 29
+                target_y = y + clamp(y - MID_Y, -110, 110) * 0.14
+                if x > TABLE_RIGHT - PADDLE_RADIUS - PUCK_RADIUS - 4:
+                    target_x = TABLE_RIGHT - PADDLE_RADIUS - 3
+                    target_y = y + (34 if y < MID_Y else -34)
+            elif vx > 25:
+                target_x = TABLE_RIGHT - 145
+                target_y = self.predict_intercept_y(target_x)
+            else:
+                target_x = TABLE_RIGHT - 133
+                target_y = MID_Y + (y - MID_Y) * 0.42
+
         self.target_paddle(1, target_x, target_y)
 
     def prevent_stuck_puck(self, dt):
@@ -471,7 +512,7 @@ class Hockey:
             dx = paddle['target'][0] - paddle['pos'][0]
             dy = paddle['target'][1] - paddle['pos'][1]
             dist = math.hypot(dx, dy)
-            maxspeed = AI_MAX_SPEED if self.mode == 1 and i == 1 else PADDLE_MAX_SPEED
+            maxspeed = AI_LEVELS[self.difficulty]['speed'] if self.mode == 1 and i == 1 else PADDLE_MAX_SPEED
             factor = min(1.0, maxspeed * h / dist) if dist else 1.0
             mx, my = dx * factor, dy * factor
             paddle['pos'][0] += mx
@@ -509,8 +550,9 @@ class Hockey:
             if self.mode == 1 and player == 1:
                 # Don't let the CPU whack the puck at maximum human speed.
                 speed = math.hypot(*self.puck['vel'])
-                if speed > AI_SHOT_SPEED_LIMIT:
-                    k = AI_SHOT_SPEED_LIMIT / speed
+                limit = AI_LEVELS[self.difficulty]['shot_limit']
+                if speed > limit:
+                    k = limit / speed
                     self.puck['vel'][0] *= k
                     self.puck['vel'][1] *= k
 
@@ -648,6 +690,41 @@ class Hockey:
         self.box(rect, bg, 12)
         self.centered(text, self.text_mid if rect.h>=50 else self.text_small, text_color, rect.center)
 
+    def draw_star(self, center, outer_radius, filled=True):
+        """Five-point star rendered with Pygame, no font or emoji required."""
+        cx, cy = center
+        points = []
+        for i in range(10):
+            angle = -math.pi / 2 + i * math.pi / 5
+            radius = outer_radius if i % 2 == 0 else outer_radius * 0.47
+            points.append((round(cx + math.cos(angle) * radius),
+                           round(cy + math.sin(angle) * radius)))
+        if filled:
+            pygame.draw.polygon(self.screen, (255, 224, 68), points)
+            pygame.draw.polygon(self.screen, (255, 251, 222), points, 2)
+        else:
+            pygame.draw.polygon(self.screen, (123, 166, 193), points, 2)
+
+    def draw_difficulty(self):
+        """Large tap targets with one, two, or three visible gold stars."""
+        if self.mode == 1:
+            self.centered('HOW QUICK IS THE COMPUTER?', self.text_small,
+                          C_TEXT, (400, 205))
+            for level, left in enumerate((170, 331, 492), start=1):
+                rect = pygame.Rect(left, 221, 139, 54)
+                self.buttons[f'difficulty_{level}'] = rect
+                active = self.difficulty == level
+                self.box(rect, (70, 163, 116) if active else (34, 91, 137), 13)
+                # All controls show 3 star positions; filled count = level.
+                for index in range(3):
+                    self.draw_star((rect.centerx + (index-1)*28, rect.y+19),
+                                   12, index < level)
+                self.centered(AI_LEVELS[level]['name'], self.text_tiny,
+                              C_TEXT, (rect.centerx, rect.y+41))
+        else:
+            self.centered('TWO PLAYERS - BOTH PLAY TOGETHER!', self.text_small,
+                          C_TEXT, (400, 246))
+
     def draw_home(self):
         self.buttons['home'] = HOME_RECT
         self.box(HOME_RECT, (233, 128, 68), 12)
@@ -660,59 +737,59 @@ class Hockey:
         """Eight large touch targets; the other player's color is disabled."""
         title = ('YOU' if self.mode == 1 else 'PLAYER 1') if player == 0 else \
                 ('COMPUTER' if self.mode == 1 else 'PLAYER 2')
-        self.centered(title + ' - PADDLE COLOUR', self.text_small, C_TEXT, (384, top-16))
+        self.centered(title + ' - PADDLE COLOUR', self.text_small, C_TEXT,
+                      (384, top-14))
         preview = self.tinted_paddle(player, preview=True)
         if preview is not None:
-            self.screen.blit(preview, preview.get_rect(center=(665, top+24)))
+            self.screen.blit(preview, preview.get_rect(center=(657, top+21)))
         else:
-            pygame.draw.circle(self.screen, self.paddle_color(player), (665, top+24), 16)
-        first_x, gap, size = 166, 60, 48
+            pygame.draw.circle(self.screen, self.paddle_color(player),
+                               (657, top+21), 16)
+        first_x, gap, size = 185, 53, 42
         for color_index, (_, rgb) in enumerate(PADDLE_PALETTE):
             rect = pygame.Rect(first_x + gap * color_index, top, size, size)
             self.buttons[f'paddle_color_{player}_{color_index}'] = rect
             chosen = self.paddle_colors[player] == color_index
             unavailable = self.paddle_colors[1-player] == color_index
             pygame.draw.circle(self.screen, (243, 249, 254) if chosen else (75, 108, 138),
-                               rect.center, 26 if chosen else 24)
-            pygame.draw.circle(self.screen, rgb, rect.center, 20)
+                               rect.center, 24 if chosen else 22)
+            pygame.draw.circle(self.screen, rgb, rect.center, 18)
             if chosen:
-                # Checkmark communicates selection independently of hue.
                 cx, cy = rect.center
                 pygame.draw.lines(self.screen, C_DARK, False,
-                                  [(cx-10, cy), (cx-3, cy+8), (cx+12, cy-9)], 5)
+                                  [(cx-9, cy), (cx-3, cy+7), (cx+11, cy-9)], 5)
                 pygame.draw.lines(self.screen, C_TEXT, False,
-                                  [(cx-10, cy-2), (cx-3, cy+6), (cx+12, cy-11)], 3)
+                                  [(cx-9, cy-2), (cx-3, cy+5), (cx+11, cy-11)], 3)
             elif unavailable:
-                # A muted swatch with a slash is visibly unavailable and its
-                # press is ignored by select_paddle_color().
-                veil = pygame.Surface((48, 48), pygame.SRCALPHA)
-                pygame.draw.circle(veil, (13, 29, 46, 135), (24, 24), 22)
+                veil = pygame.Surface((42, 42), pygame.SRCALPHA)
+                pygame.draw.circle(veil, (13, 29, 46, 135), (21, 21), 20)
                 self.screen.blit(veil, rect.topleft)
-                pygame.draw.line(self.screen, C_TEXT, (rect.x+13, rect.y+35),
-                                 (rect.x+35, rect.y+13), 4)
+                pygame.draw.line(self.screen, C_TEXT, (rect.x+11, rect.y+31),
+                                 (rect.x+31, rect.y+11), 4)
 
     def draw_menu(self):
-        # Full setup fits the 800x600 logical canvas with 44+ px touch targets.
+        # A single setup screen: stars, duration, colors, and a big PLAY.
         shade = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         shade.fill((9, 31, 50, 175))
         self.screen.blit(shade, (0, 0))
-        self.box(pygame.Rect(88, 72, 624, 512), C_PANEL, 23)
-        self.centered('WASTE HOCKEY', self.text_big, C_YELLOW, (400, 112))
-        self.centered('HOW MANY PLAYERS?', self.text_mid, C_TEXT, (400, 161))
-        self.button('one', pygame.Rect(184, 182, 202, 51), '1 PLAYER', self.mode == 1,
+        self.box(pygame.Rect(88, 68, 624, 520), C_PANEL, 23)
+        self.centered('WASTE HOCKEY', self.text_big, C_YELLOW, (400, 99))
+        self.centered('HOW MANY PLAYERS?', self.text_small, C_TEXT, (400, 139))
+        self.button('one', pygame.Rect(184, 151, 202, 42), '1 PLAYER', self.mode == 1,
                     C_GREEN if self.mode == 1 else None)
-        self.button('two', pygame.Rect(414, 182, 202, 51), '2 PLAYERS', self.mode == 2,
+        self.button('two', pygame.Rect(414, 151, 202, 42), '2 PLAYERS', self.mode == 2,
                     C_GREEN if self.mode == 2 else None)
-        self.centered('HOW LONG?', self.text_mid, C_TEXT, (400, 256))
-        self.button('one_min', pygame.Rect(166, 278, 145, 45), '1 MIN', self.duration == 60,
+        self.draw_difficulty()
+        self.centered('HOW LONG?', self.text_small, C_TEXT, (400, 294))
+        self.button('one_min', pygame.Rect(166, 309, 145, 40), '1 MIN', self.duration == 60,
                     C_GREEN if self.duration == 60 else None)
-        self.button('two_min', pygame.Rect(326, 278, 145, 45), '2 MIN', self.duration == 120,
+        self.button('two_min', pygame.Rect(326, 309, 145, 40), '2 MIN', self.duration == 120,
                     C_GREEN if self.duration == 120 else None)
-        self.button('endless', pygame.Rect(487, 278, 145, 45), 'ENDLESS', self.duration is None,
+        self.button('endless', pygame.Rect(487, 309, 145, 40), 'ENDLESS', self.duration is None,
                     C_GREEN if self.duration is None else None)
-        self.draw_color_row(0, 352)
-        self.draw_color_row(1, 435)
-        self.button('start', pygame.Rect(285, 509, 230, 54), 'PLAY!', color=(225, 117, 63))
+        self.draw_color_row(0, 381)
+        self.draw_color_row(1, 451)
+        self.button('start', pygame.Rect(285, 516, 230, 54), 'PLAY!', color=(225, 117, 63))
         self.draw_home()
 
     def draw_paddles_and_puck(self):
@@ -743,6 +820,9 @@ class Hockey:
         self.centered(':', self.text_big, C_TEXT, (392, 48))
         self.centered(str(self.score[1]), self.text_big, self.paddle_color(1), (454, 48))
         self.centered(self.time_label(), self.text_med, C_TEXT, (700, 48))
+        if self.mode == 1:
+            for index in range(self.difficulty):
+                self.draw_star((604 + index*15, 48), 7)
         hint = 'Use your finger to move your paddle' if self.mode == 1 else 'Each player uses one finger on their own half'
         self.centered(hint, self.text_small, C_TEXT, (WIDTH/2, 553))
 
