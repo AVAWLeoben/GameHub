@@ -28,7 +28,12 @@ PUCK_RADIUS = 20.0
 PUCK_MAX_SPEED = 1050.0
 INITIAL_PUCK_SPEED = 365.0
 PADDLE_MAX_SPEED = 2450.0
-AI_MAX_SPEED = 680.0
+AI_MAX_SPEED = 530.0  # Can reach the puck, but slower than a human paddle.
+AI_SHOT_SPEED_LIMIT = 650.0  # A gentle, beatable opponent for young children.
+# If the puck nearly stops travelling horizontally, give it a gentle push
+# instead of allowing endless rallies to freeze. No position teleporting.
+IDLE_PUCK_X_SPEED = 34.0
+IDLE_PUCK_SECONDS = 4.5
 KEYBOARD_SPEED = 900.0
 WALL_BOUNCE = 0.95
 PADDLE_BOUNCE = 0.88
@@ -109,6 +114,7 @@ class Hockey:
         self.particles = []
         self.sparkle_seed = random.Random()
         self.serve_timer = 0.0
+        self.puck_idle_seconds = 0.0
         self.serve_direction = -1
         self.text_big = font(60, True)
         self.text_med = font(36, True)
@@ -148,6 +154,7 @@ class Hockey:
         ]
         self.puck = {'pos': [MID_X, MID_Y], 'vel': [0.0, 0.0]}
         self.serve_timer = 0.65
+        self.puck_idle_seconds = 0.0
         self.serve_direction = random.choice((-1, 1))
         self.clear_input()
 
@@ -309,17 +316,86 @@ class Hockey:
                                    paddle['pos'][0] + dx / magnitude * KEYBOARD_SPEED * dt,
                                    paddle['pos'][1] + dy / magnitude * KEYBOARD_SPEED * dt)
 
-    def update_ai(self, dt):
-        # Simple defender, intentionally beatable by younger children.
+    def predict_intercept_y(self, reach_x):
+        """Estimate where an incoming puck will cross the CPU defender's x.
+
+        Reflect its future y coordinate at the top/bottom table walls. This
+        reduces frantic up/down chasing and helps the AI meet moving pucks.
+        """
         x, y = self.puck['pos']
-        vx = self.puck['vel'][0]
-        if x > MID_X + 5 and vx > -70:
-            target_x = clamp(x + 72, MID_X + 75, TABLE_RIGHT - 73)
-            target_y = y
+        vx, vy = self.puck['vel']
+        if vx < 30 or reach_x <= x:
+            return y
+        seconds = min(1.6, max(0.0, (reach_x - x) / vx))
+        low = TABLE_TOP + PUCK_RADIUS
+        high = TABLE_BOTTOM - PUCK_RADIUS
+        span = max(1.0, high - low)
+        phase = (y + vy * seconds - low) % (2.0 * span)
+        return low + (phase if phase <= span else 2.0 * span - phase)
+
+    def update_ai(self, dt):
+        """Beatable goalkeeper that *hits* the puck instead of shadowing it.
+
+        When the puck enters the CPU half, the AI moves just BEHIND it (on
+        its right), within collision range, then pushes left. When the puck is
+        approaching from the player half, the AI holds a defensive line and
+        predicts its incoming y. No instant paddle movement or magic hits.
+        """
+        x, y = self.puck['pos']
+        vx, vy = self.puck['vel']
+        cpu_x, cpu_y = self.paddles[1]['pos']
+        if x > TABLE_RIGHT - 95 and cpu_x < x + 25:
+            # Can't get to the right of this puck without moving through the
+            # back wall. Retreat rather than knocking it into our own goal.
+            # The gentle stuck-puck rescue then returns it toward midfield.
+            target_x = TABLE_RIGHT - 165.0
+            target_y = MID_Y
+        elif x >= MID_X + 18:
+            # 72 px (the old gap) is larger than the 56 px collision radius.
+            # Approach within ~30 px to make an actual physical strike.
+            striking_gap = 29.0
+            # Aim a little toward the table center, so the puck returns with
+            # a useful angle rather than only moving up and down.
+            aim_y = y + clamp(y - MID_Y, -110, 110) * 0.14
+            target_x = x + striking_gap
+            target_y = aim_y
+            # If the puck is near the CPU's wall, the paddle cannot reach its
+            # right side. Move to the closest legal spot rather than oscillate.
+            if x > TABLE_RIGHT - PADDLE_RADIUS - PUCK_RADIUS - 4:
+                target_x = TABLE_RIGHT - PADDLE_RADIUS - 3
+                target_y = y + (34 if y < MID_Y else -34)
+        elif vx > 25:
+            # Incoming puck: keep a defensive line and intercept its path.
+            defend_x = TABLE_RIGHT - 145.0
+            target_x = defend_x
+            target_y = self.predict_intercept_y(defend_x)
         else:
-            target_x = TABLE_RIGHT - 120
-            target_y = MID_Y + (y - MID_Y) * 0.65
+            # Relax near the goal when the puck is on the player's side.
+            target_x = TABLE_RIGHT - 133.0
+            target_y = MID_Y + (y - MID_Y) * 0.42
         self.target_paddle(1, target_x, target_y)
+
+    def prevent_stuck_puck(self, dt):
+        """Recover a nearly vertical or stationary puck without relocating it."""
+        if self.serve_timer > 0 or self.scene != 'playing':
+            self.puck_idle_seconds = 0.0
+            return
+        vx, vy = self.puck['vel']
+        if abs(vx) < IDLE_PUCK_X_SPEED:
+            self.puck_idle_seconds += dt
+        else:
+            self.puck_idle_seconds = 0.0
+        x, y = self.puck['pos']
+        # Rescue an edge-trapped puck sooner; don't wait for the whole timer.
+        near_back_wall = x < TABLE_LEFT + PUCK_RADIUS + 12 or x > TABLE_RIGHT - PUCK_RADIUS - 12
+        wait = 2.5 if x > TABLE_RIGHT - 95 else (1.8 if near_back_wall else IDLE_PUCK_SECONDS)
+        if self.puck_idle_seconds < wait:
+            return
+        self.puck_idle_seconds = 0.0
+        # Send it away from whichever side it got trapped on. Players keep
+        # playing at the exact same puck position, with no reset or penalty.
+        direction = -1.0 if x >= MID_X else 1.0
+        self.puck['vel'] = [direction * 300.0, random.uniform(-95.0, 95.0)]
 
     def move_paddles(self, h):
         for i, paddle in enumerate(self.paddles):
@@ -361,11 +437,19 @@ class Hockey:
             self.puck['vel'][0] += impulse * nx
             self.puck['vel'][1] += impulse * ny
             self.cap_puck_speed()
+            if self.mode == 1 and player == 1:
+                # Don't let the CPU whack the puck at maximum human speed.
+                speed = math.hypot(*self.puck['vel'])
+                if speed > AI_SHOT_SPEED_LIMIT:
+                    k = AI_SHOT_SPEED_LIMIT / speed
+                    self.puck['vel'][0] *= k
+                    self.puck['vel'][1] *= k
 
     def score_goal(self, player):
         if self.scene != 'playing':
             return
         self.score[player] += 1
+        self.puck_idle_seconds = 0.0
         self.goal_player = player
         self.scene = 'goal'
         self.goal_elapsed = 0.0
@@ -442,6 +526,7 @@ class Hockey:
                     self.scene = 'playing'
                     self.puck = {'pos': [MID_X, MID_Y], 'vel': [0.0, 0.0]}
                     self.serve_timer = 0.65
+                    self.puck_idle_seconds = 0.0
                     self.serve_direction = -1 if self.goal_player == 0 else 1
             return
         if self.scene != 'playing':
@@ -475,6 +560,7 @@ class Hockey:
             self.walls()
             if self.scene != 'playing':
                 break
+        self.prevent_stuck_puck(physics_dt)
 
     def centered(self, text, fnt, color, center):
         surf = fnt.render(text, True, color)
