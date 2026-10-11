@@ -11,112 +11,128 @@
       "track": 1,
       "name": "Daisy Dash",
       "image": "Tracks/Cups/Cup1/track_01.png",
-      "geometry": "Tracks/Cups/Cup1/track_01.json"
+      "geometry": "Tracks/Cups/Cup1/track_01.json",
+      "road_mask": "Tracks/Cups/Cup1/track_01.mask.png"
     },
     {
       "cup": 1,
       "track": 2,
       "name": "Clover Crossing",
       "image": "Tracks/Cups/Cup1/track_02.png",
-      "geometry": "Tracks/Cups/Cup1/track_02.json"
+      "geometry": "Tracks/Cups/Cup1/track_02.json",
+      "road_mask": "Tracks/Cups/Cup1/track_02.mask.png"
     },
     {
       "cup": 1,
       "track": 3,
       "name": "Apple Orchard",
       "image": "Tracks/Cups/Cup1/track_03.png",
-      "geometry": "Tracks/Cups/Cup1/track_03.json"
+      "geometry": "Tracks/Cups/Cup1/track_03.json",
+      "road_mask": "Tracks/Cups/Cup1/track_03.mask.png"
     },
     {
       "cup": 1,
       "track": 4,
       "name": "Bumblebee Bend",
       "image": "Tracks/Cups/Cup1/track_04.png",
-      "geometry": "Tracks/Cups/Cup1/track_04.json"
+      "geometry": "Tracks/Cups/Cup1/track_04.json",
+      "road_mask": "Tracks/Cups/Cup1/track_04.mask.png"
     },
     {
       "cup": 2,
       "track": 1,
       "name": "Shell Shore",
       "image": "Tracks/Cups/Cup2/track_01.png",
-      "geometry": "Tracks/Cups/Cup2/track_01.json"
+      "geometry": "Tracks/Cups/Cup2/track_01.json",
+      "road_mask": "Tracks/Cups/Cup2/track_01.mask.png"
     },
     {
       "cup": 2,
       "track": 2,
       "name": "Coral Curve",
       "image": "Tracks/Cups/Cup2/track_02.png",
-      "geometry": "Tracks/Cups/Cup2/track_02.json"
+      "geometry": "Tracks/Cups/Cup2/track_02.json",
+      "road_mask": "Tracks/Cups/Cup2/track_02.mask.png"
     },
     {
       "cup": 2,
       "track": 3,
       "name": "Harbor Loop",
       "image": "Tracks/Cups/Cup2/track_03.png",
-      "geometry": "Tracks/Cups/Cup2/track_03.json"
+      "geometry": "Tracks/Cups/Cup2/track_03.json",
+      "road_mask": "Tracks/Cups/Cup2/track_03.mask.png"
     },
     {
       "cup": 2,
       "track": 4,
       "name": "Turtle Tides",
       "image": "Tracks/Cups/Cup2/track_04.png",
-      "geometry": "Tracks/Cups/Cup2/track_04.json"
+      "geometry": "Tracks/Cups/Cup2/track_04.json",
+      "road_mask": "Tracks/Cups/Cup2/track_04.mask.png"
     },
     {
       "cup": 3,
       "track": 1,
       "name": "Dusty Drive",
       "image": "Tracks/Cups/Cup3/track_01.png",
-      "geometry": "Tracks/Cups/Cup3/track_01.json"
+      "geometry": "Tracks/Cups/Cup3/track_01.json",
+      "road_mask": "Tracks/Cups/Cup3/track_01.mask.png"
     },
     {
       "cup": 3,
       "track": 2,
       "name": "Cactus Corner",
       "image": "Tracks/Cups/Cup3/track_02.png",
-      "geometry": "Tracks/Cups/Cup3/track_02.json"
+      "geometry": "Tracks/Cups/Cup3/track_02.json",
+      "road_mask": "Tracks/Cups/Cup3/track_02.mask.png"
     },
     {
       "cup": 3,
       "track": 3,
       "name": "Golden Gorge",
       "image": "Tracks/Cups/Cup3/track_03.png",
-      "geometry": "Tracks/Cups/Cup3/track_03.json"
+      "geometry": "Tracks/Cups/Cup3/track_03.json",
+      "road_mask": "Tracks/Cups/Cup3/track_03.mask.png"
     },
     {
       "cup": 3,
       "track": 4,
       "name": "Comet Canyon",
       "image": "Tracks/Cups/Cup3/track_04.png",
-      "geometry": "Tracks/Cups/Cup3/track_04.json"
+      "geometry": "Tracks/Cups/Cup3/track_04.json",
+      "road_mask": "Tracks/Cups/Cup3/track_04.mask.png"
     },
     {
       "cup": 4,
       "track": 1,
       "name": "Moonlight Mile",
       "image": "Tracks/Cups/Cup4/track_01.png",
-      "geometry": "Tracks/Cups/Cup4/track_01.json"
+      "geometry": "Tracks/Cups/Cup4/track_01.json",
+      "road_mask": "Tracks/Cups/Cup4/track_01.mask.png"
     },
     {
       "cup": 4,
       "track": 2,
       "name": "Glow Garden",
       "image": "Tracks/Cups/Cup4/track_02.png",
-      "geometry": "Tracks/Cups/Cup4/track_02.json"
+      "geometry": "Tracks/Cups/Cup4/track_02.json",
+      "road_mask": "Tracks/Cups/Cup4/track_02.mask.png"
     },
     {
       "cup": 4,
       "track": 3,
       "name": "Starlight Spiral",
       "image": "Tracks/Cups/Cup4/track_03.png",
-      "geometry": "Tracks/Cups/Cup4/track_03.json"
+      "geometry": "Tracks/Cups/Cup4/track_03.json",
+      "road_mask": "Tracks/Cups/Cup4/track_03.mask.png"
     },
     {
       "cup": 4,
       "track": 4,
       "name": "Rainbow Rocket",
       "image": "Tracks/Cups/Cup4/track_04.png",
-      "geometry": "Tracks/Cups/Cup4/track_04.json"
+      "geometry": "Tracks/Cups/Cup4/track_04.json",
+      "road_mask": "Tracks/Cups/Cup4/track_04.mask.png"
     }
   ],
   "karts": [

@@ -1,10 +1,10 @@
-"""WasteKart 1.0 - draw your own racing line, then race one lap.
+"""WasteKart 1.1 - draw-to-race with Single Race, Cup and best-lap ghost.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
 
 Original four-cup, sixteen-course art resides in assets/WasteKart.
-The first version intentionally contains no items, collisions, or reflex buttons.
+Races use 16 original tracks. Reflex, items and kart collisions are future additions.
 """
 import asyncio
 import bisect
@@ -28,6 +28,10 @@ WHITE = (253, 253, 247)
 MUTED = (182, 199, 213)
 YELLOW = (255, 209, 92)
 FONT_SCALE = 1.0
+CUP_POINTS = (9, 6, 3, 1)
+DRAW_TIMES = (15, 30, 60, None)  # None means unlimited.
+ROAD_FACTOR = 1.0
+GRASS_FACTOR = 0.55
 
 
 def clamp(value, lo, hi):
@@ -99,80 +103,87 @@ def catmull_rom(points, step=6.0):
 
 
 def complete_drawn_loop(raw, centerline):
-    """Gently complete an unfinished line along the track, so everyone races.
+    """Smooth a child-drawn route; connect its endpoint DIRECTLY to the flag.
 
-    The drawn portion stays untouched, including imaginative off-road shortcuts.
-    Only the missing return to the checkered line is assisted.
+    Deliberately do not auto-complete along the centerline: crossing grass is
+    meant to be slower, not secretly corrected to the ideal racing route.
+    The trailing straight is added AFTER spline smoothing, so Catmull-Rom does
+    not curve it into an unintended shortcut.
     """
     start = tuple(centerline[0])
-    if len(raw) < 2 or sum(length(a, b) for a, b in zip(raw, raw[1:])) < 28:
-        return catmull_rom(list(centerline) + [start])
-    drawing = list(raw)
-    if length(drawing[0], start) > 1:
-        drawing.insert(0, start)
-    lap_length = sum(length(a, b) for a, b in zip(centerline, centerline[1:]+centerline[:1]))
-    # A child may keep drawing after coming back to the checkered flag. End at
-    # their FIRST completed lap rather than racing multiple drawn laps.
-    walked = 0.0
-    for i in range(1, len(drawing)):
-        walked += length(drawing[i-1], drawing[i])
-        if walked > lap_length * .62 and length(drawing[i], start) < 43:
-            drawing = drawing[:i+1]
-            break
-        if walked > lap_length * 2.2:
-            drawing = drawing[:i+1]
-            break
-    drawn_length = sum(length(a, b) for a, b in zip(drawing, drawing[1:]))
-    last = drawing[-1]
-    # Near the checkered flag after approximately one lap: connect directly.
-    if length(last, start) < 100 and drawn_length > lap_length * .62:
-        drawing.append(start)
+    points = [start]
+    for p in raw[1:] if raw else ():
+        p = (clamp(float(p[0]), 5.0, MAP_W-5.0),
+             clamp(float(p[1]), 5.0, MAP_H-5.0))
+        if length(p, points[-1]) >= 5.0:
+            points.append(p)
+    if len(points) > 500:
+        stride = math.ceil(len(points)/500)
+        points = points[::stride] + [points[-1]]
+    drawn_length = sum(length(a,b) for a,b in zip(points,points[1:]))
+    center_length = sum(length(a,b) for a,b in zip(centerline,centerline[1:]+centerline[:1]))
+    # The earliest legitimate return to the checkered line finishes the lap.
+    if drawn_length > center_length*.65:
+        walked = 0.0
+        for i in range(1,len(points)):
+            walked += length(points[i-1],points[i])
+            if walked > center_length*.65 and length(points[i],start) < 38:
+                points = points[:i+1]
+                break
+    # With no real stroke, add a slow, short fallback tour so the one-lap race
+    # cannot become a 0-second win. Empty drawings are still allowed to finish.
+    if drawn_length < 28.0:
+        fallback = (clamp(start[0]+110,10,MAP_W-10),
+                    clamp(start[1]+115,10,MAP_H-10))
+        points = [start,fallback]
+    smoothed = catmull_rom(points,step=6.0)
+    if length(smoothed[-1],start) > .5:
+        # Equal arc-length samples of a true STRAIGHT finish connection.
+        last=smoothed[-1]
+        segments=max(1,math.ceil(length(last,start)/6.0))
+        smoothed.extend(lerp(last,start,i/segments) for i in range(1,segments+1))
     else:
-        index = min(range(len(centerline)), key=lambda j: length(last, centerline[j]))
-        # Very short scribbles near the starting gate shouldn't skip the whole lap.
-        if index < 18 and drawn_length < .5 * lap_length:
-            index = 0
-        drawing.append(tuple(centerline[index]))
-        drawing.extend(tuple(centerline[j]) for j in range(index+3, len(centerline), 3))
-        drawing.append(start)
-    result = catmull_rom(drawing)
-    return result if len(result) >= 2 else catmull_rom(list(centerline) + [start])
+        smoothed[-1]=start
+    return smoothed
 
 
 class Route:
+    """Precompute arc lengths and smoothed circumradius-based bend factors."""
     def __init__(self, points):
         self.points = list(points)
         self.accumulated = [0.0]
-        for a, b in zip(self.points, self.points[1:]):
-            self.accumulated.append(self.accumulated[-1]+length(a, b))
-        self.length = self.accumulated[-1] if self.accumulated else 0.0
-        self.curve_factors = []
+        for a,b in zip(self.points,self.points[1:]):
+            self.accumulated.append(self.accumulated[-1]+length(a,b))
+        self.length = self.accumulated[-1]
+        raw=[]
+        # Circumradius = abc/(4*triangle area). Sample about 30px on either side
+        # and average 5 successive radii to reject finger input jitter.
         for i in range(len(self.points)):
-            a = self.points[max(0, i-5)]
-            b = self.points[i]
-            c = self.points[min(len(self.points)-1, i+5)]
-            ab = math.atan2(b[1]-a[1], b[0]-a[0]) if length(a,b)>1 else 0
-            bc = math.atan2(c[1]-b[1], c[0]-b[0]) if length(b,c)>1 else ab
-            theta = abs(angle_delta(ab, bc))
-            radius = max(3.0, (length(a,b)+length(b,c))/max(theta, .007))
-            self.curve_factors.append(.42+.58*min(1.0, radius/140.0))
+            a=self.points[max(0,i-5)]
+            b=self.points[i]
+            c=self.points[min(len(self.points)-1,i+5)]
+            ab,bc,ac=length(a,b),length(b,c),length(a,c)
+            twice_area=abs((b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]))
+            radius=ab*bc*ac/(2.0*twice_area) if twice_area>1e-4 else 1e6
+            raw.append(radius)
+        self.curve_factors=[]
+        for i in range(len(raw)):
+            radius=sum(raw[max(0,i-2):min(len(raw),i+3)])/len(raw[max(0,i-2):min(len(raw),i+3)])
+            self.curve_factors.append(.40+.60*min(1.0,radius/180.0))
 
-    def sample(self, distance):
-        if not self.points:
-            return ((0.0, 0.0), 0.0, .7)
-        if len(self.points) == 1:
-            return (self.points[0], 0.0, .7)
-        d = clamp(distance, 0.0, self.length)
-        j = min(len(self.points)-2, max(0,bisect.bisect_right(self.accumulated,d)-1))
-        a, b = self.points[j], self.points[j+1]
-        t = (d-self.accumulated[j])/max(.0001,self.accumulated[j+1]-self.accumulated[j])
-        angle = math.atan2(b[1]-a[1], b[0]-a[0])
-        bend = self.curve_factors[j]*(1-t)+self.curve_factors[j+1]*t
-        return lerp(a,b,t), angle, bend
-
+    def sample(self,distance):
+        if not self.points:return ((0.0,0.0),0.0,.4)
+        if len(self.points)==1:return (self.points[0],0.0,.4)
+        d=clamp(distance,0.0,self.length)
+        j=min(len(self.points)-2,max(0,bisect.bisect_right(self.accumulated,d)-1))
+        a,b=self.points[j],self.points[j+1]
+        t=(d-self.accumulated[j])/max(1e-6,self.accumulated[j+1]-self.accumulated[j])
+        angle=math.atan2(b[1]-a[1],b[0]-a[0])
+        bend=self.curve_factors[j]*(1-t)+self.curve_factors[j+1]*t
+        return lerp(a,b,t),angle,bend
 
 class Track:
-    def __init__(self, entry):
+    def __init__(self,entry):
         self.entry=entry
         geom_path=os.path.join(ASSET_ROOT,*entry['geometry'].split('/'))
         with open(geom_path,encoding='utf8') as stream:
@@ -180,56 +191,52 @@ class Track:
         self.name=data['name']
         self.centerline=[tuple(p) for p in data['centerline']]
         self.road_half_width=float(data['road_half_width'])
-        self.road_radius_sq=self.road_half_width**2
+        self.max_speed=float(data.get('v_max',235.0))
         self.image_path=os.path.join(ASSET_ROOT,*entry['image'].split('/'))
         self.centerline_route=Route(self.centerline+[self.centerline[0]])
-        self.road_buckets={}
-        grid=64
-        # Spatial cells contain sampled road points within 2 neighbouring cells.
-        for pt in self.centerline:
-            bx,by=int(pt[0]//grid),int(pt[1]//grid)
-            self.road_buckets.setdefault((bx,by),[]).append(pt)
+        mask_path=os.path.join(ASSET_ROOT,*entry['road_mask'].split('/'))
+        self.mask=pygame.image.load(mask_path).convert()
 
-    def on_road(self, point):
-        bx,by=int(point[0]//64),int(point[1]//64)
-        for dx in (-1,0,1):
-            for dy in (-1,0,1):
-                for p in self.road_buckets.get((bx+dx,by+dy),()):
-                    if (p[0]-point[0])**2+(p[1]-point[1])**2 <= self.road_radius_sq:
-                        return True
-        return False
-
+    def on_road(self,point):
+        x,y=int(point[0]),int(point[1])
+        if not (0<=x<MAP_W and 0<=y<MAP_H):return False
+        # A single O(1) lookup, even with four karts on iPad.
+        return self.mask.get_at((x,y))[0] > 127
 
 class Racer:
-    def __init__(self, index, kart_id, route):
+    def __init__(self,index,kart_id,route,is_ghost=False):
         self.index=index
         self.kart_id=kart_id
         self.route=route
+        self.is_ghost=is_ghost
         self.distance=0.0
         self.speed=0.0
+        self.start_modifier=1.0  # Future reflex-start input hook.
+        self.modifiers=[]       # Future pickups/slipstreaming hook.
         self.finished=False
         self.finish_time=None
         self.pos,self.heading,_=route.sample(0)
         self.on_track=True
-        self.trail=[]
 
-    def update(self, dt, elapsed, track):
-        if self.finished:
-            return
+    def update(self,dt,elapsed,track):
+        if self.finished:return
         pos,heading,bend=self.route.sample(self.distance)
-        on_road=track.on_road(pos)
-        # Both bend radius and road surface affect speed; a straight shortcut
-        # may still be fun, but loses significant speed in the rough.
-        desired=235.0*bend*(1.0 if on_road else .54)
+        road=track.on_road(pos)
+        desired=track.max_speed*bend*(ROAD_FACTOR if road else GRASS_FACTOR)*self.start_modifier
+        for modifier in self.modifiers:
+            desired*=modifier
         reaction=3.1 if desired>self.speed else 5.2
         self.speed+=(desired-self.speed)*min(1.0,dt*reaction)
-        self.distance=min(self.route.length,self.distance+self.speed*dt)
+        advance=self.speed*dt
+        previous=self.distance
+        self.distance=min(self.route.length,self.distance+advance)
         self.pos,self.heading,_=self.route.sample(self.distance)
         self.on_track=track.on_road(self.pos)
         if self.distance>=self.route.length-1e-3:
             self.finished=True
-            self.finish_time=round(elapsed,2)
-
+            # Subframe finish time avoids a player advantage due to update order.
+            fraction=(self.route.length-previous)/max(advance,1e-6)
+            self.finish_time=round(elapsed-dt+dt*clamp(fraction,0,1),3)
 
 def browser_touch_mode(enabled):
     """Keep canvas finger drawing from scrolling the web page on iPad."""
@@ -259,7 +266,14 @@ class WasteKartGame:
         self.running=True
         self.state='menu'
         self.players=2
+        self.race_mode='single'
         self.draw_seconds=60
+        self.cup_stage=0
+        self.cup_scores=[0,0,0,0]
+        self.cup_history=[]
+        self.ghost_records={}  # Track index -> {time, points, kart_id}, RAM only.
+        self.active_ghost=None
+        self.new_best=False
         self.cup=0
         self.track_index=0
         self.kart_ids=[0,1,2,3]
@@ -274,6 +288,7 @@ class WasteKartGame:
         self.countdown=0.0
         self.paused=False
         self.results_time=0.0
+        self.kart_picks=[0,1,2,3]
         self.map_surface=None
         self.track=None
         self.track_cache={}
@@ -377,29 +392,32 @@ class WasteKartGame:
 
     def menu_page(self):
         self.draw_bg()
-        self.title('WASTE KART!','Draw a racing line. Watch your karts zoom!')
-        self.panel((56,124,688,149))
-        self.text('HOW MANY RACERS?',(400,148),30,YELLOW)
+        self.title('WASTE KART!','Draw a racing line. Race it together!')
+        self.panel((42,112,716,119))
+        self.text('WHAT SHALL WE RACE?',(400,132),28,YELLOW)
+        self.button((81,161,307,54),'SINGLE RACE',('mode','single'),selected=self.race_mode=='single',size=29)
+        self.button((411,161,307,54),'4-TRACK CUP',('mode','cup'),selected=self.race_mode=='cup',size=29)
+        self.panel((42,244,716,109))
+        self.text('HOW MANY RACERS?',(400,264),27,YELLOW)
         for i in range(4):
-            self.button((94+i*158,177,135,75),str(i+1),('players',i+1),selected=self.players==i+1,size=50)
-        self.panel((56,287,688,135))
-        self.text('TIME TO DRAW EACH ROAD',(400,311),30,YELLOW)
-        for j,seconds in enumerate((20,40,60)):
-            self.button((116+j*192,339,180,62),f'{seconds} sec',('time',seconds),selected=self.draw_seconds==seconds,size=34)
-        self.text('Everyone draws their own route, one at a time.',(400,449),25,MUTED)
-        self.button((214,483,372,79),'CHOOSE A TRACK  >',('state','tracks'),selected=True,size=34)
+            self.button((90+i*158,287,145,56),str(i+1),('players',i+1),selected=self.players==i+1,size=39)
+        self.panel((42,363,716,123))
+        self.text('TIME TO DRAW EACH LINE',(400,383),27,YELLOW)
+        for j,(seconds,label) in enumerate(((15,'15 sec'),(30,'30 sec'),(60,'60 sec'),(None,'NO LIMIT'))):
+            self.button((60+j*174,406,156,59),label,('time',seconds),selected=self.draw_seconds==seconds,size=25)
+        self.button((228,503,344,76),'CHOOSE CUP  >',('state','tracks'),selected=True,size=32)
         self.home()
 
     def tracks_page(self):
         self.draw_bg()
-        self.title('PICK A TRACK','Choose one of 4 cups and 16 original courses!')
+        self.title('PICK A CUP', 'Single Race: choose a track. Cup: all four tracks!')
         for cup in range(4):
             names=('MEADOW','COAST','DESERT','STAR')
             self.button((29+cup*192,121,169,61),names[cup],('cup',cup),selected=cup==self.cup,size=28)
         for j in range(4):
             x=21+j*195
             area=pygame.Rect(x,214,176,185)
-            selected=j==self.track_index
+            selected=j==self.track_index and self.race_mode=='single'
             self.panel(area,(66,100,114) if selected else (43,56,81),YELLOW if selected else (89,119,146))
             thumb=self.track_thumb(self.cup*4+j,(164,105))
             self.canvas.blit(thumb,(x+6,220))
@@ -408,8 +426,10 @@ class WasteKartGame:
             # fit long names to 2 lines by using smaller type
             self.text(name,(x+88,359),22,WHITE)
             if selected:self.text('SELECTED',(x+88,384),19,YELLOW)
-            self.action_buttons.append((area,('track',j)))
-        self.text(f'Cup {self.cup+1}  -  Track {self.track_index+1}',(400,439),29,WHITE)
+            elif self.race_mode=='cup':self.text(f'RACE {j+1}',(x+88,384),19,YELLOW)
+            if self.race_mode=='single':self.action_buttons.append((area,('track',j)))
+        self.text((f'Cup {self.cup+1}  -  Track {self.track_index+1}' if self.race_mode=='single'
+                   else f'Cup {self.cup+1}  -  ALL 4 TRACKS'),(400,439),29,WHITE)
         self.button((200,478,400,75),'CHOOSE KARTS  >',('state','karts'),selected=True,size=38)
         self.button((26,540,156,47),'< BACK',('state','menu'),size=25)
         self.home()
@@ -450,13 +470,31 @@ class WasteKartGame:
             self.canvas.blit(self.map_surface,TRACK_RECT.topleft)
         pygame.draw.rect(self.canvas,(130,151,172),TRACK_RECT,2,border_radius=3)
 
-    def draw_route(self,pts,color,width=4,alpha=255):
+    def draw_route(self,pts,color,width=4,dashed=False):
         if len(pts)<2:return
-        # Pygame's AA is not needed for 4-pixel colored roads, keep line drawing cheap.
         points=[self.world_to_screen(p) for p in pts]
-        pygame.draw.lines(self.canvas,color,False,points,width)
-        for p in (points[0],points[-1]):
-            pygame.draw.circle(self.canvas,color,(round(p[0]),round(p[1])),5)
+        if dashed:
+            # Draw using distance, not vertex index, so dashes remain even when
+            # splines have unequal point spacing. Kept cheap by sampling 11px.
+            if not points:return
+            step=0.0
+            for a,b in zip(points,points[1:]):
+                span=length(a,b)
+                if span < 1e-5:continue
+                from_pos=0.0
+                while from_pos<span:
+                    take=min(span-from_pos,11.0-step%11.0)
+                    if int(step//11)%2==0:
+                        aa=lerp(a,b,from_pos/span)
+                        bb=lerp(a,b,(from_pos+take)/span)
+                        pygame.draw.line(self.canvas,color,aa,bb,width)
+                    from_pos+=take
+                    step+=take
+        else:
+            pygame.draw.lines(self.canvas,color,False,points,width)
+        if not dashed:
+            for p in (points[0],points[-1]):
+                pygame.draw.circle(self.canvas,color,(round(p[0]),round(p[1])),5)
 
     def draw_start(self):
         if not self.track:return
@@ -476,7 +514,8 @@ class WasteKartGame:
 
     def ready_page(self):
         self.draw_bg()
-        self.title('YOUR TURN!','Pass the screen to the next racer.')
+        self.title('YOUR TURN!',(f'{self.catalog["cups"][self.cup]} - TRACK {self.track_index+1}/4'
+                         if self.race_mode=='cup' else f'{self.track.name} - Pass the screen'))
         p=self.draw_player
         self.text(f'PLAYER {p+1}',(400,165),72,PALETTE[self.kart_ids[p]])
         self.kart_preview(self.kart_ids[p],(400,296),2.3)
@@ -489,17 +528,17 @@ class WasteKartGame:
         self.map_base()
         for idx,route in enumerate(self.routes):
             if route is not None:
-                self.draw_route(route.points,PALETTE[self.kart_ids[idx]],3)
+                self.draw_route(route.points,PALETTE[self.kart_ids[idx]],3,dashed=True)
         color=PALETTE[self.kart_ids[self.draw_player]]
         if len(self.draft)>1:self.draw_route(self.draft,color,6)
         self.draw_start()
         pygame.draw.rect(self.canvas,INK,(0,0,LOGICAL_W,72))
         self.text(f'PLAYER {self.draw_player+1} - DRAW!',(285,31),38,color)
-        self.text(f'{max(0,math.ceil(self.time_left))}s',(713,30),44,YELLOW)
+        self.text(('\u221e' if self.time_left is None else f'{max(0,math.ceil(self.time_left))}s'),(713,30),44,YELLOW)
         self.text('Draw around the track and back to green!',(380,59),22,MUTED)
         pygame.draw.rect(self.canvas,INK,(0,545,LOGICAL_W,55))
         self.button((25,550,160,43),'CLEAR',('clear',None),size=25)
-        self.text('Lift and continue if you need to.',(392,571),22,MUTED)
+        self.text('Lift to pause your line. CLEAR to redraw.',(395,571),22,MUTED)
         self.button((624,550,150,43),'DONE >',('draw_done',None),selected=True,size=25)
         self.home()
 
@@ -513,13 +552,22 @@ class WasteKartGame:
         return self.kart_rotation_cache[key]
 
     def display_racers(self):
-        for r in self.racers:
+        ordered=([self.active_ghost] if self.active_ghost is not None else [])+self.racers
+        for r in ordered:
             xy=self.world_to_screen(r.pos)
             # Shadows, outlined friendly cartoon karts and a player number.
-            pygame.draw.ellipse(self.canvas,(21,28,38),(xy[0]-23,xy[1]+6,46,15))
+            if not r.is_ghost:
+                pygame.draw.ellipse(self.canvas,(21,28,38),(xy[0]-23,xy[1]+6,46,15))
             img=self.racer_image(r.kart_id,r.heading)
+            if r.is_ghost:
+                key=('ghost',r.kart_id,int(round(math.degrees(r.heading)/6))*6%360)
+                if key not in self.kart_rotation_cache:
+                    faded=img.copy();faded.set_alpha(95)
+                    self.kart_rotation_cache[key]=faded
+                img=self.kart_rotation_cache[key]
             center=(int(xy[0]),int(xy[1]))
             self.canvas.blit(img,img.get_rect(center=center))
+            if r.is_ghost:continue
             dot=(center[0],center[1]-23)
             pygame.draw.circle(self.canvas,(20,31,52),dot,11)
             pygame.draw.circle(self.canvas,PALETTE[r.kart_id],dot,9)
@@ -527,6 +575,8 @@ class WasteKartGame:
 
     def race_page(self):
         self.map_base()
+        if self.active_ghost is not None:
+            self.draw_route(self.active_ghost.route.points,(176,194,218),2,dashed=True)
         for r in self.racers:
             self.draw_route(r.route.points,PALETTE[r.kart_id],3)
         self.draw_start()
@@ -537,7 +587,7 @@ class WasteKartGame:
             self.text('START YOUR ENGINES!',(425,60),24,WHITE)
         else:
             self.text(f'{self.elapsed:05.1f}s',(704,28),38,WHITE)
-            self.text('ONE LAP  -  DRAWN ROADS',(396,58),24,MUTED)
+            self.text(('GHOST CHALLENGE' if self.active_ghost else 'ONE LAP - DRAWN ROADS'),(396,58),24,MUTED)
         pygame.draw.rect(self.canvas,INK,(0,544,LOGICAL_W,56))
         w=(LOGICAL_W-24)/max(1,len(self.racers))
         for index,r in enumerate(self.racers):
@@ -587,32 +637,68 @@ class WasteKartGame:
     def results_page(self):
         self.map_base()
         self.display_racers()
-        overlay=pygame.Surface((LOGICAL_W,LOGICAL_H),pygame.SRCALPHA)
-        overlay.fill((15,25,49,217));self.canvas.blit(overlay,(0,0))
+        shade=pygame.Surface((LOGICAL_W,LOGICAL_H),pygame.SRCALPHA)
+        shade.fill((15,25,49,226))
+        self.canvas.blit(shade,(0,0))
         for x,y,vx,vy,c,r in self.confetti:
             pygame.draw.circle(self.canvas,c,(round(x),round(y)),r)
-        self.text('FINISH!',(400,71),72,YELLOW)
-        self.text(f'ONE LAP  -  {self.elapsed:.1f} seconds',(400,114),30,WHITE)
-        ordered=sorted(self.racers,key=lambda racer:racer.finish_time or 100000)
-        if ordered:
-            if len(ordered)==1:
-                self.text('YOU DID IT!',(400,165),50,PALETTE[ordered[0].kart_id])
+        ordered=sorted(self.racers,key=lambda r:(r.finish_time if r.finish_time is not None else 1e9,r.index))
+        if self.race_mode=='cup':
+            final=self.cup_stage==3
+            self.text('CUP CHAMPION!' if final else 'RACE FINISHED!',(400,43),56,YELLOW)
+            subtitle=f'{self.catalog["cups"][self.cup]}  -  RACE {self.cup_stage+1} / 4'
+            self.text(subtitle,(400,90),28,WHITE)
+            if final and ordered:
+                champion=self.cup_standings()[0]
+                self.text(f'PLAYER {champion+1} TAKES THE CUP!',(400,129),35,PALETTE[self.kart_ids[champion]])
             else:
-                self.text(f'PLAYER {ordered[0].index+1} WINS!',(400,165),50,PALETTE[ordered[0].kart_id])
-        for place,r in enumerate(ordered):
-            rect=pygame.Rect(155,202+place*58,490,51)
-            self.panel(rect,(42,56,78),(251,220,126) if place==0 else (102,130,166),10)
-            self.text(f'{place+1}.',(195,rect.centery),34,YELLOW if place==0 else WHITE)
-            self.kart_preview(r.kart_id,(264,rect.centery),.49)
-            self.text(f'PLAYER {r.index+1}',(313,rect.centery),26,PALETTE[r.kart_id],align='left')
-            self.text(f'{r.finish_time:.1f}s',(608,rect.centery),26,WHITE,align='right')
-        if len(ordered)<=2:
-            start_y=410
+                self.text(f'{self.track.name}  -  {self.elapsed:.1f}s',(400,129),27,MUTED)
+            self.panel((27,163,359,325),(40,57,80),(99,135,164))
+            self.panel((414,163,359,325),(40,57,80),(99,135,164))
+            self.text('THIS RACE',(206,187),29,YELLOW)
+            self.text('CUP POINTS',(594,187),29,YELLOW)
+            for place,r in enumerate(ordered):
+                y=235+place*55
+                self.text(f'{place+1}.', (65,y),30,WHITE)
+                self.kart_preview(r.kart_id,(126,y),.42)
+                self.text(f'P{r.index+1}',(173,y),28,PALETTE[r.kart_id],align='left')
+                self.text(f'{r.finish_time:.1f}s',(353,y),24,WHITE,align='right')
+            for rank,who in enumerate(self.cup_standings()):
+                y=235+rank*55
+                self.text(f'{rank+1}.',(450,y),30,YELLOW if rank==0 else WHITE)
+                self.kart_preview(self.kart_ids[who],(507,y),.42)
+                self.text(f'P{who+1}',(547,y),28,PALETTE[self.kart_ids[who]],align='left')
+                self.text(f'{self.cup_scores[who]} pts',(747,y),26,WHITE,align='right')
+            if final:
+                self.button((66,517,310,64),'REPLAY CUP',('replay_cup',None),selected=True,size=30)
+                self.button((430,517,310,64),'HOME',('home',None),size=30)
+            else:
+                self.button((166,517,467,64),'NEXT TRACK  >',('next_track',None),selected=True,size=33)
+                self.button((13,12,103,47),'HOME',('home',None),size=22)
         else:
-            start_y=465
-        self.button((32,524,237,58),'RACE AGAIN',('rematch',None),selected=True,size=27)
-        self.button((288,524,237,58),'NEW RACE',('newrace',None),size=27)
-        self.button((543,524,225,58),'HOME',('home',None),size=27)
+            self.text('FINISH!',(400,70),72,YELLOW)
+            self.text(f'{self.track.name}  -  ONE LAP',(400,119),30,WHITE)
+            if len(ordered)==1:
+                message=('YOU DID IT!' if self.ghost_target_time is None else
+                         ('YOU BEAT YOUR GHOST!' if ordered[0].finish_time<self.ghost_target_time else 'TRY THE GHOST AGAIN!'))
+                self.text(message,(400,158),38,PALETTE[ordered[0].kart_id])
+            elif ordered:
+                self.text(f'PLAYER {ordered[0].index+1} WINS!',(400,158),43,PALETTE[ordered[0].kart_id])
+            self.panel((120,190,560,268),(42,56,78),(251,220,126))
+            for place,r in enumerate(ordered):
+                y=229+place*53
+                self.text(f'{place+1}.',(176,y),32,YELLOW if place==0 else WHITE)
+                self.kart_preview(r.kart_id,(241,y),.49)
+                self.text(f'PLAYER {r.index+1}',(302,y),27,PALETTE[r.kart_id],align='left')
+                self.text(f'{r.finish_time:.2f}s',(645,y),27,WHITE,align='right')
+            if self.players==1:
+                if self.new_best:self.text('NEW PERSONAL BEST!',(400,477),29,YELLOW)
+                elif self.ghost_target_time is not None:
+                    self.text(f'GHOST BEST: {self.ghost_target_time:.2f}s',(400,477),28,MUTED)
+                else:self.text('Your first lap on this track!',(400,477),26,MUTED)
+            self.button((28,519,240,62),'RACE AGAIN',('rematch',None),selected=True,size=28)
+            self.button((285,519,239,62),'CHOOSE TRACK',('newrace',None),size=27)
+            self.button((540,519,230,62),'HOME',('home',None),size=28)
 
     def draw(self):
         self.action_buttons=[]
@@ -630,6 +716,11 @@ class WasteKartGame:
             self.screen.blit(resized,(0,0))
         pygame.display.flip()
 
+    def cup_standings(self):
+        # Points first; accumulated race time breaks a tie, then player number.
+        totals={i:sum(row[i] for row in self.cup_history) for i in range(self.players)}
+        return sorted(range(self.players),key=lambda i:(-self.cup_scores[i],totals[i],i))
+
     def go_ready(self):
         self.state='ready'
         self.draft=[]
@@ -637,7 +728,7 @@ class WasteKartGame:
 
     def begin_draw(self):
         self.state='draw'
-        self.time_left=float(self.draw_seconds)
+        self.time_left=None if self.draw_seconds is None else float(self.draw_seconds)
         self.draft=[tuple(self.track.centerline[0])]
         self.draw_pointer=None
 
@@ -645,50 +736,78 @@ class WasteKartGame:
         if self.state!='draw':return
         self.draw_pointer=None
         result=complete_drawn_loop(self.draft,self.track.centerline)
-        route=Route(result)
-        if route.length<100:
-            route=Route(catmull_rom(self.track.centerline+[self.track.centerline[0]]))
-        self.routes.append(route)
+        self.routes.append(Route(result))
         self.draw_player+=1
         if self.draw_player>=self.players:
             self.begin_countdown()
-        else:
-            self.go_ready()
+        else:self.go_ready()
 
     def begin_countdown(self):
         self.state='countdown'
         self.countdown=0.0
         self.elapsed=0.0
         self.paused=False
+        self.new_best=False
+        self.ghost_target_time=None
         self.racers=[Racer(i,self.kart_ids[i],self.routes[i]) for i in range(self.players)]
+        self.active_ghost=None
+        if self.players==1:
+            record=self.ghost_records.get(self.cup*4+self.track_index)
+            if record is not None:
+                self.ghost_target_time=record['time']
+                self.active_ghost=Racer(-1,record['kart_id'],Route(record['points']),True)
 
     def begin_new_race(self):
+        if self.race_mode=='cup':self.track_index=self.cup_stage
         self.load_track()
         self.routes=[]
         self.draw_player=0
         self.go_ready()
 
+    def start_championship(self):
+        self.cup_stage=0
+        self.cup_scores=[0,0,0,0]
+        self.cup_history=[]
+        self.begin_new_race()
+
+    def finish_race(self):
+        self.state='results'
+        # A frozen finish order is used to award 9/6/3/1 exactly once.
+        order=sorted(self.racers,key=lambda r:(r.finish_time if r.finish_time is not None else 1e9,r.index))
+        if self.race_mode=='cup':
+            for place,r in enumerate(order):self.cup_scores[r.index]+=CUP_POINTS[place]
+            self.cup_history.append([next(r.finish_time for r in self.racers if r.index==i) for i in range(self.players)])
+        # Ghost is best previous lap in this session, not stored on disk.
+        if self.players==1:
+            key=self.cup*4+self.track_index
+            r=self.racers[0]
+            best=self.ghost_records.get(key)
+            if best is None or r.finish_time<best['time']:
+                self.ghost_records[key]={'time':r.finish_time,'points':list(r.route.points),'kart_id':r.kart_id}
+                self.new_best=True
+        self.celebrate()
+
     def handle_button(self,action):
         name,value=action
-        if name=='home':
-            self.running=False
-        elif name=='players':
-            self.players=value
-            self.kart_player=0
+        if name=='home':self.running=False
+        elif name=='mode':self.race_mode=value
+        elif name=='players':self.players=value;self.kart_player=0
         elif name=='time':self.draw_seconds=value
         elif name=='state':
             self.state=value
             if value=='karts':self.kart_player=0
         elif name=='cup':self.cup=value;self.track_index=0
-        elif name=='track':self.track_index=value
+        elif name=='track':
+            if self.race_mode=='single':self.track_index=value
         elif name=='kart':
-            self.kart_ids[self.kart_player]=value
-            # Reserved karts stay unique in this version.
+            if value not in self.kart_ids[:self.kart_player]:
+                self.kart_ids[self.kart_player]=value
         elif name=='kart_next':
             if self.kart_player+1<self.players:
                 self.kart_player+=1
                 if self.kart_ids[self.kart_player] in self.kart_ids[:self.kart_player]:
                     self.kart_ids[self.kart_player]=next(k for k in range(8) if k not in self.kart_ids[:self.kart_player])
+            elif self.race_mode=='cup':self.start_championship()
             else:self.begin_new_race()
         elif name=='start_draw':self.begin_draw()
         elif name=='clear':
@@ -696,8 +815,12 @@ class WasteKartGame:
             self.draw_pointer=None
         elif name=='draw_done':self.finish_draw()
         elif name=='pause':self.paused=not self.paused
-        elif name=='rematch':self.begin_countdown()
-        elif name=='newrace':self.state='menu';self.kart_player=0
+        elif name=='rematch':self.begin_new_race()  # Replay must allow new drawing!
+        elif name=='next_track' and self.race_mode=='cup' and self.cup_stage<3:
+            self.cup_stage+=1
+            self.begin_new_race()
+        elif name=='replay_cup':self.start_championship()
+        elif name=='newrace':self.state='tracks';self.kart_player=0
 
     def finger_press(self,pointer,pos):
         for rect,action in reversed(self.action_buttons):
@@ -706,12 +829,13 @@ class WasteKartGame:
                 return
         if self.state=='draw' and TRACK_RECT.collidepoint(pos) and self.draw_pointer is None:
             self.draw_pointer=pointer
-            self.draft.append(self.screen_to_world(pos))
+            if length(self.draft[-1],self.screen_to_world(pos))>=8:
+                self.draft.append(self.screen_to_world(pos))
 
     def finger_motion(self,pointer,pos):
         if self.state=='draw' and self.draw_pointer==pointer:
             xy=self.screen_to_world(pos)
-            if len(self.draft)<1100 and self.draft and length(self.draft[-1],xy)>=4:
+            if len(self.draft)<1100 and self.draft and length(self.draft[-1],xy)>=8:
                 self.draft.append(xy)
 
     def finger_release(self,pointer,pos):
@@ -752,8 +876,9 @@ class WasteKartGame:
 
     def update(self,dt):
         if self.state=='draw':
-            self.time_left-=dt
-            if self.time_left<=0:self.finish_draw()
+            if self.time_left is not None:
+                self.time_left-=dt
+                if self.time_left<=0:self.finish_draw()
         elif self.state=='countdown':
             if not self.paused:
                 self.countdown+=dt
@@ -764,9 +889,10 @@ class WasteKartGame:
                 self.elapsed+=dt
                 for racer in self.racers:
                     racer.update(dt,self.elapsed,self.track)
+                if self.active_ghost is not None:
+                    self.active_ghost.update(dt,self.elapsed,self.track)
                 if self.racers and all(r.finished for r in self.racers):
-                    self.state='results'
-                    self.celebrate()
+                    self.finish_race()
         elif self.state=='results':
             for flake in self.confetti:
                 flake[0]+=flake[2]*dt
