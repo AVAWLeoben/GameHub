@@ -1,4 +1,4 @@
-"""WasteKart 1.5 - smaller race karts and optional multiplayer interactions.
+"""WasteKart 1.9.3 - Clover Crossing figure-eight and overpass support.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
@@ -212,6 +212,15 @@ def segment_near_point(a,b,p):
     return length(lerp(a,b,t),p)
 
 
+def point_segment_projection(a,b,p):
+    """Return distance, normalized t and closest point on segment a-b."""
+    dx=b[0]-a[0];dy=b[1]-a[1]
+    span=dx*dx+dy*dy
+    t=clamp(((p[0]-a[0])*dx+(p[1]-a[1])*dy)/span,0,1) if span>1e-7 else 0.0
+    closest=lerp(a,b,t)
+    return length(closest,p),t,closest
+
+
 class Route:
     """Precompute arc lengths and smoothed circumradius-based bend factors."""
     def __init__(self, points, lap_boundaries=None):
@@ -386,6 +395,17 @@ class Track:
         self.centerline_route=Route(self.centerline+[self.centerline[0]])
         mask_path=os.path.join(ASSET_ROOT,*entry['road_mask'].split('/'))
         self.mask=pygame.image.load(mask_path).convert()
+        self.overlay_path=None
+        overlay_rel=data.get('overlay_image')
+        if overlay_rel:
+            self.overlay_path=os.path.join(ASSET_ROOT,*overlay_rel.split('/'))
+        self.overpasses=[]
+        for bridge in data.get('overpasses',[]):
+            a=tuple(bridge['a'])
+            b=tuple(bridge['b'])
+            width=float(bridge.get('width',self.road_half_width*2.0))
+            tolerance=math.radians(float(bridge.get('heading_tolerance_degrees',42.0)))
+            self.overpasses.append({'a':a,'b':b,'width':width,'tolerance':tolerance})
         self.pickup_positions=self.find_pickup_positions()
 
     def on_road(self,point):
@@ -393,6 +413,30 @@ class Track:
         if not (0<=x<MAP_W and 0<=y<MAP_H):return False
         # A single O(1) lookup, even with four karts on iPad.
         return self.mask.get_at((x,y))[0] > 127
+
+    def has_overpasses(self):
+        return bool(self.overpasses)
+
+    def point_on_overpass(self, point, heading=None):
+        for bridge in self.overpasses:
+            dist,t,_=point_segment_projection(bridge['a'],bridge['b'],point)
+            if not (0.0 <= t <= 1.0):
+                continue
+            if dist > bridge['width']*0.48:
+                continue
+            if heading is None:
+                return True
+            bridge_angle=math.atan2(bridge['b'][1]-bridge['a'][1], bridge['b'][0]-bridge['a'][0])
+            if abs(angle_delta(heading, bridge_angle)) <= bridge['tolerance']:
+                return True
+        return False
+
+    def segment_layer(self, a, b):
+        if not self.overpasses:
+            return 0
+        heading=math.atan2(b[1]-a[1], b[0]-a[0])
+        mid=((a[0]+b[0])*0.5, (a[1]+b[1])*0.5)
+        return 1 if self.point_on_overpass(mid, heading) else 0
 
     def find_pickup_positions(self):
         """Offset boxes from the ideal line but keep them ON the road.
@@ -403,21 +447,28 @@ class Track:
         route=self.centerline_route
         spots=[]
         for slot,fraction in enumerate((.09,.21,.34,.47,.60,.73,.86)):
-            p,angle,_=route.sample(route.length*fraction)
-            nx,ny=-math.sin(angle),math.cos(angle)
-            # 70-79% of road half-width: centerline misses each pickup.
             side=1 if slot%2==0 else -1
             found=None
-            for sign in (side,-side):
-                for factor in (.77,.71,.65):
-                    lateral=self.road_half_width*factor*sign
-                    candidate=(p[0]+nx*lateral,p[1]+ny*lateral)
-                    if (28<candidate[0]<MAP_W-28 and
-                            28<candidate[1]<MAP_H-28 and
-                            self.on_road(candidate) and
-                            all(length(candidate,other)>70 for other in spots)):
-                        found=candidate
-                        break
+            # Only bridge tracks need alternate fractions. Never place a box
+            # right inside the two-level crossing where it would be ambiguous.
+            for offset in ((0,.025,-.025,.055,-.055) if self.overpasses else (0,)):
+                p,angle,_=route.sample(route.length*((fraction+offset)%1.0))
+                nx,ny=-math.sin(angle),math.cos(angle)
+                for sign in (side,-side):
+                    for factor in (.77,.71,.65):
+                        lateral=self.road_half_width*factor*sign
+                        candidate=(p[0]+nx*lateral,p[1]+ny*lateral)
+                        crossing_conflict=any(
+                            length(candidate,((bridge['a'][0]+bridge['b'][0])*.5,
+                                              (bridge['a'][1]+bridge['b'][1])*.5))<115
+                            for bridge in self.overpasses)
+                        if (28<candidate[0]<MAP_W-28 and
+                                28<candidate[1]<MAP_H-28 and
+                                not crossing_conflict and self.on_road(candidate) and
+                                all(length(candidate,other)>70 for other in spots)):
+                            found=candidate
+                            break
+                    if found is not None:break
                 if found is not None:break
             if found is not None:spots.append(found)
         return spots
@@ -603,12 +654,14 @@ class WasteKartGame:
         self.results_time=0.0
         self.kart_picks=[0,1,2,3]
         self.map_surface=None
+        self.bridge_overlay_surface=None
         self.race_routes_layer=None  # Legacy field; used only during transition.
         self.race_trails=[]      # AheadTrail for each player (+ optional ghost).
         self.pickups=[]          # Fresh shared boxes for each race; stable during drawing.
         self.item_box_clock=0.0
         self.question_mark=None
         self.draw_routes_layer=None
+        self.draw_routes_layer_overpass=None
         self.draw_routes_layer_key=None
         self.track=None
         self.track_cache={}
@@ -642,6 +695,10 @@ class WasteKartGame:
                       if self.powerups_enabled else [])
         img=pygame.image.load(self.track.image_path).convert()
         self.map_surface=pygame.transform.smoothscale(img,TRACK_RECT.size)
+        self.bridge_overlay_surface=None
+        if self.track.overlay_path and os.path.exists(self.track.overlay_path):
+            overlay=pygame.image.load(self.track.overlay_path).convert_alpha()
+            self.bridge_overlay_surface=pygame.transform.smoothscale(overlay,TRACK_RECT.size)
 
     def font(self,size):
         return self.fonts[min(self.fonts,key=lambda k:abs(k-size))]
@@ -921,7 +978,7 @@ class WasteKartGame:
             self.canvas.blit(self.map_surface,TRACK_RECT.topleft)
         pygame.draw.rect(self.canvas,(130,151,172),TRACK_RECT,2,border_radius=3)
 
-    def draw_route(self,pts,color,width=4,dashed=False):
+    def draw_route(self,pts,color,width=4,dashed=False,end_caps=True):
         if len(pts)<2:return
         points=[self.world_to_screen(p) for p in pts]
         if dashed:
@@ -943,9 +1000,40 @@ class WasteKartGame:
                     step+=take
         else:
             pygame.draw.lines(self.canvas,color,False,points,width)
-        if not dashed:
+        if end_caps and not dashed:
             for p in (points[0],points[-1]):
                 pygame.draw.circle(self.canvas,color,(round(p[0]),round(p[1])),5)
+
+    def route_runs_for_layer(self, pts, layer):
+        if len(pts)<2:
+            return []
+        if not self.track or not self.track.has_overpasses():
+            return [pts] if layer==0 else []
+        runs=[]
+        current=[pts[0],pts[1]]
+        current_layer=self.track.segment_layer(pts[0],pts[1])
+        for i in range(1,len(pts)-1):
+            a,b=pts[i],pts[i+1]
+            seg_layer=self.track.segment_layer(a,b)
+            if seg_layer==current_layer:
+                current.append(b)
+            else:
+                if current_layer==layer and len(current)>=2:
+                    runs.append(current)
+                current=[a,b]
+                current_layer=seg_layer
+        if current_layer==layer and len(current)>=2:
+            runs.append(current)
+        return runs
+
+    def draw_route_layered(self, pts, color, width=4, dashed=False, layer=0):
+        runs=self.route_runs_for_layer(pts,layer)
+        for run in runs:
+            self.draw_route(run,color,width,dashed,end_caps=False)
+
+    def draw_bridge_overlay(self):
+        if self.bridge_overlay_surface is not None:
+            self.canvas.blit(self.bridge_overlay_surface, TRACK_RECT.topleft)
 
     def draw_powerup_boxes(self, race=False):
         """Small rotating, bobbing cubes with orbital sparkles and respawn effects.
@@ -1029,10 +1117,10 @@ class WasteKartGame:
         self.home()
 
     def ensure_draw_routes_layer(self):
-        """Cache completed players' and completed laps' dashed routes.
+        """Cache prior drawings once per turn, splitting overpass layers.
 
-        Only the active finger stroke must be redrawn at frame rate. This keeps
-        three-lap multiplayer drawing responsive on iPad/Pygbag.
+        In particular, do NOT rasterize four 3-lap previous players' drawings
+        twice per frame just because the current course has one bridge.
         """
         cache_key=(self.cup,self.track_index,self.draw_player,
                    len(self.routes),len(self.drawn_laps))
@@ -1040,26 +1128,46 @@ class WasteKartGame:
             return
         previous=self.canvas
         self.draw_routes_layer=pygame.Surface((LOGICAL_W,LOGICAL_H),pygame.SRCALPHA)
-        self.canvas=self.draw_routes_layer
+        has_bridge=bool(self.track and self.track.has_overpasses())
+        self.draw_routes_layer_overpass=(pygame.Surface((LOGICAL_W,LOGICAL_H),pygame.SRCALPHA)
+                                          if has_bridge else None)
         try:
-            for idx,route in enumerate(self.routes):
-                if route is not None:
-                    self.draw_route(route.points,PALETTE[self.kart_ids[idx]],3,dashed=True)
             color=PALETTE[self.kart_ids[self.draw_player]]
-            for prior in self.drawn_laps:
-                if len(prior)>1:self.draw_route(prior,color,3,dashed=True)
+            for layer in ((0,1) if has_bridge else (0,)):
+                self.canvas=(self.draw_routes_layer if layer==0 else self.draw_routes_layer_overpass)
+                for idx,route in enumerate(self.routes):
+                    if route is not None:
+                        if has_bridge:self.draw_route_layered(route.points,PALETTE[self.kart_ids[idx]],3,True,layer)
+                        else:self.draw_route(route.points,PALETTE[self.kart_ids[idx]],3,dashed=True)
+                for prior in self.drawn_laps:
+                    if len(prior)>1:
+                        if has_bridge:self.draw_route_layered(prior,color,3,True,layer)
+                        else:self.draw_route(prior,color,3,dashed=True)
         finally:
             self.canvas=previous
         self.draw_routes_layer_key=cache_key
 
     def draw_page(self):
         self.map_base()
-        self.ensure_draw_routes_layer()
-        self.canvas.blit(self.draw_routes_layer,(0,0))
-        self.draw_powerup_boxes()
         color=PALETTE[self.kart_ids[self.draw_player]]
-        if len(self.draft)>1:self.draw_route(self.draft,color,6)
-        self.draw_start()
+        if self.track and self.track.has_overpasses():
+            self.ensure_draw_routes_layer()
+            self.canvas.blit(self.draw_routes_layer,(0,0))
+            self.draw_powerup_boxes()
+            if len(self.draft)>1:
+                self.draw_route_layered(self.draft,color,6,dashed=False,layer=0)
+            self.draw_start()
+            self.draw_bridge_overlay()
+            if self.draw_routes_layer_overpass is not None:
+                self.canvas.blit(self.draw_routes_layer_overpass,(0,0))
+            if len(self.draft)>1:
+                self.draw_route_layered(self.draft,color,6,dashed=False,layer=1)
+        else:
+            self.ensure_draw_routes_layer()
+            self.canvas.blit(self.draw_routes_layer,(0,0))
+            self.draw_powerup_boxes()
+            if len(self.draft)>1:self.draw_route(self.draft,color,6)
+            self.draw_start()
         pygame.draw.rect(self.canvas,INK,(0,0,LOGICAL_W,72))
         self.text(f'P{self.draw_player+1} - DRAW LAP {len(self.drawn_laps)+1}/{self.laps}',(306,31),34,color)
         self.text(('\u221e' if self.time_left is None else f'{max(0,math.ceil(self.time_left))}s'),(713,30),44,YELLOW)
@@ -1240,9 +1348,13 @@ class WasteKartGame:
                 self.text('?', (rect.centerx, rect.bottom-11), 18, MUTED)
             self.action_buttons.append((rect, ('powerup_press', index)))
 
-    def display_racers(self):
+    def display_racers(self, layer=None):
         ordered=([self.active_ghost] if self.active_ghost is not None else [])+self.racers
         for r in ordered:
+            if layer is not None and self.track and self.track.has_overpasses():
+                racer_layer = 1 if self.track.point_on_overpass(r.pos, r.heading) else 0
+                if racer_layer != layer:
+                    continue
             xy=self.world_to_screen(r.pos)
             # Shadows, outlined friendly cartoon karts and a player number.
             if not r.is_ghost:
@@ -1274,7 +1386,12 @@ class WasteKartGame:
                 trail.draw(self.canvas,racer.distance)
         self.draw_powerup_boxes(race=self.state=='race')
         self.draw_start()
-        self.display_racers()
+        if self.track and self.track.has_overpasses():
+            self.display_racers(layer=0)
+            self.draw_bridge_overlay()
+            self.display_racers(layer=1)
+        else:
+            self.display_racers()
         pygame.draw.rect(self.canvas,INK,(0,0,LOGICAL_W,73))
         self.text('WASTE KART', (234,27),38,YELLOW)
         if self.state=='countdown':
@@ -1653,6 +1770,12 @@ class WasteKartGame:
                 separation=math.hypot(dx,dy)
                 if separation>DRAFT_MAX+3.0:
                     continue
+                # Bridge/underpass racers occupy different layers. 2D closeness
+                # alone must never create a bump or a slipstream across decks.
+                if getattr(self.track,'overpasses',None):
+                    if (self.track.point_on_overpass(a.pos,a.heading) !=
+                            self.track.point_on_overpass(b.pos,b.heading)):
+                        continue
                 # Drafting only works behind a moving kart, facing the same
                 # direction. Side-by-side, opposite, or crossing karts do not
                 # create unrealistic turbo wind. Neither benefit can stack.
