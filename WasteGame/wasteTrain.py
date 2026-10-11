@@ -1,4 +1,4 @@
-"""WasteTrain 2.4 — creative railway sandbox for young children.
+"""WasteTrain 2.5 — continuous train routing and working junctions.
 
 Classic grid building and finger-drawn spline rails coexist in one railway graph.
 Scenery/stations are loaded from assets/wasteTrain; grass keeps its old asset.
@@ -7,7 +7,8 @@ Drop-in GameHub entry point: await wasteTrain.main(screen, clock).
 Controls: TILES / DRAW / ERASE / MOVE, two-finger pan, NEW (twice to confirm).
 Station, bridge and horizontal tunnel ports are ready-made snap nodes.
 Tracks are generated in Pygame as connected polylines, not tile PNGs.
-Version 2.4: static world cached and resized only when zoom changes; camera
+Version 2.5: explorative junction routing, continuous movement, no unwanted U-turns.
+Static world cached and resized only when zoom changes; camera
 movement uses cropped blits, and trains draw separately at the target zoom.
 A tunnel is one continuous left-to-right structure with a hidden traversable
 rail edge; trains vanish beneath the hill and reappear on the other side.
@@ -179,21 +180,25 @@ class RailNetwork:
         # Explicitly attach stroke endpoints to existing edges, even if they
         # touch a segment without geometrically crossing through it.
         endpoints=[]
-        for curve in curves:
+        for curve_idx,curve in enumerate(curves):
             if len(curve)>=2:
-                endpoints.extend((key(curve[0]),key(curve[-1])))
+                endpoints.extend(((key(curve[0]),('curve',curve_idx)),
+                                  (key(curve[-1]),('curve',curve_idx))))
         graph = defaultdict(dict)
-        for endpoint in endpoints:
-            near = (0.85, None, None, None)
+        # A stroke endpoint lying on ANOTHER segment must split that segment,
+        # including when both are collinear. Never snap to its own segment,
+        # which previously hid these shared connections.
+        for endpoint, own_group in endpoints:
+            closest = (0.85, None, None, None)
             for i,(a,b,kind,group,j) in enumerate(raw):
-                if kind=='tunnel' or kind=='bridge':
+                if kind in ('tunnel','bridge') or group == own_group:
                     continue
                 dd,q,t=point_to_segment(endpoint,a,b)
-                if dd < near[0]:
-                    near=(dd,i,key(q),t)
-            _,i,q,t=near
+                if dd < closest[0]:
+                    closest=(dd,i,key(q),t)
+            _,i,q,t=closest
             if i is not None:
-                splits[i].append((t, endpoint if dst(endpoint,q)<0.004 else q))
+                splits[i].append((t,q))
                 if q!=endpoint:
                     graph[endpoint][q]=(max(dst(endpoint,q),.001),'normal')
                     graph[q][endpoint]=(max(dst(endpoint,q),.001),'normal')
@@ -396,23 +401,28 @@ def paint_rail_network(surface,network):
 
 
 class ToyTrain:
-    """A single continuous, unteleporting train on the connected rail graph.
+    """Explore connected rails continuously, instead of repeatedly taking
+    shortest paths to arbitrary endpoints.
 
-    Active rides persist when rails are edited. At a terminus, the new ride
-    starts at the SAME graph node or the train pauses; it never respawns on
-    a remote track, nor moves to another connected component unexpectedly.
+    Junctions favor branches that have been visited less often, but the train
+    never reverses at a switch or structure while a forward exit exists.
+    A real dead end is the only place where it changes direction.
     """
 
     def __init__(self, net, stations, rng, focus=None):
-        self.net, self.stations, self.rng = net, stations, rng
+        self.net = net
+        self.stations = stations
+        self.rng = rng
         self.focus = key(focus) if focus is not None else None
         self.pending_net = None
         self.nodes = []
         self.distances = []
         self.length = 0.0
         self.travel = 0.0
-        self.speed = 66.0  # Child-friendly: slow enough to follow by eye.
+        self.speed = 66.0
         self.destination = None
+        self.segment_kind = 'normal'
+        self.previous_node = None
         self.active = True
         self.wait_at_end = 0.0
         self.stopped = False
@@ -420,153 +430,210 @@ class ToyTrain:
                        'wagon_freight_green']
         self.odometer = 0.0
         self.history = []
+        self.edge_visits = defaultdict(int)
+        self.branch_choices = defaultdict(int)
         self.choose_new_ride()
         first = self.sample(0)
         if first is not None:
             self.history = [(0.0, first)]
 
+    @staticmethod
+    def edge_id(a, b):
+        return (a, b) if a < b else (b, a)
+
     def queue_network(self, new_net):
-        """Use changed geometry after the current journey finishes."""
+        """Commit edits at the next graph vertex, never mid-edge."""
         self.pending_net = new_net
+        if self.stopped:
+            self.try_resume()
+
+    def try_resume(self):
+        """Restart on the same position if a stopped train gains an exit."""
+        if self.pending_net is not None:
+            self.net = self.pending_net
+            self.pending_net = None
+        here = self.destination
+        if here is None or here not in self.net.graph:
+            return False
+        self.stopped = False
+        if self._depart(here, self.previous_node):
+            return True
+        self.stopped = True
+        return False
 
     def set_route(self, path):
-        self.nodes = path
-        self.distances = [0.0]
-        for a, b in zip(path, path[1:]):
-            self.distances.append(self.distances[-1] + dst(a, b))
-        self.length = self.distances[-1]
+        """Set one graph edge; called only when already at its first node."""
+        if len(path) != 2:
+            self.stopped = True
+            return False
+        a, b = key(path[0]), key(path[1])
+        link = self.net.graph.get(a, {}).get(b)
+        if link is None or link[0] < 0.001:
+            self.stopped = True
+            return False
+        self.nodes = [a, b]
+        self.length = link[0]
+        self.distances = [0.0, self.length]
         self.travel = 0.0
-        self.destination = path[-1]
+        self.destination = b
+        self.segment_kind = link[1]
         self.stopped = False
+        self.edge_visits[self.edge_id(a, b)] += 1
+        return True
+
+    def _choose_exit(self, node, arrived_from):
+        """Prefer continuing forward and explore real junction alternatives."""
+        neighbors = list(self.net.graph.get(node, {}))
+        if not neighbors:
+            return None
+        # NEVER choose a U-turn after a tunnel, bridge or ordinary junction
+        # when any other exit is still available.
+        options = [p for p in neighbors if p != arrived_from]
+        if not options:
+            # A genuine dead end. Reverse along the only available edge.
+            options = neighbors
+        if len(options) == 1:
+            return options[0]
+
+        # At a switch, prefer an under-explored exit. Tie breaking favors a
+        # relatively straight trajectory, with a little variety over time.
+        smallest = min(self.edge_visits[self.edge_id(node, p)] for p in options)
+        options = [p for p in options
+                   if self.edge_visits[self.edge_id(node, p)] == smallest]
+        if len(options) == 1:
+            return options[0]
+        if arrived_from is not None:
+            vin = (node[0]-arrived_from[0], node[1]-arrived_from[1])
+            vlen = max(0.0001, math.hypot(*vin))
+            def straightness(p):
+                vout = (p[0]-node[0], p[1]-node[1])
+                return (vin[0]*vout[0]+vin[1]*vout[1])/(vlen*max(.0001,math.hypot(*vout)))
+            # Most of the time take a smooth exit; occasionally branch to
+            # explore the network rather than repeating the same path.
+            if self.rng.random() < 0.75:
+                return max(options, key=straightness)
+        return self.rng.choice(options)
+
+    def _depart(self, node, arrived_from):
+        next_node = self._choose_exit(node, arrived_from)
+        if next_node is None:
+            self.stopped = True
+            return False
+        self.previous_node = node
+        if not self.set_route([node, next_node]):
+            self.stopped = True
+            return False
+        if len(self.net.graph.get(node, {})) >= 3:
+            self.branch_choices[node] += 1
+        return True
 
     def choose_new_ride(self, source=None):
-        net = self.net
-        ports = [key(p) for p in self.stations]
-        # A source means the current train already exists. Never select a new
-        # disconnected component in that case.
+        """Choose a starting place only once; later moves stay continuous."""
         if source is not None:
             source = key(source)
-            if source not in net.graph or not net.graph[source]:
-                self.stopped = True
-                return False
-            components = [net.reachable(source)]
-        else:
-            components = []
-            examined = set()
-            for node in net.graph:
-                if node in examined:
-                    continue
-                component = net.reachable(node)
-                examined.update(component)
-                if len(component) > 1:
-                    components.append(component)
-            if self.focus is not None and components:
-                closest = min(net.graph, key=lambda p: dst(p, self.focus))
-                focused = [c for c in components if closest in c]
-                if focused and dst(closest, self.focus) <= CELL:
-                    components = focused
+            return self._depart(source, self.previous_node)
+        components = []
+        examined = set()
+        for node in self.net.graph:
+            if node in examined:
+                continue
+            comp = self.net.reachable(node)
+            examined.update(comp)
+            if len(comp) > 1:
+                components.append(comp)
         if not components:
             self.stopped = True
             return False
-        candidates = []
-        for component in components:
-            stops = [p for p in ports if p in component and net.graph[p]]
-            start = source if source is not None else (
-                self.rng.choice(stops) if stops else min(component))
-            # Prefer rides that visit a different station; otherwise follow a
-            # connected track to its farthest point, including short ones.
-            targets = [p for p in stops if p != start]
-            if not targets:
-                farthest = max(component, key=lambda p: dst(start,p))
-                if farthest != start:
-                    targets = [farthest]
-                else:
-                    targets = [p for p in net.graph[start] if p != start]
-            for end in targets:
-                path = net.path(start, end)
-                if len(path) >= 2:
-                    length = sum(dst(a,b) for a,b in zip(path,path[1:]))
-                    if length > 1.0:
-                        candidates.append((length,path))
-        if not candidates:
+        if self.focus is not None:
+            near = min(self.net.graph, key=lambda p: dst(p, self.focus))
+            focused = [comp for comp in components if near in comp]
+            if focused and dst(near, self.focus) <= CELL * 2:
+                components = focused
+        # Choose the largest connected railway. Prefer starting at a station,
+        # then choose a terminal so the locomotive explores outward.
+        comp = max(components, key=len)
+        stations = [key(s) for s in self.stations if key(s) in comp
+                    and self.net.graph.get(key(s))]
+        if stations:
+            start = min(stations, key=lambda p: dst(p, self.focus)) if self.focus else self.rng.choice(stations)
+        else:
+            terminals = [p for p in comp if len(self.net.graph[p]) == 1]
+            candidates = terminals or list(comp)
+            start = min(candidates, key=lambda p: dst(p, self.focus)) if self.focus else self.rng.choice(candidates)
+        self.previous_node = None
+        return self._depart(start, None)
+
+    def _arrive(self):
+        """Advance through the vertex while preserving continuous travel."""
+        if not self.nodes:
             self.stopped = True
             return False
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        chosen = self.rng.choice(candidates[:min(3,len(candidates))])[1]
-        assert source is None or chosen[0] == source, 'Route must remain continuous'
-        self.set_route(chosen)
-        return True
-
-    def change_at_terminus(self):
-        endpoint = self.destination
+        from_node, here = self.nodes
         if self.pending_net is not None:
-            pending = self.pending_net
+            self.net = self.pending_net
             self.pending_net = None
-            # Change networks only when the current endpoint still exists.
-            # Otherwise freeze in place, rather than jumping to a new segment.
-            if endpoint in pending.graph and pending.graph[endpoint]:
-                self.net = pending
-            else:
-                self.stopped = True
-                return
-        self.choose_new_ride(endpoint)
+        if here not in self.net.graph:
+            self.stopped = True
+            return False
+        # Stations have a small, visible stop; ordinary nodes do not.
+        if here in {key(p) for p in self.stations}:
+            self.wait_at_end = 0.25
+        return self._depart(here, from_node)
 
     def update(self, dt):
         if not self.active or self.stopped or len(self.nodes) < 2:
             return
+        dt = max(0.0, min(0.05, dt))
         if self.wait_at_end > 0.0:
-            self.wait_at_end -= dt
-            if self.wait_at_end <= 0.0:
-                self.change_at_terminus()
+            self.wait_at_end = max(0.0, self.wait_at_end - dt)
             return
         remaining = self.speed * dt
-        while remaining > 0.0001 and not self.stopped:
-            delta = min(remaining, max(0.0, self.length-self.travel))
-            self.travel += delta
-            self.odometer += delta
-            sampled = self.sample(self.travel)
-            if sampled is not None:
-                self.history.append((self.odometer,sampled))
-            remaining -= delta
-            if self.travel >= self.length-0.001:
-                self.wait_at_end = 0.5
+        # The speed can cover several tiny spline edges in one game frame.
+        for _ in range(128):
+            if remaining <= 0.00001 or self.stopped:
                 break
+            available = max(0.0, self.length - self.travel)
+            advance = min(remaining, available)
+            self.travel += advance
+            self.odometer += advance
+            sample = self.sample(self.travel)
+            if sample is not None:
+                self.history.append((self.odometer, sample))
+            remaining -= advance
+            if self.travel >= self.length - .00001:
+                if not self._arrive():
+                    break
+                if self.wait_at_end > 0.0:
+                    break
         cutoff = self.odometer - (len(self.wagons)*58 + 115)
         while len(self.history) > 2 and self.history[1][0] < cutoff:
             self.history.pop(0)
 
     def wagon_sample(self, offset):
-        """Return previous distance along the *actual traversed route*."""
-        wanted = self.odometer-offset
+        """Sample the ACTUAL path travelled, including selected switches."""
+        wanted = self.odometer - offset
         if wanted < 0 or not self.history or wanted < self.history[0][0]:
             return None
-        for j in range(len(self.history)-1):
-            before,a = self.history[j]
-            after,b = self.history[j+1]
+        for j in range(len(self.history) - 1):
+            before, a = self.history[j]
+            after, b = self.history[j+1]
             if wanted <= after:
-                t = max(0.,min(1.,(wanted-before)/max(.0001,after-before)))
-                p = between(a[0],b[0],t)
-                # Angle of the *local traveled path*, not a random destination.
+                t = max(0.0, min(1.0, (wanted-before)/max(.00001, after-before)))
+                pos = between(a[0], b[0], t)
                 angle = (-math.degrees(math.atan2(b[0][1]-a[0][1],
-                            b[0][0]-a[0][0])) if dst(a[0],b[0]) > .01 else a[1])
-                kind = a[2] if t < 0.5 else b[2]
-                return p,angle,kind
+                         b[0][0]-a[0][0])) if dst(a[0], b[0]) > .01 else a[1])
+                kind = a[2] if t < .5 else b[2]
+                return pos, angle, kind
         return self.history[-1][1]
 
     def sample(self, travelled):
         if len(self.nodes) < 2:
             return None
-        travelled = max(0.,min(self.length,travelled))
-        for i in range(len(self.nodes)-1):
-            start,end = self.distances[i:i+2]
-            if travelled <= end or i == len(self.nodes)-2:
-                t = (travelled-start)/max(.001,end-start)
-                a,b = self.nodes[i:i+2]
-                pos = between(a,b,t)
-                angle = -math.degrees(math.atan2(b[1]-a[1],b[0]-a[0]))
-                kind = self.net.graph[a][b][1]
-                return pos,angle,kind
-        return None
+        t = max(0.0, min(1.0, travelled / max(0.00001, self.length)))
+        a, b = self.nodes
+        pos = between(a, b, t)
+        angle = -math.degrees(math.atan2(b[1]-a[1], b[0]-a[0]))
+        return pos, angle, self.segment_kind
 
 
 class WasteTrainWorld:
@@ -963,10 +1030,9 @@ class WasteTrainWorld:
             new_net=RailNetwork()
             new_net.rebuild(self.grid,self.curves,self.station_ports,self.tunnels,self.bridge)
             self.net=new_net
-            if (self.train.active and not self.train.stopped
-                    and len(self.train.nodes) >= 2):
-                # Don't respawn the locomotive on every child tap! It finishes
-                # its present ride; the revised network is used at the next stop.
+            if self.train.active and len(self.train.nodes) >= 2:
+                # Keep the train in the SAME position even when temporarily
+                # stopped; a rebuilt graph can revive it at that location.
                 self.train.queue_network(self.net)
             else:
                 self.train=ToyTrain(self.net,self.station_ports,self.rng,
