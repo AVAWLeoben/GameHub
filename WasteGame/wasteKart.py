@@ -1,10 +1,10 @@
-"""WasteKart 1.1 - draw-to-race with Single Race, Cup and best-lap ghost.
+"""WasteKart 1.3.1 - optional reflex start and three independently drawn laps.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
 
 Original four-cup, sixteen-course art resides in assets/WasteKart.
-Races use 16 original tracks. Reflex, items and kart collisions are future additions.
+Races use 16 original tracks. Power-ups and kart collisions are future additions.
 """
 import asyncio
 import bisect
@@ -32,6 +32,10 @@ CUP_POINTS = (9, 6, 3, 1)
 DRAW_TIMES = (15, 30, 60, None)  # None means unlimited.
 ROAD_FACTOR = 1.0
 GRASS_FACTOR = 0.55
+GREEN_AT = 3.0
+REACTION_WINDOW = 1.5       # Seconds after green; no penalty if a child simply waits.
+REACTION_EFFECT_SECONDS = 3.0
+EARLY_START_MODIFIER = 0.82 # A gentle, temporary false-start penalty.
 
 
 def clamp(value, lo, hi):
@@ -147,14 +151,51 @@ def complete_drawn_loop(raw, centerline):
     return smoothed
 
 
+def combine_drawn_laps(raw_laps, centerline):
+    """Join distinct child-drawn laps into ONE non-repeating race spline.
+
+    Each individual lap is Catmull-Rom smoothed and, if unfinished, connects
+    straight to the flag. Boundaries are measured arc distances and retained
+    for the race HUD and ghost playback. No lap is duplicated or looped.
+    """
+    if not raw_laps:
+        raw_laps = [[centerline[0]]]
+    combined=[]
+    boundaries=[]
+    distance=0.0
+    for raw in raw_laps:
+        lap=complete_drawn_loop(raw,centerline)
+        if combined:
+            lap=lap[1:]  # same start/finish point; don't duplicate a vertex
+        if not lap:
+            continue
+        if combined:
+            distance+=length(combined[-1],lap[0])
+        for a,b in zip(lap,lap[1:]):
+            distance+=length(a,b)
+        combined.extend(lap)
+        boundaries.append(distance)
+    return combined,boundaries
+
+
+def segment_near_point(a,b,p):
+    """Distance to a line segment, robust to fast touch movements."""
+    dx=b[0]-a[0];dy=b[1]-a[1]
+    span=dx*dx+dy*dy
+    t=clamp(((p[0]-a[0])*dx+(p[1]-a[1])*dy)/span,0,1) if span>1e-7 else 0.0
+    return length(lerp(a,b,t),p)
+
+
 class Route:
     """Precompute arc lengths and smoothed circumradius-based bend factors."""
-    def __init__(self, points):
+    def __init__(self, points, lap_boundaries=None):
         self.points = list(points)
         self.accumulated = [0.0]
         for a,b in zip(self.points,self.points[1:]):
             self.accumulated.append(self.accumulated[-1]+length(a,b))
         self.length = self.accumulated[-1]
+        self.lap_boundaries = (list(lap_boundaries) if lap_boundaries is not None
+                               else [self.length])
         raw=[]
         # Circumradius = abc/(4*triangle area). Sample about 30px on either side
         # and average 5 successive radii to reject finger input jitter.
@@ -204,39 +245,85 @@ class Track:
         return self.mask.get_at((x,y))[0] > 127
 
 class Racer:
-    def __init__(self,index,kart_id,route,is_ghost=False):
+    """One vehicle drives its entire child-drawn multi-lap spline ONCE."""
+    def __init__(self,index,kart_id,route,is_ghost=False,laps=1):
         self.index=index
         self.kart_id=kart_id
         self.route=route
         self.is_ghost=is_ghost
+        self.laps=laps
+        self.total_length=route.length
+        # The three lap boundaries can be different lengths and shapes.
+        self.lap_boundaries = list(route.lap_boundaries)
         self.distance=0.0
+        self.completed_laps=0
+        self.lap_times=[]
+        self.lap_crossing_times=[]
         self.speed=0.0
-        self.start_modifier=1.0  # Future reflex-start input hook.
+        self.start_modifier=1.0
+        self.start_effect_left=0.0
         self.modifiers=[]       # Future pickups/slipstreaming hook.
         self.finished=False
         self.finish_time=None
         self.pos,self.heading,_=route.sample(0)
         self.on_track=True
+        # Ghost uses the recorded reaction, including an early-press penalty.
+        self.ghost_reaction=None
+        self.ghost_reaction_applied=False
+
+    def apply_start_reaction(self, reaction):
+        """Negative reaction means false start; None means no manual boost."""
+        if reaction is None:
+            return
+        if reaction < 0:
+            self.start_modifier=EARLY_START_MODIFIER
+        else:
+            quickness=1.0-clamp(reaction/REACTION_WINDOW,0.0,1.0)
+            self.start_modifier=1.12+0.33*quickness
+        self.start_effect_left=REACTION_EFFECT_SECONDS
+
+    def route_sample(self, distance):
+        """Traverse the entire unique drawing, never wrap or teleport."""
+        return self.route.sample(distance)
 
     def update(self,dt,elapsed,track):
         if self.finished:return
-        pos,heading,bend=self.route.sample(self.distance)
+        if self.is_ghost and not self.ghost_reaction_applied and self.ghost_reaction is not None:
+            if self.ghost_reaction < 0 or elapsed >= self.ghost_reaction:
+                self.apply_start_reaction(self.ghost_reaction)
+                self.ghost_reaction_applied=True
+        pos,heading,bend=self.route_sample(self.distance)
         road=track.on_road(pos)
-        desired=track.max_speed*bend*(ROAD_FACTOR if road else GRASS_FACTOR)*self.start_modifier
+        temporary=1.0
+        if self.start_effect_left>0:
+            temporary+=((self.start_modifier-1.0)
+                        * self.start_effect_left/REACTION_EFFECT_SECONDS)
+            self.start_effect_left=max(0.0,self.start_effect_left-dt)
+        desired=track.max_speed*bend*(ROAD_FACTOR if road else GRASS_FACTOR)*temporary
         for modifier in self.modifiers:
             desired*=modifier
-        reaction=3.1 if desired>self.speed else 5.2
-        self.speed+=(desired-self.speed)*min(1.0,dt*reaction)
+        response=3.1 if desired>self.speed else 5.2
+        self.speed+=(desired-self.speed)*min(1.0,dt*response)
         advance=self.speed*dt
         previous=self.distance
-        self.distance=min(self.route.length,self.distance+advance)
-        self.pos,self.heading,_=self.route.sample(self.distance)
+        self.distance=min(self.total_length,self.distance+advance)
+        self.pos,self.heading,_=self.route_sample(self.distance)
         self.on_track=track.on_road(self.pos)
-        if self.distance>=self.route.length-1e-3:
+        if self.route.length>1e-5 and advance>1e-7:
+            while self.completed_laps<self.laps:
+                boundary=self.lap_boundaries[self.completed_laps]
+                if self.distance<boundary-1e-4:
+                    break
+                fraction=clamp((boundary-previous)/advance,0.0,1.0)
+                lap_end=round(elapsed-dt+dt*fraction,3)
+                previous_end=self.lap_crossing_times[-1] if self.lap_crossing_times else 0.0
+                self.lap_times.append(round(lap_end-previous_end,3))
+                self.lap_crossing_times.append(lap_end)
+                self.completed_laps+=1
+        if self.distance>=self.total_length-1e-3:
             self.finished=True
-            # Subframe finish time avoids a player advantage due to update order.
-            fraction=(self.route.length-previous)/max(advance,1e-6)
-            self.finish_time=round(elapsed-dt+dt*clamp(fraction,0,1),3)
+            self.finish_time=round(elapsed-dt+dt*clamp(
+                (self.total_length-previous)/max(advance,1e-6),0,1),3)
 
 def browser_touch_mode(enabled):
     """Keep canvas finger drawing from scrolling the web page on iPad."""
@@ -268,6 +355,13 @@ class WasteKartGame:
         self.players=2
         self.race_mode='single'
         self.draw_seconds=60
+        self.laps=1
+        self.reflex_start=True
+        # Power-ups are not yet implemented; keep the mode setting separate
+        # so a later release can expose an independent ON/OFF toggle.
+        self.powerups_enabled=False
+        self.reaction_status=[]
+        self.reaction_times=[]
         self.cup_stage=0
         self.cup_scores=[0,0,0,0]
         self.cup_history=[]
@@ -280,6 +374,8 @@ class WasteKartGame:
         self.kart_player=0
         self.draw_player=0
         self.draft=[]
+        self.drawn_laps=[]
+        self.draw_lap_distance=0.0
         self.draw_pointer=None
         self.time_left=self.draw_seconds
         self.routes=[]
@@ -290,6 +386,9 @@ class WasteKartGame:
         self.results_time=0.0
         self.kart_picks=[0,1,2,3]
         self.map_surface=None
+        self.race_routes_layer=None
+        self.draw_routes_layer=None
+        self.draw_routes_layer_key=None
         self.track=None
         self.track_cache={}
         self.thumb_cache={}
@@ -313,6 +412,7 @@ class WasteKartGame:
             self.kart_images.append(image)
 
     def load_track(self):
+        self.draw_routes_layer_key=None
         index=self.cup*4+self.track_index
         if index not in self.track_cache:
             self.track_cache[index]=Track(self.catalog['tracks'][index])
@@ -392,20 +492,35 @@ class WasteKartGame:
 
     def menu_page(self):
         self.draw_bg()
-        self.title('WASTE KART!','Draw a racing line. Race it together!')
-        self.panel((42,112,716,119))
-        self.text('WHAT SHALL WE RACE?',(400,132),28,YELLOW)
-        self.button((81,161,307,54),'SINGLE RACE',('mode','single'),selected=self.race_mode=='single',size=29)
-        self.button((411,161,307,54),'4-TRACK CUP',('mode','cup'),selected=self.race_mode=='cup',size=29)
-        self.panel((42,244,716,109))
-        self.text('HOW MANY RACERS?',(400,264),27,YELLOW)
+        self.title('WASTE KART!', 'Draw a racing line. Race it together!')
+        self.panel((40,98,720,91))
+        self.text('PICK YOUR RACE',(400,111),25,YELLOW)
+        self.button((76,134,311,45),'SINGLE RACE',('mode','single'),selected=self.race_mode=='single',size=26)
+        self.button((413,134,311,45),'4-TRACK CUP',('mode','cup'),selected=self.race_mode=='cup',size=26)
+
+        self.panel((40,197,720,87))
+        self.text('HOW MANY RACERS?',(400,213),25,YELLOW)
         for i in range(4):
-            self.button((90+i*158,287,145,56),str(i+1),('players',i+1),selected=self.players==i+1,size=39)
-        self.panel((42,363,716,123))
-        self.text('TIME TO DRAW EACH LINE',(400,383),27,YELLOW)
-        for j,(seconds,label) in enumerate(((15,'15 sec'),(30,'30 sec'),(60,'60 sec'),(None,'NO LIMIT'))):
-            self.button((60+j*174,406,156,59),label,('time',seconds),selected=self.draw_seconds==seconds,size=25)
-        self.button((228,503,344,76),'CHOOSE CUP  >',('state','tracks'),selected=True,size=32)
+            self.button((85+i*158,233,144,43),str(i+1),('players',i+1),selected=self.players==i+1,size=31)
+
+        self.panel((40,293,720,86))
+        self.text('TIME TO DRAW',(400,309),25,YELLOW)
+        for i,(seconds,label) in enumerate(((15,'15 SEC'),(30,'30 SEC'),(60,'60 SEC'),(None,'NO LIMIT'))):
+            self.button((60+i*174,330,156,41),label,('time',seconds),selected=self.draw_seconds==seconds,size=23)
+
+        self.panel((40,389,347,123))
+        self.text('HOW MANY LAPS?',(213,407),25,YELLOW)
+        self.button((54,440,154,58),'1 LAP',('laps',1),selected=self.laps==1,size=28)
+        self.button((219,440,154,58),'3 LAPS',('laps',3),selected=self.laps==3,size=28)
+
+        self.panel((399,389,361,123))
+        self.text('REFLEX START?',(579,407),25,YELLOW)
+        self.button((412,440,156,58),'OFF',('reflex',False),selected=not self.reflex_start,size=29)
+        self.button((582,440,165,58),'ON!',('reflex',True),selected=self.reflex_start,size=29)
+
+        # No placeholder toggle that misleadingly claims to enable absent items.
+        self.text('POWER-UPS: COMING LATER (OFF)',(400,528),20,MUTED)
+        self.button((255,542,290,48),'CHOOSE CUP  >',('state','tracks'),selected=True,size=26)
         self.home()
 
     def tracks_page(self):
@@ -519,27 +634,50 @@ class WasteKartGame:
         p=self.draw_player
         self.text(f'PLAYER {p+1}',(400,165),72,PALETTE[self.kart_ids[p]])
         self.kart_preview(self.kart_ids[p],(400,296),2.3)
-        self.text('Draw a road around the track!',(400,385),34,WHITE)
+        self.text(f'Draw {self.laps} lap'+('s' if self.laps>1 else '')+' - each one is different!',(400,385),32,WHITE)
         self.text('Start at the green dot. Your finger is the pencil.',(400,424),25,MUTED)
         self.button((220,473,360,79),'READY TO DRAW!',('start_draw',None),selected=True,size=37)
         self.home()
 
+    def ensure_draw_routes_layer(self):
+        """Cache completed players' and completed laps' dashed routes.
+
+        Only the active finger stroke must be redrawn at frame rate. This keeps
+        three-lap multiplayer drawing responsive on iPad/Pygbag.
+        """
+        cache_key=(self.cup,self.track_index,self.draw_player,
+                   len(self.routes),len(self.drawn_laps))
+        if self.draw_routes_layer_key==cache_key and self.draw_routes_layer is not None:
+            return
+        previous=self.canvas
+        self.draw_routes_layer=pygame.Surface((LOGICAL_W,LOGICAL_H),pygame.SRCALPHA)
+        self.canvas=self.draw_routes_layer
+        try:
+            for idx,route in enumerate(self.routes):
+                if route is not None:
+                    self.draw_route(route.points,PALETTE[self.kart_ids[idx]],3,dashed=True)
+            color=PALETTE[self.kart_ids[self.draw_player]]
+            for prior in self.drawn_laps:
+                if len(prior)>1:self.draw_route(prior,color,3,dashed=True)
+        finally:
+            self.canvas=previous
+        self.draw_routes_layer_key=cache_key
+
     def draw_page(self):
         self.map_base()
-        for idx,route in enumerate(self.routes):
-            if route is not None:
-                self.draw_route(route.points,PALETTE[self.kart_ids[idx]],3,dashed=True)
+        self.ensure_draw_routes_layer()
+        self.canvas.blit(self.draw_routes_layer,(0,0))
         color=PALETTE[self.kart_ids[self.draw_player]]
         if len(self.draft)>1:self.draw_route(self.draft,color,6)
         self.draw_start()
         pygame.draw.rect(self.canvas,INK,(0,0,LOGICAL_W,72))
-        self.text(f'PLAYER {self.draw_player+1} - DRAW!',(285,31),38,color)
+        self.text(f'P{self.draw_player+1} - DRAW LAP {len(self.drawn_laps)+1}/{self.laps}',(306,31),34,color)
         self.text(('\u221e' if self.time_left is None else f'{max(0,math.ceil(self.time_left))}s'),(713,30),44,YELLOW)
-        self.text('Draw around the track and back to green!',(380,59),22,MUTED)
+        self.text('Draw to the green dot. Every lap gets its OWN line!',(380,59),22,MUTED)
         pygame.draw.rect(self.canvas,INK,(0,545,LOGICAL_W,55))
         self.button((25,550,160,43),'CLEAR',('clear',None),size=25)
-        self.text('Lift to pause your line. CLEAR to redraw.',(395,571),22,MUTED)
-        self.button((624,550,150,43),'DONE >',('draw_done',None),selected=True,size=25)
+        self.text(f'LAPS DONE: {len(self.drawn_laps)}/{self.laps}   -   Lift to pause. CLEAR to retry.',(397,571),21,MUTED)
+        self.button((624,550,150,43),'FINISH LAP',('draw_done',None),selected=True,size=23)
         self.home()
 
     def racer_image(self,kart_id,angle):
@@ -575,34 +713,40 @@ class WasteKartGame:
 
     def race_page(self):
         self.map_base()
-        if self.active_ghost is not None:
-            self.draw_route(self.active_ghost.route.points,(176,194,218),2,dashed=True)
-        for r in self.racers:
-            self.draw_route(r.route.points,PALETTE[r.kart_id],3)
+        if self.race_routes_layer is not None:
+            self.canvas.blit(self.race_routes_layer,(0,0))
         self.draw_start()
         self.display_racers()
         pygame.draw.rect(self.canvas,INK,(0,0,LOGICAL_W,73))
         self.text('WASTE KART', (234,27),38,YELLOW)
         if self.state=='countdown':
-            self.text('START YOUR ENGINES!',(425,60),24,WHITE)
+            self.text('TAP YOUR COLOR ON GREEN!' if self.reflex_start else 'START YOUR ENGINES!',(425,60),24,WHITE)
         else:
             self.text(f'{self.elapsed:05.1f}s',(704,28),38,WHITE)
-            self.text(('GHOST CHALLENGE' if self.active_ghost else 'ONE LAP - DRAWN ROADS'),(396,58),24,MUTED)
+            self.text(f'{self.laps} LAP'+('S' if self.laps>1 else '')+(' - GHOST' if self.active_ghost else ' - DRAWN ROADS'),(396,58),24,MUTED)
         pygame.draw.rect(self.canvas,INK,(0,544,LOGICAL_W,56))
         w=(LOGICAL_W-24)/max(1,len(self.racers))
         for index,r in enumerate(self.racers):
             left=10+index*w
-            label=f'P{index+1}  '+('FINISH!' if r.finished else f'{int(r.distance/max(1,r.route.length)*100)}%')
+            label=f'P{index+1}  '+('FINISH!' if r.finished else f'LAP {min(self.laps,r.completed_laps+1)}/{self.laps}')
             self.text(label,(left+8,552),22,PALETTE[r.kart_id],align='left')
             trackrect=pygame.Rect(round(left+6),574,round(w-22),12)
             pygame.draw.rect(self.canvas,(57,72,100),trackrect,border_radius=6)
-            progress=clamp(r.distance/max(1,r.route.length),0,1)
+            progress=clamp(r.distance/max(1,r.total_length),0,1)
             if progress>0:
                 fill=pygame.Rect(trackrect.x,trackrect.y,max(1,int(trackrect.width*progress)),12)
                 pygame.draw.rect(self.canvas,PALETTE[r.kart_id],fill,border_radius=6)
         self.home()
         if self.state=='countdown':
             self.draw_lights()
+        elif self.state=='race' and self.elapsed<0.75:
+            # Keep GO visible when the race actually starts, not before.
+            pygame.draw.rect(self.canvas,(42,153,87),(281,117,238,89),border_radius=20)
+            pygame.draw.rect(self.canvas,(242,226,135),(281,117,238,89),4,border_radius=20)
+            self.text('GO!',(400,159),72,WHITE)
+        if self.reflex_start and (self.state=='countdown' or
+                                  (self.state=='race' and self.elapsed<REACTION_WINDOW)):
+            self.draw_reflex_buttons()
         if self.paused:
             panel=pygame.Surface((LOGICAL_W,LOGICAL_H),pygame.SRCALPHA)
             panel.fill((11,19,37,185));self.canvas.blit(panel,(0,0))
@@ -612,21 +756,41 @@ class WasteKartGame:
             self.button((668,11,120,48),'PAUSE',('pause',None),size=22)
 
     def draw_lights(self):
-        r=pygame.Rect(209,190,382,191)
+        r=pygame.Rect(209,181,382,192)
         pygame.draw.rect(self.canvas,(22,28,43),r,border_radius=30)
         pygame.draw.rect(self.canvas,(250,219,148),r,5,border_radius=30)
-        stages=math.floor(self.countdown)
+        # One new red light per second, then race begins at GREEN_AT.
+        stages=min(3,int(self.countdown)+1)
         for i in range(3):
             active=stages>=i+1
             c=(240,65,71) if active else (75,42,48)
-            pygame.draw.circle(self.canvas,(8,12,24),(285+i*115,276),42)
-            pygame.draw.circle(self.canvas,c,(285+i*115,276),34)
-            if active:pygame.draw.circle(self.canvas,(255,183,153),(276+i*115,267),9)
-        if self.countdown>=3.0:
-            pygame.draw.rect(self.canvas,(47,172,92),(236,339,328,85),border_radius=16)
-            self.text('GO!',(400,381),72,WHITE)
+            pygame.draw.circle(self.canvas,(8,12,24),(285+i*115,272),42)
+            pygame.draw.circle(self.canvas,c,(285+i*115,272),34)
+            if active:pygame.draw.circle(self.canvas,(255,183,153),(276+i*115,263),9)
+        self.text(f'{max(1,math.ceil(GREEN_AT-self.countdown))}',(400,358),56,YELLOW)
+
+    def draw_reflex_buttons(self):
+        """Large, independent, color-coded buttons for 1–4 local players."""
+        gap=10
+        width=min(182,int((766-(self.players-1)*gap)/self.players))
+        total=self.players*width+(self.players-1)*gap
+        left=(LOGICAL_W-total)//2
+        for player in range(self.players):
+            rect=(left+player*(width+gap),454,width,79)
+            color=PALETTE[self.kart_ids[player]]
+            status=self.reaction_status[player]
+            if status=='early':label=f'P{player+1} EARLY'
+            elif status=='boost':label=f'P{player+1} BOOST!'
+            elif status=='late':label=f'P{player+1} OK'
+            else:label=f'P{player+1} TAP!'
+            disabled=status!='waiting'
+            # Retain each player's color after a press; do not gray out the button.
+            self.button(rect,label,('reflex_press',player) if not disabled else None,
+                        color=color,selected=False,size=25)
+        if self.state=='countdown':
+            self.text('WAIT FOR GREEN!',(400,431),27,YELLOW)
         else:
-            self.text(f'{max(1,3-stages)}',(400,370),60,YELLOW)
+            self.text('TAP NOW FOR A BOOST!',(400,431),27,YELLOW)
 
     def celebrate(self):
         self.confetti=[]
@@ -645,12 +809,22 @@ class WasteKartGame:
         ordered=sorted(self.racers,key=lambda r:(r.finish_time if r.finish_time is not None else 1e9,r.index))
         if self.race_mode=='cup':
             final=self.cup_stage==3
-            self.text('CUP CHAMPION!' if final else 'RACE FINISHED!',(400,43),56,YELLOW)
+            champions=self.cup_winners() if final else []
+            self.text(('CUP CHAMPIONS!' if len(champions)>1 else 'CUP CHAMPION!')
+                      if final else 'RACE FINISHED!',(400,43),56,YELLOW)
             subtitle=f'{self.catalog["cups"][self.cup]}  -  RACE {self.cup_stage+1} / 4'
             self.text(subtitle,(400,90),28,WHITE)
-            if final and ordered:
-                champion=self.cup_standings()[0]
-                self.text(f'PLAYER {champion+1} TAKES THE CUP!',(400,129),35,PALETTE[self.kart_ids[champion]])
+            if final and champions:
+                if len(champions)==1:
+                    champion=champions[0]
+                    self.text(f'PLAYER {champion+1} TAKES THE CUP!',(400,129),35,
+                              PALETTE[self.kart_ids[champion]])
+                elif len(champions)==self.players:
+                    self.text('ALL PLAYERS SHARE THE CUP!',(400,129),34,YELLOW)
+                else:
+                    names=[str(i+1) for i in champions]
+                    winners=', '.join(names[:-1])+' & '+names[-1]
+                    self.text(f'PLAYERS {winners} SHARE THE CUP!',(400,129),30,YELLOW)
             else:
                 self.text(f'{self.track.name}  -  {self.elapsed:.1f}s',(400,129),27,MUTED)
             self.panel((27,163,359,325),(40,57,80),(99,135,164))
@@ -665,7 +839,8 @@ class WasteKartGame:
                 self.text(f'{r.finish_time:.1f}s',(353,y),24,WHITE,align='right')
             for rank,who in enumerate(self.cup_standings()):
                 y=235+rank*55
-                self.text(f'{rank+1}.',(450,y),30,YELLOW if rank==0 else WHITE)
+                place=self.cup_rank(who)
+                self.text(f'{place}.',(450,y),30,YELLOW if place==1 else WHITE)
                 self.kart_preview(self.kart_ids[who],(507,y),.42)
                 self.text(f'P{who+1}',(547,y),28,PALETTE[self.kart_ids[who]],align='left')
                 self.text(f'{self.cup_scores[who]} pts',(747,y),26,WHITE,align='right')
@@ -677,7 +852,7 @@ class WasteKartGame:
                 self.button((13,12,103,47),'HOME',('home',None),size=22)
         else:
             self.text('FINISH!',(400,70),72,YELLOW)
-            self.text(f'{self.track.name}  -  ONE LAP',(400,119),30,WHITE)
+            self.text(f'{self.track.name}  -  {self.laps} LAP'+('S' if self.laps>1 else ''),(400,119),30,WHITE)
             if len(ordered)==1:
                 message=('YOU DID IT!' if self.ghost_target_time is None else
                          ('YOU BEAT YOUR GHOST!' if ordered[0].finish_time<self.ghost_target_time else 'TRY THE GHOST AGAIN!'))
@@ -695,7 +870,7 @@ class WasteKartGame:
                 if self.new_best:self.text('NEW PERSONAL BEST!',(400,477),29,YELLOW)
                 elif self.ghost_target_time is not None:
                     self.text(f'GHOST BEST: {self.ghost_target_time:.2f}s',(400,477),28,MUTED)
-                else:self.text('Your first lap on this track!',(400,477),26,MUTED)
+                else:self.text('Your first race on this track!',(400,477),26,MUTED)
             self.button((28,519,240,62),'RACE AGAIN',('rematch',None),selected=True,size=28)
             self.button((285,519,239,62),'CHOOSE TRACK',('newrace',None),size=27)
             self.button((540,519,230,62),'HOME',('home',None),size=28)
@@ -717,30 +892,93 @@ class WasteKartGame:
         pygame.display.flip()
 
     def cup_standings(self):
-        # Points first; accumulated race time breaks a tie, then player number.
-        totals={i:sum(row[i] for row in self.cup_history) for i in range(self.players)}
-        return sorted(range(self.players),key=lambda i:(-self.cup_scores[i],totals[i],i))
+        """Sort by championship points; player number only stabilizes display order.
+
+        Equal points always mean an equal place. Lap times do not break ties.
+        """
+        return sorted(range(self.players), key=lambda i:(-self.cup_scores[i],i))
+
+    def cup_rank(self, player):
+        """Competition rank: 30, 30, 18 points => places 1, 1, 3."""
+        return 1 + sum(self.cup_scores[other] > self.cup_scores[player]
+                       for other in range(self.players))
+
+    def cup_winners(self):
+        """All players tied for the highest point total share the cup."""
+        if self.players < 1:
+            return []
+        best=max(self.cup_scores[:self.players])
+        return [i for i in range(self.players) if self.cup_scores[i]==best]
 
     def go_ready(self):
         self.state='ready'
         self.draft=[]
+        self.drawn_laps=[]
+        self.draw_lap_distance=0.0
         self.draw_pointer=None
+
+    def new_lap_timer(self):
+        # Timer is per lap, so selecting three laps never forces a child
+        # to draw three circuits in the time intended for just one.
+        self.time_left=None if self.draw_seconds is None else float(self.draw_seconds)
 
     def begin_draw(self):
         self.state='draw'
-        self.time_left=None if self.draw_seconds is None else float(self.draw_seconds)
+        self.drawn_laps=[]
+        self.draw_lap_distance=0.0
+        self.new_lap_timer()
         self.draft=[tuple(self.track.centerline[0])]
         self.draw_pointer=None
 
-    def finish_draw(self):
-        if self.state!='draw':return
+    def append_draft(self,xy):
+        """Record input and notice each REAL return to the finish marker."""
+        if self.state!='draw' or not self.draft:
+            return
+        if len(self.draft)>=1250 or length(self.draft[-1],xy)<8:
+            return
+        previous=self.draft[-1]
+        self.draft.append(xy)
+        self.draw_lap_distance+=length(previous,xy)
+        circumference=self.track.centerline_route.length
+        if (self.draw_lap_distance>=circumference*.65 and
+                segment_near_point(previous,xy,self.track.centerline[0])<34):
+            # A route can pass the flag several times: one actual drawn
+            # circuit at a time. Gate distance prevents repeated tap loops.
+            self.seal_lap(reached_flag=True)
+
+    def seal_lap(self,reached_flag=False):
+        """Close one hand-drawn lap; move to drawing the NEXT distinct lap."""
+        if self.state!='draw':
+            return
+        raw=list(self.draft)
+        if reached_flag:
+            # Exact shared junction between loops, independent of touch jitter.
+            if length(raw[-1],self.track.centerline[0])>0.5:
+                raw.append(tuple(self.track.centerline[0]))
+            else:
+                raw[-1]=tuple(self.track.centerline[0])
+        self.drawn_laps.append(raw)
+        self.draw_lap_distance=0.0
+        if len(self.drawn_laps)<self.laps:
+            # Keep the finger active across the start line for a truly
+            # uninterrupted three-lap drawing; a lift is also allowed.
+            self.draft=[tuple(self.track.centerline[0])]
+            self.new_lap_timer()
+            return
+        # All requested laps are uniquely drawn. Build one continuous spline.
         self.draw_pointer=None
-        result=complete_drawn_loop(self.draft,self.track.centerline)
-        self.routes.append(Route(result))
+        points,boundaries=combine_drawn_laps(self.drawn_laps,self.track.centerline)
+        self.routes.append(Route(points,boundaries))
         self.draw_player+=1
         if self.draw_player>=self.players:
             self.begin_countdown()
-        else:self.go_ready()
+        else:
+            self.go_ready()
+
+    def finish_draw(self):
+        # A DONE press or timeout finishes only the CURRENT drawing lap,
+        # not an entire three-lap race. Partial laps connect straight to flag.
+        self.seal_lap(reached_flag=False)
 
     def begin_countdown(self):
         self.state='countdown'
@@ -749,13 +987,28 @@ class WasteKartGame:
         self.paused=False
         self.new_best=False
         self.ghost_target_time=None
-        self.racers=[Racer(i,self.kart_ids[i],self.routes[i]) for i in range(self.players)]
+        self.racers=[Racer(i,self.kart_ids[i],self.routes[i],laps=self.laps)
+                     for i in range(self.players)]
+        self.reaction_status=['waiting']*self.players
+        self.reaction_times=[None]*self.players
         self.active_ghost=None
         if self.players==1:
-            record=self.ghost_records.get(self.cup*4+self.track_index)
+            record=self.ghost_records.get((self.cup*4+self.track_index,self.laps))
             if record is not None:
                 self.ghost_target_time=record['time']
-                self.active_ghost=Racer(-1,record['kart_id'],Route(record['points']),True)
+                self.active_ghost=Racer(-1,record['kart_id'],Route(record['points'],record.get('lap_boundaries')),True,laps=self.laps)
+                self.active_ghost.ghost_reaction=record.get('reaction')
+        # Draw tracks ONCE, rather than redrawing 3 x 4 dense splines at 60 FPS.
+        old_canvas=self.canvas
+        self.race_routes_layer=pygame.Surface((LOGICAL_W,LOGICAL_H),pygame.SRCALPHA)
+        self.canvas=self.race_routes_layer
+        try:
+            if self.active_ghost is not None:
+                self.draw_route(self.active_ghost.route.points,(176,194,218),2,dashed=True)
+            for racer in self.racers:
+                self.draw_route(racer.route.points,PALETTE[racer.kart_id],3)
+        finally:
+            self.canvas=old_canvas
 
     def begin_new_race(self):
         if self.race_mode=='cup':self.track_index=self.cup_stage
@@ -777,15 +1030,40 @@ class WasteKartGame:
         if self.race_mode=='cup':
             for place,r in enumerate(order):self.cup_scores[r.index]+=CUP_POINTS[place]
             self.cup_history.append([next(r.finish_time for r in self.racers if r.index==i) for i in range(self.players)])
-        # Ghost is best previous lap in this session, not stored on disk.
+        # Ghost is the best previous race in this session, not stored on disk.
         if self.players==1:
-            key=self.cup*4+self.track_index
+            key=(self.cup*4+self.track_index,self.laps)
             r=self.racers[0]
             best=self.ghost_records.get(key)
             if best is None or r.finish_time<best['time']:
-                self.ghost_records[key]={'time':r.finish_time,'points':list(r.route.points),'kart_id':r.kart_id}
+                self.ghost_records[key]={'time':r.finish_time,'points':list(r.route.points),
+                                         'lap_boundaries':list(r.route.lap_boundaries),
+                                         'kart_id':r.kart_id,'reaction':self.reaction_times[0]}
                 self.new_best=True
         self.celebrate()
+
+    def press_reflex(self, player):
+        """Register one press per player; a miss never blocks the race.
+
+        Before green: short false-start penalty. After green: reaction-sized
+        boost, with no penalty for a child who never presses.
+        """
+        if not self.reflex_start or not 0<=player<self.players:
+            return
+        if self.state not in ('countdown','race'):
+            return
+        if not self.reaction_status or self.reaction_status[player]!='waiting':
+            return
+        if self.state=='countdown' and self.countdown<GREEN_AT:
+            reaction=-1.0
+            self.reaction_status[player]='early'
+        else:
+            reaction=max(0.0,self.elapsed) if self.state=='race' else 0.0
+            if reaction>REACTION_WINDOW:
+                return
+            self.reaction_status[player]='boost'
+        self.reaction_times[player]=reaction
+        self.racers[player].apply_start_reaction(reaction)
 
     def handle_button(self,action):
         name,value=action
@@ -793,6 +1071,8 @@ class WasteKartGame:
         elif name=='mode':self.race_mode=value
         elif name=='players':self.players=value;self.kart_player=0
         elif name=='time':self.draw_seconds=value
+        elif name=='laps':self.laps=value
+        elif name=='reflex':self.reflex_start=bool(value)
         elif name=='state':
             self.state=value
             if value=='karts':self.kart_player=0
@@ -809,9 +1089,11 @@ class WasteKartGame:
                     self.kart_ids[self.kart_player]=next(k for k in range(8) if k not in self.kart_ids[:self.kart_player])
             elif self.race_mode=='cup':self.start_championship()
             else:self.begin_new_race()
+        elif name=='reflex_press':self.press_reflex(value)
         elif name=='start_draw':self.begin_draw()
         elif name=='clear':
             self.draft=[self.track.centerline[0]]
+            self.draw_lap_distance=0.0
             self.draw_pointer=None
         elif name=='draw_done':self.finish_draw()
         elif name=='pause':self.paused=not self.paused
@@ -829,14 +1111,12 @@ class WasteKartGame:
                 return
         if self.state=='draw' and TRACK_RECT.collidepoint(pos) and self.draw_pointer is None:
             self.draw_pointer=pointer
-            if length(self.draft[-1],self.screen_to_world(pos))>=8:
-                self.draft.append(self.screen_to_world(pos))
+            self.append_draft(self.screen_to_world(pos))
 
     def finger_motion(self,pointer,pos):
         if self.state=='draw' and self.draw_pointer==pointer:
             xy=self.screen_to_world(pos)
-            if len(self.draft)<1100 and self.draft and length(self.draft[-1],xy)>=8:
-                self.draft.append(xy)
+            self.append_draft(xy)
 
     def finger_release(self,pointer,pos):
         if self.draw_pointer==pointer:
@@ -882,8 +1162,9 @@ class WasteKartGame:
         elif self.state=='countdown':
             if not self.paused:
                 self.countdown+=dt
-                if self.countdown>=3.8:
+                if self.countdown>=GREEN_AT:
                     self.state='race'
+                    self.elapsed=0.0
         elif self.state=='race':
             if not self.paused:
                 self.elapsed+=dt
