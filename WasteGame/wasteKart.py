@@ -46,6 +46,10 @@ POWERUP_COLORS = {'turbo': (255, 169, 59), 'tailwind': (91, 239, 240)}
 # while SRCALPHA layers make the one-pixel dashes blend into the road.
 RACE_LINE_OPACITY = 67
 GHOST_LINE_OPACITY = 42
+# Player action buttons live at the corners of the playfield, leaving Home
+# and Pause untouched while keeping each child's button easy to find.
+ACTION_BUTTON_SIZE = (124, 56)
+ACTION_BUTTON_SLOTS = ('tl', 'tr', 'bl', 'br')
 
 
 def clamp(value, lo, hi):
@@ -648,6 +652,22 @@ class WasteKartGame:
         pygame.draw.rect(self.canvas,bg,r,border_radius=radius)
         pygame.draw.rect(self.canvas,border,r,2,border_radius=radius)
 
+    def player_action_rects(self):
+        """Stable corners of the track view for 1-4 local player buttons."""
+        w,h = ACTION_BUTTON_SIZE
+        margin = 10
+        left = TRACK_RECT.left + margin
+        right = TRACK_RECT.right - margin - w
+        top = TRACK_RECT.top + margin
+        bottom = TRACK_RECT.bottom - margin - h
+        slots = {
+            'tl': pygame.Rect(left, top, w, h),
+            'tr': pygame.Rect(right, top, w, h),
+            'bl': pygame.Rect(left, bottom, w, h),
+            'br': pygame.Rect(right, bottom, w, h),
+        }
+        return [slots[ACTION_BUTTON_SLOTS[i]] for i in range(self.players)]
+
     def draw_bg(self):
         self.canvas.fill((25,35,61))
         for i in range(0,LOGICAL_H,30):
@@ -937,7 +957,8 @@ class WasteKartGame:
         self.home()
 
     def racer_image(self,kart_id,angle):
-        quant=(int(round(math.degrees(angle)/6))*6)%360
+        # The supplied kart artwork points to the LEFT in its base image.
+        quant=(int(round(math.degrees(angle)/6))*6+180)%360
         key=('race',kart_id,quant)
         if key not in self.kart_rotation_cache:
             img=self.kart_images[kart_id]
