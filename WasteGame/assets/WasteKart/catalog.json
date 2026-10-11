@@ -1,0 +1,156 @@
+{
+  "cups": [
+    "Meadow Cup",
+    "Coast Cup",
+    "Desert Cup",
+    "Star Cup"
+  ],
+  "tracks": [
+    {
+      "cup": 1,
+      "track": 1,
+      "name": "Daisy Dash",
+      "image": "Tracks/Cups/Cup1/track_01.png",
+      "geometry": "Tracks/Cups/Cup1/track_01.json"
+    },
+    {
+      "cup": 1,
+      "track": 2,
+      "name": "Clover Crossing",
+      "image": "Tracks/Cups/Cup1/track_02.png",
+      "geometry": "Tracks/Cups/Cup1/track_02.json"
+    },
+    {
+      "cup": 1,
+      "track": 3,
+      "name": "Apple Orchard",
+      "image": "Tracks/Cups/Cup1/track_03.png",
+      "geometry": "Tracks/Cups/Cup1/track_03.json"
+    },
+    {
+      "cup": 1,
+      "track": 4,
+      "name": "Bumblebee Bend",
+      "image": "Tracks/Cups/Cup1/track_04.png",
+      "geometry": "Tracks/Cups/Cup1/track_04.json"
+    },
+    {
+      "cup": 2,
+      "track": 1,
+      "name": "Shell Shore",
+      "image": "Tracks/Cups/Cup2/track_01.png",
+      "geometry": "Tracks/Cups/Cup2/track_01.json"
+    },
+    {
+      "cup": 2,
+      "track": 2,
+      "name": "Coral Curve",
+      "image": "Tracks/Cups/Cup2/track_02.png",
+      "geometry": "Tracks/Cups/Cup2/track_02.json"
+    },
+    {
+      "cup": 2,
+      "track": 3,
+      "name": "Harbor Loop",
+      "image": "Tracks/Cups/Cup2/track_03.png",
+      "geometry": "Tracks/Cups/Cup2/track_03.json"
+    },
+    {
+      "cup": 2,
+      "track": 4,
+      "name": "Turtle Tides",
+      "image": "Tracks/Cups/Cup2/track_04.png",
+      "geometry": "Tracks/Cups/Cup2/track_04.json"
+    },
+    {
+      "cup": 3,
+      "track": 1,
+      "name": "Dusty Drive",
+      "image": "Tracks/Cups/Cup3/track_01.png",
+      "geometry": "Tracks/Cups/Cup3/track_01.json"
+    },
+    {
+      "cup": 3,
+      "track": 2,
+      "name": "Cactus Corner",
+      "image": "Tracks/Cups/Cup3/track_02.png",
+      "geometry": "Tracks/Cups/Cup3/track_02.json"
+    },
+    {
+      "cup": 3,
+      "track": 3,
+      "name": "Golden Gorge",
+      "image": "Tracks/Cups/Cup3/track_03.png",
+      "geometry": "Tracks/Cups/Cup3/track_03.json"
+    },
+    {
+      "cup": 3,
+      "track": 4,
+      "name": "Comet Canyon",
+      "image": "Tracks/Cups/Cup3/track_04.png",
+      "geometry": "Tracks/Cups/Cup3/track_04.json"
+    },
+    {
+      "cup": 4,
+      "track": 1,
+      "name": "Moonlight Mile",
+      "image": "Tracks/Cups/Cup4/track_01.png",
+      "geometry": "Tracks/Cups/Cup4/track_01.json"
+    },
+    {
+      "cup": 4,
+      "track": 2,
+      "name": "Glow Garden",
+      "image": "Tracks/Cups/Cup4/track_02.png",
+      "geometry": "Tracks/Cups/Cup4/track_02.json"
+    },
+    {
+      "cup": 4,
+      "track": 3,
+      "name": "Starlight Spiral",
+      "image": "Tracks/Cups/Cup4/track_03.png",
+      "geometry": "Tracks/Cups/Cup4/track_03.json"
+    },
+    {
+      "cup": 4,
+      "track": 4,
+      "name": "Rainbow Rocket",
+      "image": "Tracks/Cups/Cup4/track_04.png",
+      "geometry": "Tracks/Cups/Cup4/track_04.json"
+    }
+  ],
+  "karts": [
+    {
+      "name": "Cherry",
+      "image": "Karts/kart_01.png"
+    },
+    {
+      "name": "Ocean",
+      "image": "Karts/kart_02.png"
+    },
+    {
+      "name": "Mint",
+      "image": "Karts/kart_03.png"
+    },
+    {
+      "name": "Sunny",
+      "image": "Karts/kart_04.png"
+    },
+    {
+      "name": "Grape",
+      "image": "Karts/kart_05.png"
+    },
+    {
+      "name": "Orange",
+      "image": "Karts/kart_06.png"
+    },
+    {
+      "name": "Teal",
+      "image": "Karts/kart_07.png"
+    },
+    {
+      "name": "Bubblegum",
+      "image": "Karts/kart_08.png"
+    }
+  ]
+}

@@ -28,6 +28,7 @@ import wasteBird
 import wasteHog
 import hungryHedgie
 from GUI import Button
+import wasteKart
 
 pygame.init()
 WIDTH, HEIGHT = 800, 600
@@ -60,7 +61,8 @@ GAMES = [
     ("WasteGOL", wasteGOL.main),
     ("WasteBird", wasteBird.main),
     ("WasteHog",wasteHog.main),
-    ("HungryHog",hungryHedgie.main)
+    ("HungryHog",hungryHedgie.main),
+    ("WasteKart", wasteKart.main),
 ]
 
 # Global to hold selected game
@@ -179,6 +181,11 @@ def but23():
     selected_game_func = GAMES[22][1]
 
 # Menu loop
+def but24():
+    global selected_game_func
+    selected_game_func = wasteKart.main
+
+
 async def game_menu():
     global selected_game_func
     buttons = [
@@ -206,6 +213,7 @@ async def game_menu():
         Button(250 - 50, 1000, 100, 100, "assets/wasteHog/gift.png", "assets/wasteHog/gift.png", but22),
         Button(400 - 50, 1000, 100, 100, "assets/hungryHedgie/hedgie.png", "assets/hungryHedgie/hedgie.png", but23),
 
+        Button(500, 1000, 100, 100, "assets/WasteKart/kart_icon.png", "assets/WasteKart/kart_icon.png", but24),
     ]
     bg_im = pygame.image.load("assets/main_menu_background.png").convert_alpha()
     dragging = False
