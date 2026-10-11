@@ -49,6 +49,19 @@ C_RED = (238, 83, 94)
 C_GREEN = (79, 180, 133)
 C_TEXT = (248, 250, 255)
 
+# Eight child-friendly paddle colors. Indices (not RGB values) are used for
+# ownership, so identical colors can never be chosen by both players.
+PADDLE_PALETTE = (
+    ('RED', (240, 80, 92)),
+    ('ORANGE', (255, 151, 62)),
+    ('YELLOW', (255, 216, 64)),
+    ('GREEN', (73, 201, 119)),
+    ('TURQUOISE', (67, 213, 206)),
+    ('BLUE', (72, 154, 245)),
+    ('PURPLE', (167, 119, 237)),
+    ('PINK', (245, 119, 188)),
+)
+
 
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
@@ -101,6 +114,8 @@ class Hockey:
         self.scene = 'menu'
         self.mode = 2
         self.duration = 60
+        # Defaults match the original yellow / blue sides.
+        self.paddle_colors = [2, 5]
         self.time_remaining = 60.0
         self.score = [0, 0]
         self.paddles = []
@@ -129,6 +144,27 @@ class Hockey:
             ('puck', (44, 44)),
         ]:
             self.art[name] = image_or_none('assets/wastehockey/' + name + '.png', size)
+        # Prepare monochrome source images once. pygame.transform.grayscale()
+        # and BLEND_RGB_MULT preserve the artwork's light/shadow detail and
+        # alpha channel, while allowing every color on either paddle design.
+        self.paddle_bases = []
+        for player, name in enumerate(('pusher1', 'pusher2')):
+            original = self.art[name]
+            if original is None:
+                self.paddle_bases.append(None)
+                continue
+            if hasattr(pygame.transform, 'grayscale'):
+                base = pygame.transform.grayscale(original)
+            else:
+                base = original.copy()  # compatibility with older pygame builds
+            # The original blue paddle is markedly darker than the yellow one;
+            # lift grayscale luminance before tinting so all palette colors read.
+            lift = 24 if player == 0 else 85
+            base.fill((lift, lift, lift), special_flags=pygame.BLEND_RGB_ADD)
+            self.paddle_bases.append(base)
+        # Generate only on first request; reused in menu and during gameplay.
+        self.tinted_paddles = {}
+        self.paddle_previews = {}
         self.home_icon = image_or_none('assets/retBut.png', (54, 54))
         self.rink_background = self.create_background()
         self.new_positions()
@@ -146,6 +182,36 @@ class Hockey:
         pygame.draw.rect(surface, C_DARK, (0, 0, WIDTH, 94))
         pygame.draw.rect(surface, C_DARK, (0, FIELD_RECT.bottom, WIDTH, HEIGHT - FIELD_RECT.bottom))
         return surface
+
+    def paddle_color(self, player):
+        return PADDLE_PALETTE[self.paddle_colors[player]][1]
+
+    def tinted_paddle(self, player, preview=False):
+        key = (player, self.paddle_colors[player])
+        if key not in self.tinted_paddles:
+            base = self.paddle_bases[player]
+            if base is None:
+                self.tinted_paddles[key] = None
+            else:
+                recolored = base.copy()
+                # This changes RGB only, leaving the transparent pixels intact.
+                recolored.fill(self.paddle_color(player), special_flags=pygame.BLEND_RGB_MULT)
+                self.tinted_paddles[key] = recolored
+        sprite = self.tinted_paddles[key]
+        if not preview or sprite is None:
+            return sprite
+        if key not in self.paddle_previews:
+            self.paddle_previews[key] = pygame.transform.smoothscale(sprite, (43, 43))
+        return self.paddle_previews[key]
+
+    def select_paddle_color(self, player, color_index):
+        """The two paddles always have different colors, including versus CPU."""
+        if player not in (0, 1) or not 0 <= color_index < len(PADDLE_PALETTE):
+            return False
+        if color_index == self.paddle_colors[1-player]:
+            return False
+        self.paddle_colors[player] = color_index
+        return True
 
     def new_positions(self):
         self.paddles = [
@@ -214,7 +280,10 @@ class Hockey:
     def activate_button(self, pos):
         for name, rect in self.buttons.items():
             if rect.collidepoint(pos):
-                if name == 'one':
+                if name.startswith('paddle_color_'):
+                    _, _, player, color_index = name.split('_')
+                    self.select_paddle_color(int(player), int(color_index))
+                elif name == 'one':
                     self.mode = 1
                 elif name == 'two':
                     self.mode = 2
@@ -489,7 +558,8 @@ class Hockey:
         self.puck['vel'] = [vx, vy]
 
     def make_confetti(self, number):
-        colors = (C_YELLOW, C_BLUE, C_RED, C_GREEN, (192, 136, 242), (255, 255, 255))
+        colors = (self.paddle_color(0), self.paddle_color(1),
+                  C_YELLOW, C_GREEN, (192, 136, 242), (255, 255, 255))
         self.particles = []
         for i in range(number):
             center_x = WIDTH * .5 + random.uniform(-90,90)
@@ -586,36 +656,73 @@ class Hockey:
         else:
             self.centered('HOME', self.text_small, C_TEXT, HOME_RECT.center)
 
+    def draw_color_row(self, player, top):
+        """Eight large touch targets; the other player's color is disabled."""
+        title = ('YOU' if self.mode == 1 else 'PLAYER 1') if player == 0 else \
+                ('COMPUTER' if self.mode == 1 else 'PLAYER 2')
+        self.centered(title + ' - PADDLE COLOUR', self.text_small, C_TEXT, (384, top-16))
+        preview = self.tinted_paddle(player, preview=True)
+        if preview is not None:
+            self.screen.blit(preview, preview.get_rect(center=(665, top+24)))
+        else:
+            pygame.draw.circle(self.screen, self.paddle_color(player), (665, top+24), 16)
+        first_x, gap, size = 166, 60, 48
+        for color_index, (_, rgb) in enumerate(PADDLE_PALETTE):
+            rect = pygame.Rect(first_x + gap * color_index, top, size, size)
+            self.buttons[f'paddle_color_{player}_{color_index}'] = rect
+            chosen = self.paddle_colors[player] == color_index
+            unavailable = self.paddle_colors[1-player] == color_index
+            pygame.draw.circle(self.screen, (243, 249, 254) if chosen else (75, 108, 138),
+                               rect.center, 26 if chosen else 24)
+            pygame.draw.circle(self.screen, rgb, rect.center, 20)
+            if chosen:
+                # Checkmark communicates selection independently of hue.
+                cx, cy = rect.center
+                pygame.draw.lines(self.screen, C_DARK, False,
+                                  [(cx-10, cy), (cx-3, cy+8), (cx+12, cy-9)], 5)
+                pygame.draw.lines(self.screen, C_TEXT, False,
+                                  [(cx-10, cy-2), (cx-3, cy+6), (cx+12, cy-11)], 3)
+            elif unavailable:
+                # A muted swatch with a slash is visibly unavailable and its
+                # press is ignored by select_paddle_color().
+                veil = pygame.Surface((48, 48), pygame.SRCALPHA)
+                pygame.draw.circle(veil, (13, 29, 46, 135), (24, 24), 22)
+                self.screen.blit(veil, rect.topleft)
+                pygame.draw.line(self.screen, C_TEXT, (rect.x+13, rect.y+35),
+                                 (rect.x+35, rect.y+13), 4)
+
     def draw_menu(self):
-        # Slightly darken rink; children can still see what game they are choosing.
+        # Full setup fits the 800x600 logical canvas with 44+ px touch targets.
         shade = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         shade.fill((9, 31, 50, 175))
         self.screen.blit(shade, (0, 0))
-        self.box(pygame.Rect(133, 82, 534, 457), C_PANEL, 25)
-        self.centered('WASTE HOCKEY', self.text_big, C_YELLOW, (400, 126))
-        self.centered('HOW MANY PLAYERS?', self.text_mid, C_TEXT, (400, 193))
-        self.button('one', pygame.Rect(186, 219, 200, 56), '1 PLAYER', self.mode == 1,
+        self.box(pygame.Rect(88, 72, 624, 512), C_PANEL, 23)
+        self.centered('WASTE HOCKEY', self.text_big, C_YELLOW, (400, 112))
+        self.centered('HOW MANY PLAYERS?', self.text_mid, C_TEXT, (400, 161))
+        self.button('one', pygame.Rect(184, 182, 202, 51), '1 PLAYER', self.mode == 1,
                     C_GREEN if self.mode == 1 else None)
-        self.button('two', pygame.Rect(413, 219, 200, 56), '2 PLAYERS', self.mode == 2,
+        self.button('two', pygame.Rect(414, 182, 202, 51), '2 PLAYERS', self.mode == 2,
                     C_GREEN if self.mode == 2 else None)
-        self.centered('HOW LONG?', self.text_mid, C_TEXT, (400, 324))
-        self.button('one_min', pygame.Rect(165, 351, 146, 52), '1 MIN', self.duration == 60,
+        self.centered('HOW LONG?', self.text_mid, C_TEXT, (400, 256))
+        self.button('one_min', pygame.Rect(166, 278, 145, 45), '1 MIN', self.duration == 60,
                     C_GREEN if self.duration == 60 else None)
-        self.button('two_min', pygame.Rect(326, 351, 146, 52), '2 MIN', self.duration == 120,
+        self.button('two_min', pygame.Rect(326, 278, 145, 45), '2 MIN', self.duration == 120,
                     C_GREEN if self.duration == 120 else None)
-        self.button('endless', pygame.Rect(487, 351, 146, 52), 'ENDLESS', self.duration is None,
+        self.button('endless', pygame.Rect(487, 278, 145, 45), 'ENDLESS', self.duration is None,
                     C_GREEN if self.duration is None else None)
-        self.button('start', pygame.Rect(280, 439, 240, 65), 'PLAY!', color=(225, 117, 63))
+        self.draw_color_row(0, 352)
+        self.draw_color_row(1, 435)
+        self.button('start', pygame.Rect(285, 509, 230, 54), 'PLAY!', color=(225, 117, 63))
         self.draw_home()
 
     def draw_paddles_and_puck(self):
         for player, paddle in enumerate(self.paddles):
             pt = (round(paddle['pos'][0]),round(paddle['pos'][1]))
-            img = self.art['pusher1' if player == 0 else 'pusher2']
+            img = self.tinted_paddle(player)
             if img is not None:
                 self.screen.blit(img, img.get_rect(center=pt))
             else:
-                pygame.draw.circle(self.screen, C_YELLOW if player == 0 else C_BLUE, pt, int(PADDLE_RADIUS))
+                pygame.draw.circle(self.screen, self.paddle_color(player), pt, int(PADDLE_RADIUS))
                 pygame.draw.circle(self.screen, C_TEXT, pt, int(PADDLE_RADIUS), 3)
         pt = (round(self.puck['pos'][0]),round(self.puck['pos'][1]))
         img = self.art['puck']
@@ -628,15 +735,15 @@ class Hockey:
         # No debug goal markers: goals are already part of the background picture.
         self.draw_paddles_and_puck()
         self.draw_home()
-        pygame.draw.circle(self.screen, C_YELLOW, (135, 48), 12)
-        pygame.draw.circle(self.screen, C_BLUE, (492, 48), 12)
+        pygame.draw.circle(self.screen, self.paddle_color(0), (135, 48), 12)
+        pygame.draw.circle(self.screen, self.paddle_color(1), (492, 48), 12)
         self.centered('YOU' if self.mode == 1 else 'P1', self.text_small, C_TEXT, (197, 48))
         self.centered('CPU' if self.mode == 1 else 'P2', self.text_small, C_TEXT, (545, 48))
-        self.centered(str(self.score[0]), self.text_big, C_YELLOW, (311, 48))
+        self.centered(str(self.score[0]), self.text_big, self.paddle_color(0), (311, 48))
         self.centered(':', self.text_big, C_TEXT, (392, 48))
-        self.centered(str(self.score[1]), self.text_big, C_BLUE, (454, 48))
+        self.centered(str(self.score[1]), self.text_big, self.paddle_color(1), (454, 48))
         self.centered(self.time_label(), self.text_med, C_TEXT, (700, 48))
-        hint = 'Use your finger to move the yellow paddle' if self.mode == 1 else 'Each player uses one finger on their own half'
+        hint = 'Use your finger to move your paddle' if self.mode == 1 else 'Each player uses one finger on their own half'
         self.centered(hint, self.text_small, C_TEXT, (WIDTH/2, 553))
 
     def draw_confetti(self):
@@ -650,7 +757,7 @@ class Hockey:
         self.screen.blit(shade, (0, 0))
         self.draw_confetti()
         self.box(pygame.Rect(230, 225, 340, 155), (20, 71, 113), 26)
-        self.centered('GOAL!', self.text_big, C_YELLOW, (400, 279))
+        self.centered('GOAL!', self.text_big, self.paddle_color(self.goal_player), (400, 279))
         player = 'YOU' if self.mode == 1 and self.goal_player == 0 else \
                  'COMPUTER' if self.mode == 1 else f'PLAYER {self.goal_player + 1}'
         self.centered(player + ' SCORES!', self.text_mid, C_TEXT, (400, 340))
