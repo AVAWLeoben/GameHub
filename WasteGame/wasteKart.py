@@ -962,7 +962,8 @@ class WasteKartGame:
         key=('race',kart_id,quant)
         if key not in self.kart_rotation_cache:
             img=self.kart_images[kart_id]
-            scaled=pygame.transform.smoothscale(img,(47,34))
+            # Slightly larger display size suits the new kart art better.
+            scaled=pygame.transform.smoothscale(img,(56,42))
             self.kart_rotation_cache[key]=pygame.transform.rotate(scaled,-quant)
         return self.kart_rotation_cache[key]
 
@@ -1069,6 +1070,21 @@ class WasteKartGame:
             pygame.draw.circle(self.canvas,(53,67,96),(x,y),r)
             pygame.draw.circle(self.canvas,(124,142,163),(x,y),r,2)
             self.text('?',(x,y-1),30,(214,224,231))
+
+    def draw_tap_icon(self, center, size=22, color=WHITE):
+        """Simple child-friendly tap symbol for reflex buttons."""
+        x,y=center
+        pygame.draw.circle(self.canvas,color,(round(x),round(y-size*0.62)),max(3,int(size*0.16)))
+        pygame.draw.rect(self.canvas,color,(round(x-size*0.10),round(y-size*0.52),
+                                             max(4,int(size*0.20)),max(16,int(size*0.58))),border_radius=4)
+        pygame.draw.rect(self.canvas,color,(round(x-size*0.34),round(y-size*0.05),
+                                             max(7,int(size*0.68)),max(6,int(size*0.20))),border_radius=4)
+        pygame.draw.arc(self.canvas,color,(round(x-size*0.78),round(y-size*0.86),
+                                           max(12,int(size*0.72)),max(12,int(size*0.72))),
+                        -0.55,0.55,2)
+        pygame.draw.arc(self.canvas,color,(round(x-size*1.00),round(y-size*1.08),
+                                           max(12,int(size*1.12)),max(12,int(size*1.12))),
+                        -0.55,0.55,2)
 
     def draw_item_buttons(self):
         """One big pictorial item button per child, always in their kart color."""
