@@ -1,0 +1,201 @@
+WasteKart — Track Design Guide
+
+Version 1.0 | Cup 1: Meadow Cup
+
+1. Design philosophy
+
+Every track must be memorable because of its layout, not merely its decoration.
+
+WasteKart is a racing-line drawing game for young children. Players should be able to recognize the intended circuit immediately, trace it comfortably with a finger, and discover different strategies through repeated races.
+
+Our two reference tracks:
+
+Daisy Dash 1.9.1: A winding farm circuit with clear straights, contrasting corners and interesting opportunities to cut across grass.
+
+Clover Crossing 1.9.4: A readable figure-eight with one seamless overpass and underpass, demonstrating that crossings work when their driving directions and heights are visually unambiguous.
+
+These are the standards for all future tracks.
+
+2. Layout requirements
+
+Each track should include:
+
+A distinctive silhouette. It must be recognizable even without any decorations.
+
+One meaningful long straight, ideally incorporating the starting grid and finish line.
+
+A mix of left and right corners: at least one broad sweep, one tighter hairpin and one S-bend or chicane.
+
+A deliberate drawing challenge: a choice between an easy, safe line and a shorter, more difficult one.
+
+One continuous, readable lap: no forks, accidental overlaps or confusing junctions.
+
+Enough space between road sections to keep the course readable and preserve room for finger drawing.
+
+A longer course is preferable to an oval, but length alone does not make a track interesting.
+
+3. Overpasses and underpasses
+
+Bridge crossings are allowed but not mandatory.
+
+Use them only when they improve the circuit's layout or identity.
+
+Rules:
+
+Every crossing must have an unmistakable upper road and lower road.
+
+The bridge should look like a continuation of the normal asphalt, not a separate object.
+
+Use thin guardrails, visible supports and subtle shadows.
+
+The lower road must remain readable beneath the bridge.
+
+Karts and their effects must render at the correct elevation.
+
+Collisions and slipstreaming must not occur between karts on different levels.
+
+Clover Crossing 1.9.4 is the visual reference for future bridges. In particular, preserve the successful appearance through the bridge boards.
+
+4. Artwork — Meadow Cup
+
+Use an original, SNES-inspired, tile-based aesthetic.
+
+Element
+
+Meadow Cup standard
+
+Canvas
+
+960 × 600 pixels, matching the current game
+
+Style
+
+Flat pixel art; approximately 8–16 px repeating details
+
+Palette
+
+Approximately 12–16 principal colors
+
+Road
+
+Neutral grey asphalt, strong contrast against grass
+
+Edges
+
+Short alternating red-and-white curbs
+
+Ground
+
+Two or three shades of green
+
+Props
+
+Orchard trees, fences, hay bales, flowers, farm structures
+
+Bridges
+
+Matching asphalt, slim guardrails, simple supports
+
+Decorations must remain away from the road edge. The player must always be able to distinguish asphalt from off-road terrain.
+
+Different Meadow tracks should use different combinations of props instead of identical background patterns.
+
+5. Racing-line gameplay
+
+The track must reward thoughtful drawing without requiring precision that is unrealistic for a four-year-old.
+
+Road speed factor: 1.0
+
+Grass/off-road factor: 0.55
+
+Keep the road nearly constant in width, approximately 38–45 pixels on either side of its centerline for Meadow Cup.
+
+Provide open space around difficult corners for imperfect drawings.
+
+Offer one or two tempting grass shortcuts, but avoid cuts that make most of the circuit unnecessary.
+
+Place power-up boxes toward the outside of the ideal racing line, creating a small detour decision.
+
+Use four ordered checkpoints in the track metadata to describe intended lap progression. Checkpoint enforcement is a future engine task; storing their positions alone does not prevent cheating.
+
+6. Meadow Cup — track identities
+
+Track
+
+Primary identity
+
+Drawing challenge
+
+1. Daisy Dash
+
+Winding farm circuit
+
+Balance broad sweeps, tight turns and shortcuts
+
+2. Clover Crossing
+
+Figure-eight with a seamless bridge
+
+Navigate alternating corner directions and a single crossover
+
+3. Apple Orchard
+
+Orchard circuit with a prominent U-shaped hairpin and a diagonal S-section
+
+Decide how tightly to cut the hairpin while maintaining a smooth exit
+
+4. Bumblebee Bend
+
+Technical zigzag circuit with two contrasting switchbacks
+
+Find a fluid racing line through repeated left-right direction changes
+
+Apple Orchard proposal: Give it a noticeably asymmetric, elongated silhouette rather than another oval. Use orderly apple-tree rows, small fences and a visually important orchard hairpin. No bridge is necessary.
+
+Bumblebee Bend proposal: Make it the most technical Meadow course, with a long opening straight followed by a pronounced zigzag and two different hairpin shapes. Use flower fields, hay bales and perhaps small bee-themed roadside signs. Avoid crossings unless a specific layout requires one.
+
+These are design briefs, not approved final geometries. Each track should be previewed and tested individually before acceptance.
+
+7. Technical acceptance checklist
+
+Before a new track is accepted:
+
+Silhouette is clearly different from existing tracks
+
+Road is continuous and the racing direction is obvious
+
+Long straight, tight turn and S-section are identifiable
+
+Road image, road mask and centerline JSON match
+
+Four starting-grid positions and a checkered finish line are visible
+
+Power-up positions are reachable
+
+Any overpass renders and behaves correctly above the underpass
+
+One-lap, three-lap and four-player races work
+
+Drawing the track on an iPad feels comfortable
+
+No obvious shortcut makes most of the course irrelevant
+
+Approval process: Design one track → inspect full-size preview → install and test on iPad → refine → approve → proceed to the next.
+
+8. Extending the guide to Cup 2
+
+For Coast Cup and later cups, retain Sections 1–3, 5 and 7 as universal rules.
+
+Change:
+
+Biome and visual palette: beaches, water, islands, docks and coastal vegetation for Cup 2.
+
+Prop vocabulary: replace farm scenery with biome-specific objects.
+
+Circuit difficulty: introduce slightly more demanding corner combinations and narrower roads where appropriate.
+
+Signature features: bridges, coastal chicanes and dockside hairpins where they improve the layout.
+
+Water, cliffs and other hazards should initially remain visual off-road surfaces, unless separate gameplay behavior is explicitly implemented.
+
+Core principle: Every new cup changes the environment and difficulty, but every new track must first succeed as a clear, distinctive drawing challenge.
