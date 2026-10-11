@@ -1,4 +1,4 @@
-"""WasteKart 1.4 - optional collectible power-ups and animated question boxes.
+"""WasteKart 1.4.1 - optional subtle racing lines and pictorial power-up HUD.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
@@ -42,6 +42,10 @@ POWERUP_PICKUP_RADIUS = 23.0  # World pixels: must draw near a box, not just fol
 POWERUP_DURATION = {'turbo': 3.2, 'tailwind': 6.0}
 POWERUP_MULTIPLIER = {'turbo': 1.48, 'tailwind': 1.20}
 POWERUP_COLORS = {'turbo': (255, 169, 59), 'tailwind': (91, 239, 240)}
+# A deliberately subtle overlay: RGB colors keep each player's identity,
+# while SRCALPHA layers make the one-pixel dashes blend into the road.
+RACE_LINE_OPACITY = 67
+GHOST_LINE_OPACITY = 42
 
 
 def clamp(value, lo, hi):
@@ -272,23 +276,24 @@ def paint_trail_section(surface, points, color, width, dashed=False, phase=0.0):
 
 
 class AheadTrail:
-    """Display ONLY the route still ahead of one kart.
+    """Cache the faint, dashed route still ahead of a moving kart.
 
-    Completed 240-world-pixel spans use immutable, tightly cropped alpha
-    surfaces. The single span containing the kart is drawn partially each
-    frame; earlier spans are simply skipped. This avoids CPU-heavy full-route
-    drawing while preserving overlapping future laps and intersections.
+    Short spans are baked once to small transparent images. Only the span
+    containing the kart is repainted onto a reusable *transparent* scratch
+    image. Painting its alpha lines directly on the opaque screen would ignore
+    their transparency, making the leading section conspicuously bright.
+    Overlapping future laps remain independent from already driven laps.
     """
     def __init__(self,route,color,to_screen,ghost=False):
         self.route=route
-        self.color=color
         self.ghost=ghost
-        self.width=2 if ghost else 3
+        self.width=1
+        self.ink=tuple(color)+(GHOST_LINE_OPACITY if ghost else RACE_LINE_OPACITY,)
         self.to_screen=to_screen
         self.spans=[]
+        self.partial_surface=None
         if len(route.points)<2 or route.length<1e-5:
             return
-        # Distance boundaries are constant and stable during the whole race.
         count=math.ceil(route.length/TRAIL_CHUNK_WORLD)
         for i in range(count):
             start=i*TRAIL_CHUNK_WORLD
@@ -296,7 +301,7 @@ class AheadTrail:
             world_points=subroute_points(route,start,end)
             screen_points=[to_screen(point) for point in world_points]
             if len(screen_points)<2:continue
-            padding=5
+            padding=3
             xmin=math.floor(min(point[0] for point in screen_points))-padding
             ymin=math.floor(min(point[1] for point in screen_points))-padding
             xmax=math.ceil(max(point[0] for point in screen_points))+padding
@@ -304,15 +309,13 @@ class AheadTrail:
             image=pygame.Surface((max(1,xmax-xmin+1),max(1,ymax-ymin+1)),pygame.SRCALPHA)
             shifted=[(x-xmin,y-ymin) for x,y in screen_points]
             phase=start*TRACK_RECT.width/MAP_W
-            paint_trail_section(image,shifted,color,self.width,ghost,phase)
+            paint_trail_section(image,shifted,self.ink,self.width,True,phase)
             self.spans.append((start,end,image,(xmin,ymin)))
 
     def draw(self,surface,travelled):
         if not self.spans:return
         pos=clamp(travelled,0.0,self.route.length)
         if pos>=self.route.length-1e-4:return
-        # Only the current chunk needs per-frame geometry; every future chunk
-        # is a cached cropped-surface blit. No drawn portion remains behind.
         first=min(len(self.spans)-1,int(pos/TRAIL_CHUNK_WORLD))
         for i in range(first,len(self.spans)):
             start,end,image,screen_xy=self.spans[i]
@@ -320,11 +323,19 @@ class AheadTrail:
             if pos<=start+1e-5:
                 surface.blit(image,screen_xy)
             else:
+                # Reuse an alpha scratch image rather than allocating a new
+                # full-screen layer or drawing opaque lines every frame.
+                if (self.partial_surface is None or
+                        self.partial_surface.get_size()!=image.get_size()):
+                    self.partial_surface=pygame.Surface(image.get_size(),pygame.SRCALPHA)
+                self.partial_surface.fill((0,0,0,0))
                 points=subroute_points(self.route,pos,end)
                 screen_points=[self.to_screen(point) for point in points]
+                local=[(x-screen_xy[0],y-screen_xy[1]) for x,y in screen_points]
                 phase=pos*TRACK_RECT.width/MAP_W
-                paint_trail_section(surface,screen_points,self.color,self.width,
-                                    self.ghost,phase)
+                paint_trail_section(self.partial_surface,local,self.ink,self.width,
+                                    True,phase)
+                surface.blit(self.partial_surface,screen_xy)
 
 class PowerupBox:
     """Shared road pickup: collecting it hides it even when the kart is full."""
@@ -543,6 +554,7 @@ class WasteKartGame:
         self.laps=1
         self.reflex_start=True
         self.powerups_enabled=False  # Independent of the reflex start toggle.
+        self.show_racing_lines=False  # Default uncluttered, especially for 4 players.
         self.reaction_status=[]
         self.reaction_times=[]
         self.cup_stage=0
@@ -707,10 +719,20 @@ class WasteKartGame:
         self.button((412,426,156,40),'OFF',('reflex',False),selected=not self.reflex_start,size=27)
         self.button((582,426,165,40),'ON!',('reflex',True),selected=self.reflex_start,size=27)
 
-        self.panel((40,480,720,54))
-        self.text('POWER-UPS?',(165,506),26,YELLOW)
-        self.button((306,485,203,43),'OFF',('powerups',False),selected=not self.powerups_enabled,size=27)
-        self.button((526,485,211,43),'ON!',('powerups',True),selected=self.powerups_enabled,size=27)
+        # Independent switches fit above the original NEXT button, without
+        # crowding or shrinking any touch target on the 800x600 canvas.
+        self.panel((40,480,347,54))
+        self.text('POWER-UPS',(127,506),23,YELLOW)
+        self.button((216,486,76,41),'OFF',('powerups',False),
+                    selected=not self.powerups_enabled,size=23)
+        self.button((300,486,76,41),'ON',('powerups',True),
+                    selected=self.powerups_enabled,size=23)
+        self.panel((399,480,361,54))
+        self.text('RACE LINES',(466,506),22,YELLOW)
+        self.button((537,486,91,41),'HIDE',('lines',False),
+                    selected=not self.show_racing_lines,size=23)
+        self.button((646,486,101,41),'SHOW',('lines',True),
+                    selected=self.show_racing_lines,size=23)
         self.button((255,543,290,46),'CHOOSE CUP  >',('state','tracks'),selected=True,size=26)
         self.home()
 
@@ -989,25 +1011,73 @@ class WasteKartGame:
                     pygame.draw.line(self.canvas,(74,235,234),a,b,3 if k==0 else 2)
             pygame.draw.circle(self.canvas,(161,255,243),center,27,2)
 
+    def draw_powerup_icon(self,kind,center,size=34):
+        """Recognizable, text-free icons for children who cannot read yet.
+
+        Fire = TURBO; turquoise wind trails = TAILWIND; ? = empty slot.
+        Icons are drawn directly with Pygame and don't require extra PNGs.
+        """
+        x,y=round(center[0]),round(center[1])
+        r=max(11,round(size*.49))
+        if kind=='turbo':
+            pygame.draw.circle(self.canvas,(92,43,30),(x,y),r)
+            pygame.draw.circle(self.canvas,(255,174,56),(x,y),r,2)
+            def coords(points):
+                scale=size/34.0
+                return [(round(x+px*scale),round(y+py*scale)) for px,py in points]
+            pygame.draw.polygon(self.canvas,(255,112,33),coords([
+                (-9,11),(-11,0),(-5,-4),(0,-13),(5,-6),(9,-8),(11,2),(7,12)]))
+            pygame.draw.polygon(self.canvas,(255,217,75),coords([
+                (-5,10),(-6,3),(-1,-4),(2,-1),(5,1),(5,10)]))
+            pygame.draw.polygon(self.canvas,(255,248,165),coords([
+                (-2,10),(-2,5),(1,2),(3,6),(2,10)]))
+        elif kind=='tailwind':
+            pygame.draw.circle(self.canvas,(22,74,88),(x,y),r)
+            pygame.draw.circle(self.canvas,(86,242,233),(x,y),r,2)
+            scale=size/34.0
+            def pt(dx,dy):return (round(x+dx*scale),round(y+dy*scale))
+            for points in (
+                    [(-12,-7),(-5,-7),(3,-7),(10,-11),(13,-8)],
+                    [(-13,0),(-4,0),(8,0),(11,-3)],
+                    [(-9,7),(-2,7),(5,7),(9,10),(13,8)]):
+                pygame.draw.lines(self.canvas,(158,255,247),False,
+                                  [pt(dx,dy) for dx,dy in points],3)
+            for dx,dy in ((-12,-7),(-13,0),(-9,7)):
+                pygame.draw.circle(self.canvas,(84,221,240),pt(dx,dy),2)
+        else:
+            pygame.draw.circle(self.canvas,(53,67,96),(x,y),r)
+            pygame.draw.circle(self.canvas,(124,142,163),(x,y),r,2)
+            self.text('?',(x,y-1),30,(214,224,231))
+
     def draw_item_buttons(self):
-        """One large tappable action per player, same slots as reflex start."""
+        """One big pictorial item button per child, always in their kart color."""
         gap=7
         width=int((780-gap*(self.players-1))/self.players)
         for index,racer in enumerate(self.racers):
             x=10+index*(width+gap)
             rect=pygame.Rect(x,547,width,47)
-            if racer.held_powerup is not None:
-                label=f'P{index+1}  {racer.held_powerup.upper()}!'
-                border=POWERUP_COLORS[racer.held_powerup]
-            elif racer.powerup_left>0:
-                label=f'P{index+1}  {racer.powerup_kind.upper()} {racer.powerup_left:.1f}s'
-                border=POWERUP_COLORS[racer.powerup_kind]
-            else:
-                label=f'P{index+1}  FIND [?]'
-                border=PALETTE[racer.kart_id]
-            pygame.draw.rect(self.canvas,(36,49,77),rect,border_radius=11)
+            held=racer.held_powerup
+            active=(racer.powerup_kind if racer.powerup_left>0 else None)
+            kind=held if held is not None else active
+            border=POWERUP_COLORS[kind] if kind else PALETTE[racer.kart_id]
+            pygame.draw.rect(self.canvas,(31,44,67),rect,border_radius=11)
             pygame.draw.rect(self.canvas,border,rect,3,border_radius=11)
-            self.text(label,(rect.centerx,rect.centery-3),22,WHITE)
+            self.text(f'P{index+1}',(rect.left+27,rect.centery-3),23,
+                      PALETTE[racer.kart_id])
+            icon_center=(rect.centerx+9,rect.centery-3)
+            self.draw_powerup_icon(kind,icon_center,34)
+            if held is not None:
+                # Small pulsing spark: a collected item is ready to tap.
+                beat=math.sin(self.elapsed*9+index)*3
+                pygame.draw.circle(self.canvas,(255,251,172),
+                    (round(icon_center[0]+18+beat),round(icon_center[1]-13)),3)
+            elif active is not None:
+                # Clockwise remaining-duration halo around the active icon.
+                fraction=clamp(racer.powerup_left/POWERUP_DURATION[active],0,1)
+                ring=pygame.Rect(icon_center[0]-20,icon_center[1]-20,40,40)
+                if fraction>.01:
+                    pygame.draw.arc(self.canvas,border,ring,
+                                    -math.pi/2,-math.pi/2+2*math.pi*fraction,3)
             progress=clamp(racer.distance/max(1,racer.total_length),0,1)
             pygame.draw.line(self.canvas,(70,83,112),(rect.left+11,rect.bottom-7),
                              (rect.right-11,rect.bottom-7),3)
@@ -1045,8 +1115,9 @@ class WasteKartGame:
         self.map_base()
         # Draw each kart's untraveled route separately. Previously driven
         # sections disappear immediately, including during lap 2 and lap 3.
-        for racer,trail in self.race_trails:
-            trail.draw(self.canvas,racer.distance)
+        if self.show_racing_lines:
+            for racer,trail in self.race_trails:
+                trail.draw(self.canvas,racer.distance)
         self.draw_powerup_boxes(race=self.state=='race')
         self.draw_start()
         self.display_racers()
@@ -1056,7 +1127,7 @@ class WasteKartGame:
             self.text('TAP YOUR COLOR ON GREEN!' if self.reflex_start else 'START YOUR ENGINES!',(425,60),24,WHITE)
         else:
             self.text(f'{self.elapsed:05.1f}s',(704,28),38,WHITE)
-            self.text(f'{self.laps} LAP'+('S' if self.laps>1 else '')+(' - GHOST' if self.active_ghost else ' - DRAWN ROADS'),(396,58),24,MUTED)
+            self.text(f'{self.laps} LAP'+('S' if self.laps>1 else '')+(' - GHOST' if self.active_ghost else ''),(396,58),24,MUTED)
         pygame.draw.rect(self.canvas,INK,(0,544,LOGICAL_W,56))
         item_buttons=(self.powerups_enabled and self.state=='race' and
                       not self.paused and (not self.reflex_start or self.elapsed>=REACTION_WINDOW))
@@ -1345,12 +1416,13 @@ class WasteKartGame:
         # drawn each frame, and traveled geometry is never displayed again.
         self.race_routes_layer=None
         self.race_trails=[]
-        if self.active_ghost is not None:
-            self.race_trails.append((self.active_ghost,AheadTrail(
-                self.active_ghost.route,(176,194,218),self.world_to_screen,ghost=True)))
-        for racer in self.racers:
-            self.race_trails.append((racer,AheadTrail(
-                racer.route,PALETTE[racer.kart_id],self.world_to_screen)))
+        if self.show_racing_lines:
+            if self.active_ghost is not None:
+                self.race_trails.append((self.active_ghost,AheadTrail(
+                    self.active_ghost.route,(176,194,218),self.world_to_screen,ghost=True)))
+            for racer in self.racers:
+                self.race_trails.append((racer,AheadTrail(
+                    racer.route,PALETTE[racer.kart_id],self.world_to_screen)))
 
     def begin_new_race(self):
         if self.race_mode=='cup':self.track_index=self.cup_stage
@@ -1444,6 +1516,7 @@ class WasteKartGame:
         elif name=='laps':self.laps=value
         elif name=='reflex':self.reflex_start=bool(value)
         elif name=='powerups':self.powerups_enabled=bool(value)
+        elif name=='lines':self.show_racing_lines=bool(value)
         elif name=='state':
             self.state=value
             if value=='karts':self.kart_player=0
