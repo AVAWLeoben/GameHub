@@ -1,4 +1,4 @@
-"""WasteKart 1.4.4 - kart-selection, animated item-box, and results polish.
+"""WasteKart 1.4.1 - optional subtle racing lines and pictorial power-up HUD.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
@@ -693,89 +693,14 @@ class WasteKartGame:
     def card_label(self,text,rect,color=WHITE):
         self.text(text,(rect.centerx,rect.bottom-18),27,color)
 
-    def draw_star(self, center, radius, color=YELLOW, outline=None, phase=0.0):
-        """Small five-point star with no font or new artwork dependency."""
-        x,y=center
-        vertices=[]
-        for i in range(10):
-            rad=radius if i%2==0 else radius*.44
-            angle=-math.pi/2+i*math.pi/5+phase
-            vertices.append((round(x+math.cos(angle)*rad),round(y+math.sin(angle)*rad)))
-        pygame.draw.polygon(self.canvas,color,vertices)
-        if outline is not None:
-            pygame.draw.polygon(self.canvas,outline,vertices,2)
-
-    def draw_sparkle(self,center,radius,color=YELLOW):
-        """Tiny four-point glint with a soft cross; safe to draw each frame."""
-        x,y=round(center[0]),round(center[1])
-        r=max(2,round(radius))
-        pygame.draw.line(self.canvas,color,(x-r,y),(x+r,y),max(1,r//3))
-        pygame.draw.line(self.canvas,color,(x,y-r),(x,y+r),max(1,r//3))
-        pygame.draw.circle(self.canvas,WHITE,(x,y),max(1,r//4))
-
-    def draw_medal(self,center,rank,scale=1.0):
-        """Gold/silver/bronze number badge for child-readable rankings."""
-        x,y=round(center[0]),round(center[1])
-        rad=max(11,round(17*scale))
-        fill=((255,203,73) if rank==1 else (194,217,228) if rank==2
-              else (222,156,106) if rank==3 else (120,155,188))
-        dark=(72,52,44) if rank<=3 else (27,40,61)
-        pygame.draw.circle(self.canvas,(20,31,50),(x,y+3),rad+2)
-        pygame.draw.circle(self.canvas,fill,(x,y),rad)
-        pygame.draw.circle(self.canvas,(255,248,222) if rank==1 else (225,235,245),
-                           (x,y),rad,2)
-        self.text(str(rank),(x,y),25,dark)
-        if rank==1:
-            self.draw_sparkle((x+rad+6,y-rad+2),5,(255,241,128))
-
-    def draw_trophy(self,center,scale=1.0):
-        """Tiny cartoon trophy icon, including two handles and a star."""
-        x,y=center
-        def pt(dx,dy):return (round(x+dx*scale),round(y+dy*scale))
-        # Handles stay visible even when the results title is long.
-        pygame.draw.arc(self.canvas,(251,200,75),
-            pygame.Rect(*pt(-22,-18),round(18*scale),round(26*scale)),
-            math.pi*.55,math.pi*1.60,max(2,round(4*scale)))
-        pygame.draw.arc(self.canvas,(251,200,75),
-            pygame.Rect(*pt(4,-18),round(18*scale),round(26*scale)),
-            -math.pi*.60,math.pi*.48,max(2,round(4*scale)))
-        pygame.draw.polygon(self.canvas,(244,171,52),
-            [pt(-15,-17),pt(15,-17),pt(11,4),pt(5,11),pt(-5,11),pt(-11,4)])
-        pygame.draw.polygon(self.canvas,(255,222,92),
-            [pt(-12,-14),pt(8,-14),pt(6,3),pt(0,8),pt(-8,1)])
-        pygame.draw.rect(self.canvas,(251,204,79),
-            pygame.Rect(*pt(-4,10),round(8*scale),round(10*scale)))
-        pygame.draw.rect(self.canvas,(240,159,66),
-            pygame.Rect(*pt(-13,19),round(26*scale),round(5*scale)),border_radius=2)
-        self.draw_star(pt(0,-5),6*scale,(255,251,198))
-
-    def kart_preview(self,kart_id,center,scale=1.0,selected=False):
-        """Cache smooth, correctly proportioned kart images; give large cards a plinth.
-
-        Small previews (results and standings) stay compact, without floor art.
-        """
+    def kart_preview(self,kart_id, center, scale=1.0):
         image=self.kart_images[kart_id]
-        base_size=(118,90) if scale>=.75 else (101,76)
-        sz=(max(8,round(base_size[0]*scale)),max(6,round(base_size[1]*scale)))
+        sz=(max(8,int(101*scale)),max(6,int(73*scale)))
         key=('preview',kart_id,sz)
         if key not in self.kart_rotation_cache:
             self.kart_rotation_cache[key]=pygame.transform.smoothscale(image,sz)
         sprite=self.kart_rotation_cache[key]
-        cx,cy=round(center[0]),round(center[1])
-        if scale>=.75:
-            pygame.draw.ellipse(self.canvas,(21,31,48),
-                (cx-57,cy+29,114,17))
-            pygame.draw.ellipse(self.canvas,(67,94,114),
-                (cx-48,cy+30,96,9),2)
-            if selected:
-                shimmer=3*math.sin(self.item_box_clock*4)
-                pygame.draw.ellipse(self.canvas,(255,225,139),
-                    (cx-62,cy+28+shimmer,124,19),2)
-        # Slight bounce on the actively selected kart only.
-        rise=round(2.0*math.sin(self.item_box_clock*4.1)) if selected else 0
-        self.canvas.blit(sprite,sprite.get_rect(center=(cx,cy-rise)))
-        if selected and scale>=.75:
-            self.draw_sparkle((cx+52,cy-26),5+(math.sin(self.item_box_clock*7)+1)*2)
+        self.canvas.blit(sprite,sprite.get_rect(center=center))
 
     def track_thumb(self,index,size):
         key=(index,tuple(size))
@@ -869,14 +794,10 @@ class WasteKartGame:
             taken=k in self.kart_ids[:current]
             selected=k==self.kart_ids[current]
             self.panel(r,(64,85,115) if selected else (42,52,75),YELLOW if selected else (89,113,151))
-            if selected:
-                self.draw_star((r.right-14,r.top+13),11,YELLOW,(113,72,30))
-            self.kart_preview(k,(r.centerx,r.top+46),1.02,selected=selected)
-            self.text(self.catalog['karts'][k]['name'],(r.centerx,r.bottom-17),21,(154,160,171) if taken else WHITE)
+            self.kart_preview(k,(r.centerx,r.top+49),.85)
+            self.text(self.catalog['karts'][k]['name'],(r.centerx,r.bottom-19),22,(154,160,171) if taken else WHITE)
             if taken:
-                # Clearly distinguish unavailable karts without hiding their art.
-                pygame.draw.rect(self.canvas,(20,27,42),r,2,border_radius=18)
-                pygame.draw.line(self.canvas,(224,109,113),r.topleft,r.bottomright,4)
+                pygame.draw.line(self.canvas,(224,109,113),r.topleft,r.bottomright,5)
             else:self.action_buttons.append((r,('kart',k)))
         action='START DRAWING  >' if current==self.players-1 else 'NEXT PLAYER  >'
         self.button((222,472,356,75),action,('kart_next',None),selected=True,size=32)
@@ -924,10 +845,10 @@ class WasteKartGame:
                 pygame.draw.circle(self.canvas,color,(round(p[0]),round(p[1])),5)
 
     def draw_powerup_boxes(self, race=False):
-        """Small rotating, bobbing cubes with orbital sparkles and respawn effects.
+        """Lightweight rotating / bobbing MK-style cubes, drawn procedurally.
 
-        The animation uses deterministic per-box phases, no per-frame image
-        transforms, and no particle surfaces: inexpensive on Pygbag/iPad.
+        No textures loaded, no per-frame rotation or scaling allocations.
+        The shared respawn clock is race elapsed time, NOT drawing time.
         """
         if not self.powerups_enabled or not self.pickups:return
         if self.question_mark is None:
@@ -937,27 +858,16 @@ class WasteKartGame:
             x,y=self.world_to_screen(box.pos)
             if race and not box.available(self.elapsed):
                 age=self.elapsed-box.picked_at
-                if 0<=age<.52:
-                    radius=round(8+age*49)
+                if 0<=age<.48:
+                    radius=round(8+age*48)
                     pygame.draw.circle(self.canvas,(255,226,130),(round(x),round(y)),radius,3)
                     pygame.draw.circle(self.canvas,(147,237,248),(round(x),round(y)),max(3,radius-6),2)
-                    for j in range(4):
-                        theta=j*math.pi/2+age*4
-                        self.draw_sparkle((x+math.cos(theta)*radius,y+math.sin(theta)*radius),
-                                          3+(1-age)*3,(255,242,166))
                 continue
             phase=t*3.0+box.slot*.91
-            bob=math.sin(phase)*4.0
+            bob=math.sin(phase)*3.2
             cx,cy=round(x),round(y+bob)
-            # Orbiting motes make the pickup visually lively even when the cube
-            # is almost edge-on in its fake 3D rotation.
-            for j in range(3):
-                theta=t*(1.45+j*.15)+box.slot*1.37+j*2*math.pi/3
-                orbit=25+2*math.sin(t*2+j+box.slot)
-                sx=cx+math.cos(theta)*orbit
-                sy=cy+math.sin(theta)*orbit*.62
-                mote_color=((255,234,147),(133,244,255),(227,177,255))[j]
-                self.draw_sparkle((sx,sy),3.2+1.6*abs(math.sin(phase+j)),mote_color)
+            # Fake 3D rotating cube: face narrows and grows while a side face
+            # flips from left to right. All colors contrast with the road.
             spin=math.sin(phase)
             wide=10+round(7*abs(math.cos(phase)))
             depth=7 if spin>=0 else -7
@@ -966,15 +876,15 @@ class WasteKartGame:
                   (pts[2][0]+depth,pts[2][1]-5),pts[2]] if spin>=0 else [
                   pts[0],(pts[0][0]+depth,pts[0][1]-5),
                   (pts[3][0]+depth,pts[3][1]-5),pts[3]]
-            pygame.draw.ellipse(self.canvas,(37,35,71),(cx-18,cy+14,36,8))
+            pygame.draw.ellipse(self.canvas,(37,35,71),(cx-17,cy+14,34,8))
             pygame.draw.polygon(self.canvas,(67,187,228),side)
             pygame.draw.polygon(self.canvas,(144,86,211),pts)
             pygame.draw.polygon(self.canvas,(218,176,255),pts,3)
             pygame.draw.line(self.canvas,(255,238,173),(cx-wide+4,cy-9),(cx+wide-3,cy-9),2)
-            self.canvas.blit(self.question_mark,self.question_mark.get_rect(center=(cx,cy+1)))
-            self.draw_sparkle((cx+wide+depth+3,cy-15),
-                              4+2*abs(math.sin(t*4+box.slot)),(255,251,177))
-
+            mark=self.question_mark
+            self.canvas.blit(mark,mark.get_rect(center=(cx,cy+1)))
+            glint=(cx+wide+depth+3,cy-15)
+            pygame.draw.circle(self.canvas,(255,251,177),glint,2+(int(t*5+box.slot)%2))
 
     def draw_start(self):
         if not self.track:return
@@ -1342,11 +1252,6 @@ class WasteKartGame:
         self.canvas.blit(shade,(0,0))
         for x,y,vx,vy,c,r in self.confetti:
             pygame.draw.circle(self.canvas,c,(round(x),round(y)),r)
-        # Animated celebratory glints occupy the margins, never the result rows.
-        shimmer=self.item_box_clock
-        for i,(x,y) in enumerate(((52,112),(748,112),(89,454),(712,454))):
-            radius=5+2.5*abs(math.sin(shimmer*3.5+i))
-            self.draw_sparkle((x,y),radius,(255,226,137))
         ordered=sorted(self.racers,key=lambda r:(r.finish_time if r.finish_time is not None else 1e9,r.index))
         if self.race_mode=='cup':
             final=self.cup_stage==3
@@ -1355,17 +1260,6 @@ class WasteKartGame:
                       if final else 'RACE FINISHED!',(400,43),56,YELLOW)
             subtitle=f'{self.catalog["cups"][self.cup]}  -  RACE {self.cup_stage+1} / 4'
             self.text(subtitle,(400,90),28,WHITE)
-            # Four small lit milestones show cup progress without needing text.
-            for stage in range(4):
-                x=369+stage*21
-                pygame.draw.circle(self.canvas,(28,42,69),(x,152),9)
-                pygame.draw.circle(self.canvas,YELLOW if stage<=self.cup_stage
-                                   else (96,115,145),(x,152),6)
-                if stage==self.cup_stage:
-                    self.draw_star((x,152),4,(255,249,205))
-            if final:
-                self.draw_trophy((86,108),.85)
-                self.draw_trophy((712,108),.85)
             if final and champions:
                 if len(champions)==1:
                     champion=champions[0]
@@ -1385,18 +1279,14 @@ class WasteKartGame:
             self.text('CUP POINTS',(594,187),29,YELLOW)
             for place,r in enumerate(ordered):
                 y=235+place*55
-                pygame.draw.rect(self.canvas,(59,77,102) if place%2==0 else (50,66,91),
-                                 pygame.Rect(43,y-22,326,44),border_radius=11)
-                self.draw_medal((65,y),place+1,.80)
+                self.text(f'{place+1}.', (65,y),30,WHITE)
                 self.kart_preview(r.kart_id,(126,y),.42)
                 self.text(f'P{r.index+1}',(173,y),28,PALETTE[r.kart_id],align='left')
                 self.text(f'{r.finish_time:.1f}s',(353,y),24,WHITE,align='right')
             for rank,who in enumerate(self.cup_standings()):
                 y=235+rank*55
                 place=self.cup_rank(who)
-                pygame.draw.rect(self.canvas,(59,77,102) if rank%2==0 else (50,66,91),
-                                 pygame.Rect(427,y-22,332,44),border_radius=11)
-                self.draw_medal((450,y),place,.80)
+                self.text(f'{place}.',(450,y),30,YELLOW if place==1 else WHITE)
                 self.kart_preview(self.kart_ids[who],(507,y),.42)
                 self.text(f'P{who+1}',(547,y),28,PALETTE[self.kart_ids[who]],align='left')
                 self.text(f'{self.cup_scores[who]} pts',(747,y),26,WHITE,align='right')
@@ -1407,8 +1297,6 @@ class WasteKartGame:
                 self.button((166,517,467,64),'NEXT TRACK  >',('next_track',None),selected=True,size=33)
                 self.button((13,12,103,47),'HOME',('home',None),size=22)
         else:
-            self.draw_trophy((102,83),1.00)
-            self.draw_trophy((697,83),1.00)
             self.text('FINISH!',(400,70),72,YELLOW)
             self.text(f'{self.track.name}  -  {self.laps} LAP'+('S' if self.laps>1 else ''),(400,119),30,WHITE)
             if len(ordered)==1:
@@ -1420,9 +1308,7 @@ class WasteKartGame:
             self.panel((120,190,560,268),(42,56,78),(251,220,126))
             for place,r in enumerate(ordered):
                 y=229+place*53
-                pygame.draw.rect(self.canvas,(64,79,104) if place%2==0 else (52,69,92),
-                                 pygame.Rect(146,y-21,512,43),border_radius=11)
-                self.draw_medal((176,y),place+1,.92)
+                self.text(f'{place+1}.',(176,y),32,YELLOW if place==0 else WHITE)
                 self.kart_preview(r.kart_id,(241,y),.49)
                 self.text(f'PLAYER {r.index+1}',(302,y),27,PALETTE[r.kart_id],align='left')
                 self.text(f'{r.finish_time:.2f}s',(645,y),27,WHITE,align='right')
