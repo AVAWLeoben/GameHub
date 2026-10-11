@@ -182,9 +182,8 @@ class WasteCarGame:
         self.w,self.h=screen.get_size()
         self.rng=random.Random()
         self.map=load_asset('road.png',alpha=False)
-        self.road_mask=load_asset('road_driveable - NPC.png',alpha=False)
-        if self.map is None or self.road_mask is None:
-            raise FileNotFoundError('WasteCar requires assets/road.png and road_driveable - NPC.png')
+        if self.map is None:
+            raise FileNotFoundError('WasteCar requires assets/road.png')
         self.world_w=self.map.get_width()*MAP_SCALE
         self.world_h=self.map.get_height()*MAP_SCALE
         data=map_json()
@@ -270,13 +269,6 @@ class WasteCarGame:
         active=[b for b in self.bins if b['full']]
         return min(active,key=lambda b:distance(b['pos'],(self.x,self.y))) if active else None
 
-    def is_road(self,x,y):
-        sx,sy=int(x/MAP_SCALE),int(y/MAP_SCALE)
-        if not (0<=sx<self.road_mask.get_width() and 0<=sy<self.road_mask.get_height()):
-            return False
-        r,g,b=self.road_mask.get_at((sx,sy))[:3]
-        return min(r,g,b)>=236 or (r>=240 and b>=215 and b-g>=18)
-
     def emit(self,x,y,count,colors,velocity=110.0,lifetime=0.65):
         for _ in range(count):
             a=self.rng.uniform(0,math.tau)
@@ -336,22 +328,17 @@ class WasteCarGame:
         if speed>TRUCK_MAX_SPEED:
             k=TRUCK_MAX_SPEED/speed
             self.vx*=k;self.vy*=k
-        # Swept movement to avoid clipping through scenery at high speed.
-        parts=max(1,math.ceil(speed*dt/12.0))
-        step=dt/parts
-        for _ in range(parts):
-            xx=clamp(self.x+self.vx*step,25,self.world_w-25)
-            yy=clamp(self.y+self.vy*step,25,self.world_h-25)
-            if self.is_road(xx,yy):
-                self.x,self.y=xx,yy
-            elif self.is_road(xx,self.y):
-                self.x=xx;self.vy*=.45
-            elif self.is_road(self.x,yy):
-                self.y=yy;self.vx*=.45
-            else:
-                self.vx*=-.13
-                self.vy*=-.13
-                break
+        # The rubbish truck may drive ANYWHERE on the map, including grass,
+        # yards and plazas. Only the outer map boundary limits movement.
+        next_x=self.x+self.vx*dt
+        next_y=self.y+self.vy*dt
+        self.x=clamp(next_x,25,self.world_w-25)
+        self.y=clamp(next_y,25,self.world_h-25)
+        # Don't build up hidden velocity while pressing against a map edge.
+        if self.x != next_x:
+            self.vx=0.0
+        if self.y != next_y:
+            self.vy=0.0
 
     def resolve_collisions(self):
         for car in self.cars:
@@ -370,7 +357,6 @@ class WasteCarGame:
             overlap=TRUCK_RADIUS+CAR_RADIUS-d
             self.x=clamp(self.x+nx*(overlap+2),25,self.world_w-25)
             self.y=clamp(self.y+ny*(overlap+2),25,self.world_h-25)
-            old_vx,old_vy=self.vx,self.vy
             inward=min(0.0,self.vx*nx+self.vy*ny)
             self.vx=(self.vx-1.35*inward*nx)*0.65
             self.vy=(self.vy-1.35*inward*ny)*0.65
@@ -380,11 +366,6 @@ class WasteCarGame:
             self.impact_text=0.6
             impact_x=(self.x+car.x)/2;impact_y=(self.y+car.y)/2
             self.emit(impact_x,impact_y,13,((255,229,95),(255,143,63),(238,245,242)),220,.46)
-            # Avoid becoming embedded in a wall after the separation impulse.
-            if not self.is_road(self.x,self.y):
-                self.x-=nx*(overlap+2)
-                self.y-=ny*(overlap+2)
-                self.vx=old_vx*.25;self.vy=old_vy*.25
 
     def update_camera(self,dt):
         speed=math.hypot(self.vx,self.vy)
