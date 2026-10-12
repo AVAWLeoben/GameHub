@@ -2,6 +2,7 @@
 """Kiddie Tic-Tac-Toe for GameHub (Pygame-ce / Pygbag).
 
 One-screen kids' UI, solo AI, local two-player, and browser-only PeerJS rooms.
+Version 2.1.2 fixes JavaScript Peer construction and displays network stages.
 
 Integration: GameHub calls ``await main(screen, clock)``.
 Importing this module has no side effects. Returning from main() restores GameHub.
@@ -220,29 +221,52 @@ class PeerSession:
         self.proxies.clear()
 
     def _listen(self, emitter, name, handler):
-        # JS callbacks must remain rooted or Pyodide will release them early.
-        from pyodide.ffi import create_proxy
+        """Keep each Pyodide callback alive until the room closes."""
+        try:
+            from pyodide.ffi import create_proxy
+        except (ImportError, AttributeError) as exc:
+            raise RuntimeError('Pyodide callback bridge unavailable') from exc
+        if not callable(create_proxy):
+            raise RuntimeError('Pyodide create_proxy is not callable')
         proxy = create_proxy(handler)
         self.proxies.append(proxy)
-        emitter.on(name, proxy)
+        # Calling a missing JS event method can otherwise surface only as
+        # the unhelpful 'NoneType object is not callable' in the game UI.
+        callback_registration = getattr(emitter, 'on', None)
+        if callback_registration is None or not callable(callback_registration):
+            raise RuntimeError('PeerJS listener API missing: ' + name)
+        callback_registration(name, proxy)
+
+    @staticmethod
+    def _browser_eval(source):
+        """Execute simple JavaScript via Pyodide's built-in browser bridge.
+
+        PeerJS exposes a JS *constructor*. Constructing it inside JavaScript
+        avoids ambiguous access to a JsProxy ``.new`` attribute in Python.
+        """
+        from js import eval as js_eval
+        if js_eval is None or not callable(js_eval):
+            raise RuntimeError('Browser JavaScript eval unavailable')
+        return js_eval(source)
+
+    @classmethod
+    def _has_peerjs(cls):
+        # Only native Python booleans cross this boundary, never a JS proxy
+        # whose truthiness could raise 'object has no len()'.
+        return cls._browser_eval("""(
+            typeof window !== 'undefined' &&
+            ((window.peerjs && typeof window.peerjs.Peer === 'function') ||
+             typeof window.Peer === 'function')
+        )""") is True
 
     async def _load_sdk(self):
-        """Load browser PeerJS on demand, with a backup CDN.
-
-        create_proxy is imported from pyodide.ffi in _listen, not js.
-        Local 1/2-player play never attempts to load external JS.
-        """
+        """Load PeerJS only for online mode. Return when its JS constructor exists."""
         try:
-            from js import window, document
+            from js import document
         except ImportError as exc:
-            raise RuntimeError('Online play requires the GameHub website') from exc
-
-        # A JavaScript constructor is a Pyodide JsProxy.  Never ask Python
-        # to evaluate its truthiness: JsProxy.__bool__ may ask for a JS length
-        # and raise TypeError('object has no len()') for constructors/objects.
-        existing = getattr(window, 'Peer', None)
-        if existing is not None:
-            return existing
+            raise RuntimeError('Online play requires GameHub in a browser') from exc
+        if self._has_peerjs():
+            return
         for attempt, url in enumerate(PEERJS_URLS):
             if self.closed:
                 raise asyncio.CancelledError()
@@ -256,15 +280,34 @@ class PeerSession:
                 script.src = url
                 script.async_ = True
                 document.head.appendChild(script)
-            # Nonblocking: keeps the Pygbag game loop alive.
+            # Nonblocking, allowing Pygbag to keep drawing while loading.
             for _ in range(90):
                 if self.closed:
                     raise asyncio.CancelledError()
-                peer_class = getattr(window, 'Peer', None)
-                if peer_class is not None:
-                    return peer_class
+                if self._has_peerjs():
+                    return
                 await asyncio.sleep(0.1)
-        raise RuntimeError('PeerJS unavailable. Check internet or CDN blocking')
+        raise RuntimeError('PeerJS did not load; check internet or CDN blocking')
+
+    def _construct_peer(self):
+        """Construct the PeerJS class in JavaScript, not through JsProxy.new.
+
+        Browser builds of PeerJS support window.peerjs.Peer and window.Peer.
+        The result is an actual JS Peer instance with .on/.connect/.destroy.
+        """
+        factory = self._browser_eval("""(function(isHost, roomId) {
+            const ctor = (window.peerjs && window.peerjs.Peer) || window.Peer;
+            if (typeof ctor !== 'function') {
+                throw new Error('PeerJS constructor unavailable after loading');
+            }
+            return isHost ? new ctor(roomId) : new ctor();
+        })""")
+        if factory is None or not callable(factory):
+            raise RuntimeError('PeerJS constructor bridge is not callable')
+        result = factory(self.role == 'CREATE', self.room_id)
+        if result is None:
+            raise RuntimeError('PeerJS constructor returned no peer')
+        return result
 
     def poll(self, now=None):
         """Turns a stalled connection into actionable feedback on screen."""
@@ -291,19 +334,19 @@ class PeerSession:
         self.job = asyncio.create_task(self._start())
 
     async def _start(self):
+        stage = 'loading PeerJS'
         try:
             self.status = 'Loading online play...'
-            peer_class = await self._load_sdk()
+            await self._load_sdk()
             if self.closed:
                 return
+            stage = 'creating PeerJS peer'
             import time
             self._signaling_started = time.monotonic()
-            if self.role == 'CREATE':
-                self.peer = peer_class.new(self.room_id)
-                self.status = 'Opening room...'
-            else:
-                self.peer = peer_class.new()
-                self.status = 'Finding friend...'
+            self.peer = self._construct_peer()
+            self.status = ('Opening room...' if self.role == 'CREATE'
+                           else 'Finding friend...')
+            stage = 'attaching PeerJS events'
             self._listen(self.peer, 'open', self._peer_open)
             self._listen(self.peer, 'error', self._peer_error)
             self._listen(self.peer, 'disconnected', self._peer_disconnected)
@@ -313,7 +356,10 @@ class PeerSession:
             raise
         except Exception as exc:
             if not self.closed:
-                self.status = 'Online unavailable: ' + str(exc)[:80]
+                # A named stage and exception class are more diagnostic than
+                # "Online unavailable: NoneType object is not callable".
+                self.status = (stage + ': ' + type(exc).__name__ +
+                               ': ' + str(exc))[:160]
 
     def _peer_open(self, _peer_id=None):
         if self.closed:
@@ -565,7 +611,7 @@ class TicTacToeGame:
 
     def game_winner(self):
         for a,b,c in ((0,1,2),(3,4,5),(6,7,8),(0,3,6),
-                      (1,4,7),(2,4,6),(0,4,8)):
+                      (1,4,7),(2,5,8),(2,4,6),(0,4,8)):
             if self.board[a] and self.board[a] == self.board[b] == self.board[c]:
                 return self.board[a]
         return 'TIE' if '' not in self.board else None
@@ -782,8 +828,25 @@ class TicTacToeGame:
                     status='Sending move...'
                 if self.net is not None and self.net.ready and not self.waiting_move:
                     status=('You are X (host)' if self.room_role=='CREATE' else 'You are O (guest)')
-                txt=font_btn_sub.render(status[:65],True,COLOR_GOLD if (self.net and not self.net.ready) else COLOR_TEXT)
-                surf.blit(txt,txt.get_rect(center=(WIDTH//2,510 if self.winner is None else 446)))
+                # Keep the diagnostic stage visible, including on small iPads.
+                # Two lines avoid cutting off errors before the meaningful part.
+                color=(COLOR_GOLD if (self.net is not None and not self.net.ready)
+                       else COLOR_TEXT)
+                words=status.split()
+                lines=[]; line=''
+                for word in words:
+                    trial=(line+' '+word).strip()
+                    if line and font_btn_sub.size(trial)[0] > WIDTH-25:
+                        lines.append(line)
+                        line=word
+                    else:
+                        line=trial
+                if line:
+                    lines.append(line)
+                for j,chunk in enumerate(lines[:2]):
+                    txt=font_btn_sub.render(chunk,True,color)
+                    y=(475 if self.winner is None else 433) + j*22
+                    surf.blit(txt,txt.get_rect(center=(WIDTH//2,y)))
         width,height=self.screen.get_size()
         if (width,height)==(WIDTH,HEIGHT):
             self.screen.blit(surf,(0,0))
