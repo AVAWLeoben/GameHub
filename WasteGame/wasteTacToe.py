@@ -237,8 +237,11 @@ class PeerSession:
         except ImportError as exc:
             raise RuntimeError('Online play requires the GameHub website') from exc
 
+        # A JavaScript constructor is a Pyodide JsProxy.  Never ask Python
+        # to evaluate its truthiness: JsProxy.__bool__ may ask for a JS length
+        # and raise TypeError('object has no len()') for constructors/objects.
         existing = getattr(window, 'Peer', None)
-        if existing:
+        if existing is not None:
             return existing
         for attempt, url in enumerate(PEERJS_URLS):
             if self.closed:
@@ -258,7 +261,7 @@ class PeerSession:
                 if self.closed:
                     raise asyncio.CancelledError()
                 peer_class = getattr(window, 'Peer', None)
-                if peer_class:
+                if peer_class is not None:
                     return peer_class
                 await asyncio.sleep(0.1)
         raise RuntimeError('PeerJS unavailable. Check internet or CDN blocking')
