@@ -1,0 +1,169 @@
+{
+  "canvas_px": [
+    960,
+    600
+  ],
+  "note": "All coordinates are pixels in the 960x600 track image. The background contains NO moving hazards - draw them at runtime.",
+  "narrow_section": {
+    "where": "left outer leg of the track (driven bottom to top)",
+    "y_range": [
+      187,
+      357
+    ],
+    "road_width_px": {
+      "normal": 86.0,
+      "narrowest": 50.0
+    },
+    "narrowest_y_range": [
+      302,
+      242
+    ],
+    "warning_sign_at": [
+      24,
+      382
+    ]
+  },
+  "hazard_lanes": [
+    {
+      "id": "lane_1",
+      "y": 236,
+      "desert_end": [
+        36,
+        236
+      ],
+      "cactus_body_end": [
+        150,
+        236
+      ],
+      "road_x_range": [
+        69,
+        122
+      ]
+    },
+    {
+      "id": "lane_2",
+      "y": 272,
+      "desert_end": [
+        36,
+        272
+      ],
+      "cactus_body_end": [
+        150,
+        272
+      ],
+      "road_x_range": [
+        72,
+        122
+      ]
+    },
+    {
+      "id": "lane_3",
+      "y": 308,
+      "desert_end": [
+        36,
+        308
+      ],
+      "cactus_body_end": [
+        150,
+        308
+      ],
+      "road_x_range": [
+        69,
+        123
+      ]
+    }
+  ],
+  "lane_behaviour": "each hazard ping-pongs along its lane: it rests at one end (safe, off the road), crosses the road, rests at the other end. Offset the three lanes in time so there is always a gap.",
+  "hazards": {
+    "saguaro_walk": {
+      "frames": [
+        "hazards/saguaro_walk_a.png",
+        "hazards/saguaro_walk_b.png"
+      ],
+      "shadow": [
+        "hazards/saguaro_walk_a_shadow.png",
+        "hazards/saguaro_walk_b_shadow.png"
+      ],
+      "canvas_px": [
+        36,
+        46
+      ],
+      "anchor_px": [
+        18,
+        41
+      ],
+      "anchor_meaning": "feet / ground contact point",
+      "frame_time_s": 0.18,
+      "suggested_speed_px_s": 26,
+      "hitbox": {
+        "type": "circle",
+        "centre_offset": [
+          0,
+          -9
+        ],
+        "radius": 7.5
+      },
+      "suggested_lane": "lane_1 and lane_3"
+    },
+    "barrel_roller": {
+      "image": "hazards/barrel_roller.png",
+      "shadow": "hazards/barrel_roller_shadow.png",
+      "canvas_px": [
+        26,
+        26
+      ],
+      "anchor_px": [
+        13,
+        13
+      ],
+      "anchor_meaning": "centre; rotate the sprite about the anchor while it rolls (about speed/9.6 rad/s)",
+      "suggested_speed_px_s": 55,
+      "hitbox": {
+        "type": "circle",
+        "centre_offset": [
+          0,
+          0
+        ],
+        "radius": 9.5
+      },
+      "suggested_lane": "lane_2"
+    },
+    "pear_slider": {
+      "image": "hazards/pear_slider.png",
+      "shadow": "hazards/pear_slider_shadow.png",
+      "canvas_px": [
+        30,
+        26
+      ],
+      "anchor_px": [
+        15,
+        14
+      ],
+      "anchor_meaning": "centre",
+      "suggested_speed_px_s": 34,
+      "hitbox": {
+        "type": "circle",
+        "centre_offset": [
+          0,
+          0
+        ],
+        "radius": 10
+      },
+      "suggested_lane": "optional extra, any lane"
+    }
+  },
+  "draw_order": [
+    "cactus_corner_track.png",
+    "hazards/*_shadow.png (offset +1,+1 already baked in the shadow image)",
+    "hazards/<sprite>.png sorted by anchor y"
+  ],
+  "road_mask": "cactus_corner_road_mask.png (white = road); the narrow section is already narrower in the mask",
+  "start_line": {
+    "at": [
+      273.2,
+      431.0
+    ],
+    "heading": "west (left)"
+  },
+  "hires": "hazards/hires_4x/*@4x.png"
+}

@@ -1,4 +1,4 @@
-"""WasteKart 2.1.1 - Dusty Drive moving train, with figure-eight bridge support.
+"""WasteKart 2.1.2 - Desert cactus hazards + Dusty Drive moving train.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
@@ -402,6 +402,11 @@ class Track:
         tunnel_rel=data.get('train_tunnel_overlay')
         self.train_tunnel_overlay_path=(os.path.join(ASSET_ROOT,*tunnel_rel.split('/'))
                                          if tunnel_rel else None)
+        # Independent cactus lane hazards; the manifest supplies the sprite,
+        # lane and collision geometry. Only Cactus Corner opts in.
+        cactus_rel=data.get('cactus_manifest')
+        self.cactus_manifest_path=(os.path.join(ASSET_ROOT,*cactus_rel.split('/'))
+                                  if cactus_rel else None)
         self.overlay_path=None
         overlay_rel=data.get('overlay_image')
         if overlay_rel:
@@ -635,6 +640,135 @@ class MovingTrain:
         canvas.set_clip(old_clip)
 
 
+class CactusLaneHazards:
+    """Three staggered desert track hazards with shared safe-crossing gaps.
+
+    The supplied cactus_manifest.json defines each lane, sprite anchor,
+    collision radius and speed. Two saguaros use alternating walking frames;
+    a barrel rolls through the middle lane. Only one lane traverses the road
+    at a time, so children always have a safe opportunity to cross.
+    """
+    KART_RADIUS=10.0
+    REST_SECONDS=0.95
+    START_DELAY=0.65
+
+    def __init__(self,track):
+        with open(track.cactus_manifest_path,encoding='utf8') as source:
+            self.manifest=json.load(source)
+        self.base=os.path.dirname(track.cactus_manifest_path)
+        specs=self.manifest['hazards']
+        lanes=self.manifest['hazard_lanes']
+        self.actors=[]
+        sx=TRACK_RECT.width/MAP_W
+        sy=TRACK_RECT.height/MAP_H
+        for lane_index,lane in enumerate(lanes):
+            kind='barrel_roller' if lane_index==1 else 'saguaro_walk'
+            spec=specs[kind]
+            file_names=(spec['frames'] if 'frames' in spec else [spec['image']])
+            shadows=(spec['shadow'] if isinstance(spec['shadow'],list)
+                     else [spec['shadow']])
+            def load(relative):
+                path=os.path.join(self.base,*relative.split('/'))
+                sprite=pygame.image.load(path).convert_alpha()
+                w=max(1,round(sprite.get_width()*sx))
+                h=max(1,round(sprite.get_height()*sy))
+                return pygame.transform.smoothscale(sprite,(w,h))
+            frames=[load(relative) for relative in file_names]
+            shadows=[load(relative) for relative in shadows]
+            rotations=None
+            if kind=='barrel_roller':
+                rotations=[pygame.transform.rotate(frames[0],i*15)
+                           for i in range(24)]
+            self.actors.append({
+                'kind':kind,'lane':lane,'spec':spec,'frames':frames,
+                'shadows':shadows,'rotations':rotations,
+                'speed':float(spec['suggested_speed_px_s']),
+                'left':float(lane['desert_end'][0]),
+                'right':float(lane['cactus_body_end'][0]),
+                'y':float(lane['y']),
+                'x':float(lane['desert_end'][0]),
+                'direction':1,'moving':False,'angle':0.0,
+            })
+        self.reset()
+
+    def reset(self):
+        self.time=0.0
+        self.active_lane=0
+        self.rest_left=self.START_DELAY
+        for lane in self.actors:
+            lane['x']=lane['left']
+            lane['direction']=1
+            lane['moving']=False
+            lane['angle']=0.0
+
+    def update(self,dt):
+        self.time+=dt
+        if self.rest_left>0:
+            self.rest_left=max(0.0,self.rest_left-dt)
+            if self.rest_left>0:return
+        actor=self.actors[self.active_lane]
+        actor['moving']=True
+        old_x=actor['x']
+        target=actor['right'] if actor['direction']>0 else actor['left']
+        actor['x']=min(target,old_x+actor['speed']*dt) if actor['direction']>0 \
+                   else max(target,old_x-actor['speed']*dt)
+        if actor['kind']=='barrel_roller':
+            actor['angle']+=(actor['x']-old_x)/9.6
+        if actor['x']==target:
+            actor['moving']=False
+            # Return from the far end on the next activation. The opposite
+            # lanes are scheduled before this actor becomes active again.
+            actor['direction']*=-1
+            self.active_lane=(self.active_lane+1)%len(self.actors)
+            self.rest_left=self.REST_SECONDS
+
+    def actor_hitbox(self,actor):
+        hit=actor['spec']['hitbox']
+        ox,oy=hit['centre_offset']
+        return (actor['x']+ox,actor['y']+oy,float(hit['radius']))
+
+    def hit_test(self,point):
+        x,y=point
+        for actor in self.actors:
+            cx,cy,radius=self.actor_hitbox(actor)
+            if (x-cx)*(x-cx)+(y-cy)*(y-cy) <= (radius+self.KART_RADIUS)**2:
+                return True
+        return False
+
+    def draw(self,canvas,to_screen):
+        clip=canvas.get_clip()
+        canvas.set_clip(TRACK_RECT)
+        order=sorted(self.actors,key=lambda a:a['y'])
+        sx=TRACK_RECT.width/MAP_W
+        sy=TRACK_RECT.height/MAP_H
+        # Shadows are drawn first; the user-supplied shadow files already
+        # contain their intended 1px offset.
+        for actor in order:
+            frame=(int(self.time/actor['spec'].get('frame_time_s',.18)) % 2
+                   if actor['moving'] and len(actor['frames'])>1 else 0)
+            shadow=actor['shadows'][min(frame,len(actor['shadows'])-1)]
+            self._blit_anchored(canvas,to_screen,actor,shadow,sx,sy)
+        for actor in order:
+            if actor['rotations'] is not None:
+                # Barrel rotates about its center anchor.
+                index=int(math.degrees(actor['angle'])/15)%24
+                sprite=actor['rotations'][index]
+                xy=to_screen((actor['x'],actor['y']))
+                canvas.blit(sprite,sprite.get_rect(center=(round(xy[0]),round(xy[1]))))
+            else:
+                frame=(int(self.time/actor['spec'].get('frame_time_s',.18)) % 2
+                       if actor['moving'] and len(actor['frames'])>1 else 0)
+                self._blit_anchored(canvas,to_screen,actor,actor['frames'][frame],sx,sy)
+        canvas.set_clip(clip)
+
+    @staticmethod
+    def _blit_anchored(canvas,to_screen,actor,image,sx,sy):
+        # The actor anchor is world position; saguaros anchor at the feet.
+        ax,ay=actor['spec']['anchor_px']
+        x,y=to_screen((actor['x'],actor['y']))
+        canvas.blit(image,(round(x-ax*sx),round(y-ay*sy)))
+
+
 class Racer:
     """One vehicle drives its entire child-drawn multi-lap spline ONCE."""
     def __init__(self,index,kart_id,route,is_ghost=False,laps=1):
@@ -725,6 +859,10 @@ class Racer:
         self.drafting=False
         self.interaction_factor=1.0
         return True
+
+    def hit_by_cactus(self,elapsed=None):
+        # Same gentle 360-degree stop/spin as the Dusty Drive train.
+        return self.hit_by_train(elapsed)
 
     def update(self,dt,elapsed,track):
         if self.finished:return
@@ -852,6 +990,7 @@ class WasteKartGame:
         self.map_surface=None
         self.bridge_overlay_surface=None
         self.moving_train=None
+        self.cactus_hazards=None
         self.race_routes_layer=None  # Legacy field; used only during transition.
         self.race_trails=[]      # AheadTrail for each player (+ optional ghost).
         self.pickups=[]          # Fresh shared boxes for each race; stable during drawing.
@@ -898,6 +1037,8 @@ class WasteKartGame:
             self.bridge_overlay_surface=pygame.transform.smoothscale(overlay,TRACK_RECT.size)
         # Only Dusty Drive (and future train-manifest tracks) loads a consist.
         self.moving_train=(MovingTrain(self.track) if self.track.train_manifest_path else None)
+        self.cactus_hazards=(CactusLaneHazards(self.track)
+                             if self.track.cactus_manifest_path else None)
 
     def font(self,size):
         return self.fonts[min(self.fonts,key=lambda k:abs(k-size))]
@@ -1601,6 +1742,8 @@ class WasteKartGame:
             self.display_racers()
         if self.moving_train is not None:
             self.moving_train.draw(self.canvas,self.world_to_screen)
+        if self.cactus_hazards is not None:
+            self.cactus_hazards.draw(self.canvas,self.world_to_screen)
         pygame.draw.rect(self.canvas,INK,(0,0,LOGICAL_W,73))
         self.text('WASTE KART', (234,27),38,YELLOW)
         if self.state=='countdown':
@@ -1904,6 +2047,8 @@ class WasteKartGame:
         self.state='countdown'
         if self.moving_train is not None:
             self.moving_train.reset()
+        if self.cactus_hazards is not None:
+            self.cactus_hazards.reset()
         self.countdown=0.0
         self.elapsed=0.0
         self.paused=False
@@ -1926,6 +2071,7 @@ class WasteKartGame:
                 self.active_ghost=Racer(-1,record['kart_id'],Route(record['points'],record.get('lap_boundaries')),True,laps=self.laps)
                 self.active_ghost.ghost_reaction=record.get('reaction')
                 self.active_ghost.ghost_powerups=list(record.get('powerup_uses',[]))
+                self.active_ghost.ghost_train_hits=list(record.get('hazard_hits',[]))
         # Cached cropped route spans: only the current span is dynamically
         # drawn each frame, and traveled geometry is never displayed again.
         self.race_routes_layer=None
@@ -2091,7 +2237,8 @@ class WasteKartGame:
                 self.ghost_records[key]={'time':r.finish_time,'points':list(r.route.points),
                                          'lap_boundaries':list(r.route.lap_boundaries),
                                          'kart_id':r.kart_id,'reaction':self.reaction_times[0],
-                                         'powerup_uses':list(r.used_powerups)}
+                                         'powerup_uses':list(r.used_powerups),
+                                         'hazard_hits':list(r.train_hit_events)}
                 self.new_best=True
         self.celebrate()
 
@@ -2238,6 +2385,8 @@ class WasteKartGame:
                 self.elapsed+=dt
                 if self.moving_train is not None:
                     self.moving_train.update(dt)
+                if self.cactus_hazards is not None:
+                    self.cactus_hazards.update(dt)
                 self.update_interactions(dt)
                 for racer in self.racers:
                     before=racer.pos
@@ -2245,6 +2394,9 @@ class WasteKartGame:
                     if (self.moving_train is not None and not racer.finished and
                             self.moving_train.hit_test(racer.pos)):
                         racer.hit_by_train(self.elapsed)
+                    if (self.cactus_hazards is not None and not racer.finished and
+                            self.cactus_hazards.hit_test(racer.pos)):
+                        racer.hit_by_cactus(self.elapsed)
                     self.try_collect_powerups(racer,before)
                 if self.active_ghost is not None:
                     self.active_ghost.update(dt,self.elapsed,self.track)
