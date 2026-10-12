@@ -6,6 +6,8 @@ import json
 import hashlib
 import struct
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+from urllib.error import URLError
 import re
 import shutil
 import subprocess
@@ -15,6 +17,76 @@ import zipfile
 ROOT = Path(__file__).resolve().parent
 GAME = ROOT / "WasteGame"
 DIST = ROOT / "dist"
+
+# PeerJS is downloaded at BUILD time and served from GitHub Pages alongside
+# the Pygbag app. No external CDN is required when someone opens the game.
+PEERJS_VERSION = "1.5.4"
+PEERJS_LOCAL = f"vendor/peerjs-{PEERJS_VERSION}.min.js"
+PEERJS_LICENSE_LOCAL = "vendor/peerjs-LICENSE.txt"
+PEERJS_SOURCES = (
+    f"https://cdnjs.cloudflare.com/ajax/libs/peerjs/{PEERJS_VERSION}/peerjs.min.js",
+    f"https://cdn.jsdelivr.net/npm/peerjs@{PEERJS_VERSION}/dist/peerjs.min.js",
+    f"https://unpkg.com/peerjs@{PEERJS_VERSION}/dist/peerjs.min.js",
+)
+# Project license: https://github.com/peers/peerjs/blob/master/LICENSE
+PEERJS_LICENSE = """Copyright (c) 2015 Michelle Bu and Eric Zhang, http://peerjs.com
+
+(The MIT License)
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+"""
+
+
+def install_peerjs(web: Path) -> None:
+    """Install pinned PeerJS at build time; fail visibly if download fails.
+
+    Pygbag regenerates build/web/index.html each build, so patching a checked-in
+    index.html is not sufficient. Use a same-origin script to avoid requiring
+    client devices to reach third-party CDNs at game launch.
+    """
+    target = web / PEERJS_LOCAL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # --skip-build can reuse the previous verified artifact. Still re-check it.
+    if target.is_file() and len(target.read_bytes()) >= 20_000:
+        print(f"PeerJS: reusing {PEERJS_LOCAL} from current browser build.")
+    else:
+        errors = []
+        for url in PEERJS_SOURCES:
+            try:
+                request = Request(url, headers={"User-Agent": "GameHub-build/1.0"})
+                with urlopen(request, timeout=22) as response:
+                    script = response.read(1_500_001)
+                if not (20_000 <= len(script) <= 1_500_000):
+                    raise ValueError(f"Unexpected JavaScript length: {len(script)}")
+                if b'Peer' not in script or b'<html' in script[:256].lower():
+                    raise ValueError("Response does not resemble PeerJS JavaScript")
+                target.write_bytes(script)
+                checksum = hashlib.sha256(script).hexdigest()[:12]
+                print(f"PeerJS {PEERJS_VERSION}: downloaded from {url} ({checksum}).")
+                break
+            except (URLError, OSError, ValueError, TimeoutError) as exc:
+                errors.append(f"{url}: {type(exc).__name__}: {exc}")
+        else:
+            raise RuntimeError(
+                "PeerJS build dependency download failed; site was NOT packaged. "
+                "The GitHub Actions runner needs access to one of the pinned "
+                "PeerJS CDN URLs. Attempts: " + " | ".join(errors)
+            )
+    (web / PEERJS_LICENSE_LOCAL).write_text(PEERJS_LICENSE, encoding="utf-8")
 
 
 def remove_media_engagement_wait(index_path: Path) -> bool:
@@ -95,6 +167,7 @@ def prepare_ipad_web_app(web: Path) -> None:
     the iframe can instead link to an optional standalone game URL.
     """
     index_path = web / "index.html"
+    install_peerjs(web)
     html = index_path.read_text(encoding="utf-8")
 
     # Fail instead of silently shipping the default 'W' favicon. The icon is
@@ -162,6 +235,8 @@ def prepare_ipad_web_app(web: Path) -> None:
     <link rel="icon" type="image/png" href="favicon.png?v={icon_hash}">
     <link rel="apple-touch-icon" sizes="{width}x{height}" href="apple-touch-icon.png?v={icon_hash}">
     <link rel="manifest" href="manifest.webmanifest?v={icon_hash}">
+    <!-- Same-origin PeerJS loads synchronously before Pygbag and the game. -->
+    <script src="{PEERJS_LOCAL}"></script>
     <!-- WASTEGAME_HEAD_END -->
 """
     html = html[:head.end()] + additions + html[head.end():]
