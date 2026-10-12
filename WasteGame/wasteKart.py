@@ -1,4 +1,4 @@
-"""WasteKart 1.9.3 - Clover Crossing figure-eight and overpass support.
+"""WasteKart 2.1.1 - Dusty Drive moving train, with figure-eight bridge support.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
@@ -395,6 +395,13 @@ class Track:
         self.centerline_route=Route(self.centerline+[self.centerline[0]])
         mask_path=os.path.join(ASSET_ROOT,*entry['road_mask'].split('/'))
         self.mask=pygame.image.load(mask_path).convert()
+        # Optional independent moving train hazard (no effect on other tracks).
+        train_rel=data.get('train_manifest')
+        self.train_manifest_path=(os.path.join(ASSET_ROOT,*train_rel.split('/'))
+                                  if train_rel else None)
+        tunnel_rel=data.get('train_tunnel_overlay')
+        self.train_tunnel_overlay_path=(os.path.join(ASSET_ROOT,*tunnel_rel.split('/'))
+                                         if tunnel_rel else None)
         self.overlay_path=None
         overlay_rel=data.get('overlay_image')
         if overlay_rel:
@@ -474,6 +481,160 @@ class Track:
         return spots
 
 
+class MovingTrain:
+    """One westbound, continuously moving consist; geometry uses world px.
+
+    Sprite centers, coupler spacing, portals and crossing positions are taken
+    directly from the user-provided train_manifest.json. Images are scaled only
+    once on load. Collision is positional; the train itself never slows down.
+    """
+    SPEED=118.0               # px/sec, westbound on 960x600 map
+    RETURN_MARGIN=130.0       # time between trains after tail has left view
+    KART_HALF_COLLISION=12.0 # generous for young players without early hits
+    STUN_SECONDS=1.45
+    HIT_IMMUNITY=3.7
+
+    def __init__(self, track):
+        assert track.train_manifest_path
+        with open(track.train_manifest_path,encoding='utf8') as stream:
+            self.manifest=json.load(stream)
+        self.base=os.path.dirname(track.train_manifest_path)
+        self.rail_y=float(self.manifest['rail']['y'])
+        self.hidden_x=tuple(float(v) for v in self.manifest['tunnel']['hidden_between_x'])
+        self.names=list(self.manifest['suggested_consist'])
+        self.specs=self.manifest['sprites']
+        self.gap=float(self.manifest['coupler_gap_px'])
+        self.crossings=[tuple(float(v) for v in record['x_range'])
+                        for record in self.manifest['road_crossings']]
+        self.offsets=[]
+        offset=0.0
+        last=None
+        for name in self.names:
+            if last is not None:
+                offset+=(self.specs[last]['body_length_px']+
+                         self.specs[name]['body_length_px'])*.5+self.gap
+            self.offsets.append(offset)
+            last=name
+        self.tail_length=self.offsets[-1]+self.specs[self.names[-1]]['body_length_px']*.5
+        self.sprites=[]
+        sx=TRACK_RECT.width/MAP_W
+        sy=TRACK_RECT.height/MAP_H
+        for name in self.names:
+            record=self.specs[name]
+            frames=[]
+            for relative in (record['shadow'],record['file']):
+                sprite=pygame.image.load(os.path.join(self.base,*relative.split('/'))).convert_alpha()
+                size=(max(1,round(sprite.get_width()*sx)),
+                      max(1,round(sprite.get_height()*sy)))
+                frames.append(pygame.transform.smoothscale(sprite,size))
+            self.sprites.append(tuple(frames))
+        self.puffs=[]
+        for relative in self.manifest.get('smoke_puffs',()):
+            sprite=pygame.image.load(os.path.join(self.base,*relative.split('/'))).convert_alpha()
+            size=(max(1,round(sprite.get_width()*sx)),
+                  max(1,round(sprite.get_height()*sy)))
+            self.puffs.append(pygame.transform.smoothscale(sprite,size))
+        self.tunnel_overlay=None
+        self.tunnel_xy=TRACK_RECT.topleft
+        if track.train_tunnel_overlay_path:
+            source=pygame.image.load(track.train_tunnel_overlay_path).convert_alpha()
+            # Crop sparse tunnel art once: ~170x95 instead of blending an
+            # almost-transparent 740x462 canvas every frame on an iPad.
+            bounding=source.get_bounding_rect(min_alpha=1)
+            if bounding.width>0 and bounding.height>0:
+                cropped=source.subsurface(bounding).copy()
+                sw=max(1,round(bounding.width*sx))
+                sh=max(1,round(bounding.height*sy))
+                self.tunnel_overlay=pygame.transform.smoothscale(cropped,(sw,sh))
+                self.tunnel_xy=(TRACK_RECT.left+round(bounding.left*sx),
+                                TRACK_RECT.top+round(bounding.top*sy))
+        self.reset()
+
+    def reset(self):
+        # The locomotive enters shortly after green instead of already being
+        # on a crossing while the children are waiting for the start lights.
+        self.loco_x=MAP_W+415.0
+        self.time=0.0
+
+    def update(self,dt):
+        self.time+=dt
+        self.loco_x-=self.SPEED*dt
+        if self.loco_x+self.tail_length < -24:
+            self.loco_x=MAP_W+self.RETURN_MARGIN
+
+    def car_positions(self):
+        for name,offset in zip(self.names,self.offsets):
+            yield name,self.loco_x+offset
+
+    def hidden(self,x):
+        return self.hidden_x[0]<x<self.hidden_x[1]
+
+    def hit_test(self,kart_pos):
+        """A car hits a real racer anywhere its physical track is exposed.
+
+        A child can draw across the railway even off-road; such a shortcut
+        must not bypass the hazard. No collision occurs under solid tunnel art.
+        """
+        x,y=kart_pos
+        if self.hidden(x):
+            return False
+        for name,car_x in self.car_positions():
+            spec=self.specs[name]
+            if (abs(x-car_x)<=spec['body_length_px']*.5+self.KART_HALF_COLLISION
+                    and abs(y-self.rail_y)<=spec['body_width_px']*.5+self.KART_HALF_COLLISION):
+                return True
+        return False
+
+    def draw_crossing_signals(self,canvas,to_screen):
+        """Flashing red crossing lights warn children before the train arrives."""
+        for lo,hi in self.crossings:
+            middle=(lo+hi)*.5
+            approaching=(self.loco_x<=middle+220 and
+                         self.loco_x+self.tail_length>=middle-35)
+            if not approaching:
+                continue
+            bright=(int(self.time*5)%2)==0
+            for side,x in enumerate((lo-14,hi+14)):
+                xy=to_screen((x,self.rail_y-23))
+                center=(round(xy[0]),round(xy[1]))
+                color=(255,83,79) if bright==bool(side) else (114,55,56)
+                pygame.draw.circle(canvas,(33,31,42),center,7)
+                pygame.draw.circle(canvas,color,center,5)
+                if color[0]>200:
+                    pygame.draw.circle(canvas,(255,202,159),center,2)
+
+    def draw(self,canvas,to_screen):
+        """Track -> train shadows -> cars -> optional smoke -> tunnel overlay."""
+        old_clip=canvas.get_clip()
+        canvas.set_clip(TRACK_RECT)
+        self.draw_crossing_signals(canvas,to_screen)
+        car_positions=list(self.car_positions())
+        # Render shadows first, so every car has the expected grounded look.
+        for index,(name,car_x) in enumerate(car_positions):
+            if -35<=car_x<=MAP_W+35:
+                surf=self.sprites[index][0]
+                xy=to_screen((car_x,self.rail_y))
+                canvas.blit(surf,surf.get_rect(center=(round(xy[0]),round(xy[1]))))
+        for index,(name,car_x) in enumerate(car_positions):
+            if -35<=car_x<=MAP_W+35:
+                surf=self.sprites[index][1]
+                xy=to_screen((car_x,self.rail_y))
+                canvas.blit(surf,surf.get_rect(center=(round(xy[0]),round(xy[1]))))
+        # A few tiny puffs use cached art, not new surfaces every frame.
+        if self.puffs and -15 < self.loco_x < MAP_W+15:
+            for index,age in enumerate((.18,.56,1.0)):
+                smoke_x=self.loco_x+12.5+self.SPEED*age*.42
+                smoke_y=self.rail_y-13-age*19
+                if self.hidden(smoke_x):
+                    continue
+                surf=self.puffs[min(index,len(self.puffs)-1)]
+                xy=to_screen((smoke_x,smoke_y))
+                canvas.blit(surf,surf.get_rect(center=(round(xy[0]),round(xy[1]))))
+        if self.tunnel_overlay is not None:
+            canvas.blit(self.tunnel_overlay,self.tunnel_xy)
+        canvas.set_clip(old_clip)
+
+
 class Racer:
     """One vehicle drives its entire child-drawn multi-lap spline ONCE."""
     def __init__(self,index,kart_id,route,is_ghost=False,laps=1):
@@ -496,6 +657,14 @@ class Racer:
         self.interaction_factor=1.0
         self.drafting=False
         self.bump_fx_left=0.0
+        self.train_spin_left=0.0
+        self.train_spin_duration=MovingTrain.STUN_SECONDS
+        self.train_spin_heading=0.0
+        self.train_immunity_left=0.0
+        self.train_hits=0
+        self.train_hit_events=[]
+        self.ghost_train_hits=[]
+        self.ghost_train_hits_index=0
         self.held_powerup=None
         self.powerup_kind=None
         self.powerup_left=0.0
@@ -541,8 +710,35 @@ class Racer:
         """Traverse the entire unique drawing, never wrap or teleport."""
         return self.route.sample(distance)
 
+    def hit_by_train(self,elapsed=None,replay=False):
+        """Stop, spin exactly once, and continue the same racing spline."""
+        if (self.finished or self.train_immunity_left>0 or
+                (self.is_ghost and not replay)):
+            return False
+        self.train_spin_heading=self.heading
+        self.train_spin_left=self.train_spin_duration
+        self.train_immunity_left=MovingTrain.HIT_IMMUNITY
+        self.train_hits+=1
+        if not replay and elapsed is not None:
+            self.train_hit_events.append(round(elapsed,3))
+        self.speed=0.0
+        self.drafting=False
+        self.interaction_factor=1.0
+        return True
+
     def update(self,dt,elapsed,track):
         if self.finished:return
+        self.train_immunity_left=max(0.0,self.train_immunity_left-dt)
+        if self.is_ghost and self.ghost_train_hits_index<len(self.ghost_train_hits):
+            if elapsed>=self.ghost_train_hits[self.ghost_train_hits_index]:
+                self.hit_by_train(replay=True)
+                self.ghost_train_hits_index+=1
+        if self.train_spin_left>0.0:
+            self.train_spin_left=max(0.0,self.train_spin_left-dt)
+            portion=1.0-self.train_spin_left/self.train_spin_duration
+            self.heading=self.train_spin_heading+math.tau*portion
+            self.speed=0.0
+            return
         if self.is_ghost and not self.ghost_reaction_applied and self.ghost_reaction is not None:
             if self.ghost_reaction < 0 or elapsed >= self.ghost_reaction:
                 self.apply_start_reaction(self.ghost_reaction)
@@ -655,6 +851,7 @@ class WasteKartGame:
         self.kart_picks=[0,1,2,3]
         self.map_surface=None
         self.bridge_overlay_surface=None
+        self.moving_train=None
         self.race_routes_layer=None  # Legacy field; used only during transition.
         self.race_trails=[]      # AheadTrail for each player (+ optional ghost).
         self.pickups=[]          # Fresh shared boxes for each race; stable during drawing.
@@ -699,6 +896,8 @@ class WasteKartGame:
         if self.track.overlay_path and os.path.exists(self.track.overlay_path):
             overlay=pygame.image.load(self.track.overlay_path).convert_alpha()
             self.bridge_overlay_surface=pygame.transform.smoothscale(overlay,TRACK_RECT.size)
+        # Only Dusty Drive (and future train-manifest tracks) loads a consist.
+        self.moving_train=(MovingTrain(self.track) if self.track.train_manifest_path else None)
 
     def font(self,size):
         return self.fonts[min(self.fonts,key=lambda k:abs(k-size))]
@@ -1370,6 +1569,14 @@ class WasteKartGame:
             self.boost_flame(r,center)
             self.powerup_visuals(r,center)
             self.draw_interaction_effect(r,center)
+            if r.train_spin_left>0 and not r.is_ghost:
+                phase=1-r.train_spin_left/r.train_spin_duration
+                for j in range(4):
+                    a=phase*math.tau*2+j*math.tau/4
+                    star=(round(center[0]+math.cos(a)*24),
+                          round(center[1]+math.sin(a)*19))
+                    pygame.draw.circle(self.canvas,(255,224,86),star,4)
+                    pygame.draw.circle(self.canvas,(255,255,235),star,2)
             self.canvas.blit(img,img.get_rect(center=center))
             if r.is_ghost:continue
             dot=(center[0],center[1]-18)
@@ -1392,6 +1599,8 @@ class WasteKartGame:
             self.display_racers(layer=1)
         else:
             self.display_racers()
+        if self.moving_train is not None:
+            self.moving_train.draw(self.canvas,self.world_to_screen)
         pygame.draw.rect(self.canvas,INK,(0,0,LOGICAL_W,73))
         self.text('WASTE KART', (234,27),38,YELLOW)
         if self.state=='countdown':
@@ -1693,6 +1902,8 @@ class WasteKartGame:
 
     def begin_countdown(self):
         self.state='countdown'
+        if self.moving_train is not None:
+            self.moving_train.reset()
         self.countdown=0.0
         self.elapsed=0.0
         self.paused=False
@@ -1760,10 +1971,10 @@ class WasteKartGame:
         if not self.interactions_enabled or self.players<2:
             return
         for i,a in enumerate(self.racers):
-            if a.finished:
+            if a.finished or a.train_spin_left>0:
                 continue
             for b in self.racers[i+1:]:
-                if b.finished:
+                if b.finished or b.train_spin_left>0:
                     continue
                 dx=b.pos[0]-a.pos[0]
                 dy=b.pos[1]-a.pos[1]
@@ -2016,6 +2227,8 @@ class WasteKartGame:
                 if self.time_left<=0:self.finish_draw()
         elif self.state=='countdown':
             if not self.paused:
+                if self.moving_train is not None:
+                    self.moving_train.update(dt)
                 self.countdown+=dt
                 if self.countdown>=GREEN_AT:
                     self.state='race'
@@ -2023,10 +2236,15 @@ class WasteKartGame:
         elif self.state=='race':
             if not self.paused:
                 self.elapsed+=dt
+                if self.moving_train is not None:
+                    self.moving_train.update(dt)
                 self.update_interactions(dt)
                 for racer in self.racers:
                     before=racer.pos
                     racer.update(dt,self.elapsed,self.track)
+                    if (self.moving_train is not None and not racer.finished and
+                            self.moving_train.hit_test(racer.pos)):
+                        racer.hit_by_train(self.elapsed)
                     self.try_collect_powerups(racer,before)
                 if self.active_ghost is not None:
                     self.active_ghost.update(dt,self.elapsed,self.track)

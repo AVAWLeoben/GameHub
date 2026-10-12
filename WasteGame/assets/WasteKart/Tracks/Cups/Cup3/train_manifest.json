@@ -1,0 +1,118 @@
+{
+  "canvas_px": [
+    960,
+    600
+  ],
+  "note": "All coordinates are pixels in the 960x600 track image. The train runs on one straight horizontal rail.",
+  "rail": {
+    "y": 330.0,
+    "x_start": 0,
+    "x_end": 960,
+    "travel_direction_of_sprites": "west (right to left); use facing_right/ for the other way"
+  },
+  "tunnel": {
+    "east_portal_x": 525.8,
+    "west_portal_x": 342.0,
+    "hidden_between_x": [
+      342.0,
+      525.8
+    ],
+    "how": "draw the train, then draw dusty_drive_tunnel_overlay.png on top: the train disappears into one portal and reappears from the other"
+  },
+  "road_crossings": [
+    {
+      "id": "west_hairpin",
+      "x_range": [
+        186.5,
+        282.0
+      ]
+    },
+    {
+      "id": "east_straight",
+      "x_range": [
+        768.2,
+        854.8
+      ]
+    }
+  ],
+  "draw_order": [
+    "dusty_drive_track.png",
+    "train/*_shadow.png",
+    "train/<car>.png",
+    "smoke puffs (optional)",
+    "dusty_drive_tunnel_overlay.png"
+  ],
+  "sprite_anchor": "canvas centre = centre of the car body on the rail axis",
+  "coupler_gap_px": 3.0,
+  "car_pitch_rule": "distance between neighbouring sprite centres = (body_length_a + body_length_b)/2 + coupler_gap_px",
+  "sprites": {
+    "loco": {
+      "file": "train/loco.png",
+      "shadow": "train/loco_shadow.png",
+      "hires": "train/hires_4x/loco@4x.png",
+      "canvas_px": [
+        46,
+        24
+      ],
+      "body_length_px": 38,
+      "body_width_px": 15.6
+    },
+    "boxcar_brown": {
+      "file": "train/boxcar_brown.png",
+      "shadow": "train/boxcar_brown_shadow.png",
+      "hires": "train/hires_4x/boxcar_brown@4x.png",
+      "canvas_px": [
+        42,
+        24
+      ],
+      "body_length_px": 34,
+      "body_width_px": 14.4
+    },
+    "tanker": {
+      "file": "train/tanker.png",
+      "shadow": "train/tanker_shadow.png",
+      "hires": "train/hires_4x/tanker@4x.png",
+      "canvas_px": [
+        42,
+        24
+      ],
+      "body_length_px": 34,
+      "body_width_px": 11.2
+    },
+    "boxcar_blue": {
+      "file": "train/boxcar_blue.png",
+      "shadow": "train/boxcar_blue_shadow.png",
+      "hires": "train/hires_4x/boxcar_blue@4x.png",
+      "canvas_px": [
+        42,
+        24
+      ],
+      "body_length_px": 34,
+      "body_width_px": 14.4
+    },
+    "flatcar": {
+      "file": "train/flatcar.png",
+      "shadow": "train/flatcar_shadow.png",
+      "hires": "train/hires_4x/flatcar@4x.png",
+      "canvas_px": [
+        42,
+        24
+      ],
+      "body_length_px": 34,
+      "body_width_px": 13.2
+    }
+  },
+  "suggested_consist": [
+    "loco",
+    "boxcar_brown",
+    "tanker",
+    "boxcar_blue",
+    "flatcar"
+  ],
+  "smoke_puffs": [
+    "train/smoke_puff_s.png",
+    "train/smoke_puff_m.png",
+    "train/smoke_puff_l.png"
+  ],
+  "smoke_hint": "emit from the loco funnel, 12.5 px behind the loco centre towards the rear, rising up-right and growing from s to l while fading"
+}
