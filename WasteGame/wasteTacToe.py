@@ -26,9 +26,13 @@ ICON_NAMES = ("Dog", "Cat", "Rabbit", "Fox", "Panda")
 
 # The SDK loads only if a player chooses online mode. Uses PeerJS's public
 # signaling service; internet/WebRTC access is necessary on both devices.
-PEERJS_URL = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"
+PEERJS_URLS = (
+    "https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js",
+    "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js",
+)
 PEERJS_SCRIPT_ID = "gamehub-tictactoe-peerjs"
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
+CONNECTION_TIMEOUT = 24.0
 
 # Created by the game entry point, not at import time.
 font_title = None
@@ -185,6 +189,10 @@ class PeerSession:
         self.proxies = []
         self.job = None
         self.status = "Ready"
+        self._connect_started = None
+        self._signaling_started = None
+        self._ever_connected = False
+        self._timeout_reported = False
 
     def stop(self):
         self.closed = True
@@ -219,29 +227,64 @@ class PeerSession:
         emitter.on(name, proxy)
 
     async def _load_sdk(self):
-        from js import window, document
-        peer_cls = getattr(window, 'Peer', None)
-        if peer_cls:
-            return peer_cls
-        script = document.getElementById(PEERJS_SCRIPT_ID)
-        if script is None:
-            script = document.createElement('script')
-            script.id = PEERJS_SCRIPT_ID
-            script.src = PEERJS_URL
-            document.head.appendChild(script)
-        # Async polling rather than calling JS directly while the SDK loads.
-        for _ in range(120):
+        """Load browser PeerJS on demand, with a backup CDN.
+
+        create_proxy is imported from pyodide.ffi in _listen, not js.
+        Local 1/2-player play never attempts to load external JS.
+        """
+        try:
+            from js import window, document
+        except ImportError as exc:
+            raise RuntimeError('Online play requires the GameHub website') from exc
+
+        existing = getattr(window, 'Peer', None)
+        if existing:
+            return existing
+        for attempt, url in enumerate(PEERJS_URLS):
             if self.closed:
                 raise asyncio.CancelledError()
-            peer_cls = getattr(window, 'Peer', None)
-            if peer_cls:
-                return peer_cls
-            await asyncio.sleep(0.1)
-        raise RuntimeError('Online library did not load. Check internet access.')
+            self.status = ('Loading online service...' if attempt == 0
+                           else 'Trying backup online service...')
+            script_id = PEERJS_SCRIPT_ID + '-' + str(attempt)
+            script = document.getElementById(script_id)
+            if script is None:
+                script = document.createElement('script')
+                script.id = script_id
+                script.src = url
+                script.async_ = True
+                document.head.appendChild(script)
+            # Nonblocking: keeps the Pygbag game loop alive.
+            for _ in range(90):
+                if self.closed:
+                    raise asyncio.CancelledError()
+                peer_class = getattr(window, 'Peer', None)
+                if peer_class:
+                    return peer_class
+                await asyncio.sleep(0.1)
+        raise RuntimeError('PeerJS unavailable. Check internet or CDN blocking')
+
+    def poll(self, now=None):
+        """Turns a stalled connection into actionable feedback on screen."""
+        import time
+        if self.closed or self.ready:
+            return
+        if now is None:
+            now = time.monotonic()
+        if (self.role == 'JOIN' and self._connect_started is not None
+                and not self._timeout_reported
+                and now - self._connect_started > CONNECTION_TIMEOUT):
+            self._timeout_reported = True
+            self.status = 'Timed out. Check code / Wi-Fi; go Back and retry.'
+            # A late connection can still succeed; _conn_open clears timeout.
+        elif (self._signaling_started is not None and self.peer is not None
+              and self._connect_started is None and not self._timeout_reported
+              and now - self._signaling_started > CONNECTION_TIMEOUT):
+            self._timeout_reported = True
+            self.status = 'Room server timeout. Check internet; retry.'
 
     def launch(self, role, animals):
         self.role = role
-        self.room_id = 'ttt-kidroom-' + '-'.join(ICON_NAMES[i] for i in animals)
+        self.room_id = 'gamehub-ttt-v2-' + '-'.join(ICON_NAMES[i].lower() for i in animals)
         self.job = asyncio.create_task(self._start())
 
     async def _start(self):
@@ -250,6 +293,8 @@ class PeerSession:
             peer_class = await self._load_sdk()
             if self.closed:
                 return
+            import time
+            self._signaling_started = time.monotonic()
             if self.role == 'CREATE':
                 self.peer = peer_class.new(self.room_id)
                 self.status = 'Opening room...'
@@ -271,10 +316,13 @@ class PeerSession:
         if self.closed:
             return
         if self.role == 'CREATE':
+            self._signaling_started = None
             self.status = 'Room ready! Waiting for friend...'
         else:
             self.status = 'Connecting to friend...'
             try:
+                import time
+                self._connect_started = time.monotonic()
                 conn = self.peer.connect(self.room_id)
                 self._attach_connection(conn)
             except Exception as exc:
@@ -307,12 +355,20 @@ class PeerSession:
             return
         self.ready = True
         self.status = 'Friend connected!'
+        self._ever_connected = True
+        self._timeout_reported = False
+        self._signaling_started = None
+        self._connect_started = None
         self.game.waiting_move = False
         if self.role == 'CREATE':
             self.send_state()
+        else:
+            # Avoid a lost initial state when the guest's open event arrives
+            # after the host's first state packet. Ask for an authoritative sync.
+            self.send({'type': 'hello', 'round': self.game.round_number})
 
     def _conn_data(self, raw):
-        if self.closed or not self.ready:
+        if self.closed:
             return
         try:
             raw = str(raw)
@@ -330,6 +386,9 @@ class PeerSession:
 
     def _host_message(self, message):
         game = self.game
+        if message.get('type') == 'hello':
+            self.send_state()
+            return
         if message.get('round') != game.round_number:
             self.send_state()
             return
@@ -424,14 +483,19 @@ class PeerSession:
         if code == 'unavailable-id':
             self.status = 'Room already in use. Choose another animal code.'
         elif code == 'peer-unavailable':
-            self.status = 'Room not found. Check the animal code.'
+            self.status = 'No room yet. Host must open same code first.'
+        elif code in ('network', 'server-error', 'socket-error', 'socket-closed'):
+            self.status = 'Cannot reach room server. Check network / retry.'
+        elif code in ('webrtc', 'browser-incompatible'):
+            self.status = 'WebRTC blocked. Try a different browser / network.'
         else:
             self.status = 'Online error: ' + (code or str(error))[:60]
         self.ready = False
+        self._timeout_reported = True
 
     def _peer_disconnected(self, *_):
         if not self.closed:
-            self.status = 'Network disconnected. Go back to retry.'
+            self.status = 'Room server disconnected. Go Back and retry.'
             self.ready = False
 
 
@@ -715,7 +779,7 @@ class TicTacToeGame:
                     status='Sending move...'
                 if self.net is not None and self.net.ready and not self.waiting_move:
                     status=('You are X (host)' if self.room_role=='CREATE' else 'You are O (guest)')
-                txt=font_btn_sub.render(status[:63],True,COLOR_GOLD if (self.net and not self.net.ready) else COLOR_TEXT)
+                txt=font_btn_sub.render(status[:65],True,COLOR_GOLD if (self.net and not self.net.ready) else COLOR_TEXT)
                 surf.blit(txt,txt.get_rect(center=(WIDTH//2,510 if self.winner is None else 446)))
         width,height=self.screen.get_size()
         if (width,height)==(WIDTH,HEIGHT):
@@ -733,6 +797,8 @@ class TicTacToeGame:
                         self.on_press(self.scaled_pos(event), event.type)
                     elif event.type==pygame.FINGERDOWN:
                         self.on_press(self.scaled_pos(event), event.type)
+                if self.net is not None:
+                    self.net.poll()
                 self.draw()
                 pygame.display.flip()
                 self.clock.tick(60)
