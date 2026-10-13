@@ -2,7 +2,7 @@
 """Kiddie Tic-Tac-Toe for GameHub (Pygame-ce / Pygbag).
 
 One-screen kids' UI, solo AI, local two-player, and browser-only PeerJS rooms.
-Version 2.1.4 fixes PeerJS detection, local-first loading, and load diagnostics.
+Version 2.1.5 fixes the Firefox/Pyodide browser loader state bridge.
 
 Integration: GameHub calls ``await main(screen, clock)``.
 Importing this module has no side effects. Returning from main() restores GameHub.
@@ -251,14 +251,54 @@ class PeerSession:
             raise RuntimeError('Browser JavaScript eval unavailable')
         return js_eval(source)
 
+    @staticmethod
+    def _js_text(value, default=''):
+        """Safely extract a JS primitive without assuming it is a Python str.
+
+        Browser/Pyodide builds sometimes expose JS strings through proxy
+        wrappers.  In particular, ``isinstance(js_value, str)`` is not a
+        reliable test of a string returned from the browser bridge.
+        """
+        if value is None:
+            return default
+        if isinstance(value, str):
+            return value
+        # Conversion works for JsProxy values in Pyodide. If the object has
+        # no converter, str(proxy) calls the JS toString implementation.
+        try:
+            convert = getattr(value, 'to_py', None)
+            if convert is not None and callable(convert):
+                converted = convert()
+                if converted is not None and converted is not value:
+                    return str(converted)
+        except Exception:
+            pass
+        return str(value)
+
     @classmethod
     def _has_peerjs(cls):
-        """Return a Python bool; never compare JS Boolean proxies using `is True`."""
-        return cls._browser_eval("""(function () {
-            return (typeof window !== 'undefined' &&
-               ((window.peerjs && typeof window.peerjs.Peer === 'function') ||
-                typeof window.Peer === 'function')) ? 'ready' : 'missing';
-        })()""") == 'ready'
+        """Inspect browser globals directly; no fragile eval string compare.
+
+        Avoid truth tests on JsProxy objects: Pyodide can attempt ``len()``.
+        The PeerJS UMD build may export either window.Peer or
+        window.peerjs.Peer, depending on the build.
+        """
+        from js import window
+        for candidate in (getattr(window, 'Peer', None),):
+            if candidate is not None:
+                js_type = getattr(candidate, 'typeof', None)
+                if (cls._js_text(js_type) == 'function' or
+                        (js_type is None and callable(candidate))):
+                    return True
+        namespace = getattr(window, 'peerjs', None)
+        if namespace is not None:
+            candidate = getattr(namespace, 'Peer', None)
+            if candidate is not None:
+                js_type = getattr(candidate, 'typeof', None)
+                if (cls._js_text(js_type) == 'function' or
+                        (js_type is None and callable(candidate))):
+                    return True
+        return False
 
     @classmethod
     def _start_sdk_loader(cls):
@@ -342,14 +382,22 @@ class PeerSession:
 
     @classmethod
     def _sdk_status(cls):
-        """Return [status, detail] as JSON from JS, not unwrapped proxies."""
-        raw = cls._browser_eval("""JSON.stringify(
-          window.__gamehubTttPeerLoader ||
-          {status:'missing',detail:'loader not started'})""")
-        if not isinstance(raw, str):
-            raise RuntimeError('Cannot read browser SDK loader state')
-        state = json.loads(raw)
-        return state.get('status','missing'), state.get('detail','')
+        """Read the JS loader object directly (Firefox/Pyodide-safe).
+
+        Old code used ``JSON.stringify(...)`` through js.eval, then rejected
+        the result unless ``isinstance(raw, str)``. Firefox/Pyodide can hand
+        back a JS proxy even for a string; the check then failed before any
+        CDN/local-file diagnostic was available. This avoids eval entirely.
+        """
+        from js import window
+        state = getattr(window, '__gamehubTttPeerLoader', None)
+        if state is None:
+            return 'missing', 'loader not started in game frame'
+        if isinstance(state, dict):
+            return (cls._js_text(state.get('status'), 'missing'),
+                    cls._js_text(state.get('detail')))
+        return (cls._js_text(getattr(state, 'status', None), 'missing'),
+                cls._js_text(getattr(state, 'detail', None)))
 
     async def _load_sdk(self):
         """Detect preloaded library; try local file then CDNs with diagnostics."""
@@ -361,7 +409,7 @@ class PeerSession:
             return
         self._start_sdk_loader()
         # JS attempts local + 2 x CDN, each with 8.5s timeout.
-        for _ in range(290):
+        for attempt in range(290):
             if self.closed:
                 raise asyncio.CancelledError()
             if self._has_peerjs():
@@ -371,6 +419,8 @@ class PeerSession:
                 if not self._has_peerjs():
                     raise RuntimeError('Script loaded but constructor not found')
                 return
+            if status == 'missing' and attempt >= 10:
+                raise RuntimeError('Browser loader state missing after start; check generated HTML and JS console')
             if status == 'failed':
                 raise RuntimeError('PeerJS sources failed: ' + detail)
             if detail:
@@ -425,7 +475,7 @@ class PeerSession:
     async def _start(self):
         stage = 'loading PeerJS'
         try:
-            self.status = 'Online v2.1.4: checking PeerJS...'
+            self.status = 'Online v2.1.5: checking PeerJS...'
             await self._load_sdk()
             if self.closed:
                 return
@@ -455,7 +505,7 @@ class PeerSession:
             return
         if self.role == 'CREATE':
             self._signaling_started = None
-            self.status = 'Room ready (v2.1.4)! Waiting for friend...'
+            self.status = 'Room ready (v2.1.5)! Waiting for friend...'
         else:
             self.status = 'Connecting to friend...'
             try:
