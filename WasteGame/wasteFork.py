@@ -4,10 +4,12 @@
 Retains the original GameHub entry point ``await main(screen, clock)`` and
 loads the existing forklift, pallet, floor and Home button artwork.
 
-Hold mouse/touch to drive toward the pointer. A pallet is collected when the
-fork tips touch it. Release inside the marked bay, or press Space/Up, to drop.
-Driving to the centre of the bay also automatically unloads after a short
-hold. The level ends on a results screen; it does not auto-advance.
+Hold mouse/touch to drive. Touch/click within 20 degrees of directly behind
+the forklift to reverse without turning around. Pallets are picked up when
+the forks reach them, then remain rigidly attached and rotate with the forks.
+To place a pallet, position the fork tips in the green bay and explicitly
+tap DROP PALLET (or press Space/Up). Releasing the pointer does NOT unload it.
+Level results require a deliberate NEXT LEVEL action.
 """
 import asyncio
 import math
@@ -85,12 +87,16 @@ class Pallet:
         self.dx = 0.0
         self.dy = 0.0
         self.accuracy = 0.0
+        self.angle = 0.0  # Facing when carried / when manually set down.
 
 
 class ForkGame:
     HOME = pygame.Rect(10, 10, 100, 100)
     NEXT = pygame.Rect(245, 446, 310, 66)
     AGAIN = pygame.Rect(310, 522, 180, 40)
+    DROP = pygame.Rect(594, 541, 194, 48)
+    REVERSE_HALF_ANGLE = 20.0
+    POINTER_TURN_SPEED = 420.0  # degrees/s; smooth instead of instant 180-degree snaps
 
     def __init__(self, screen, clock):
         self.screen, self.clock = screen, clock
@@ -116,6 +122,9 @@ class ForkGame:
         self.f_medium = pygame.font.Font(None, 40)
         self.f_large = pygame.font.Font(None, 84)
         self.rotation_cache = {}
+        self.carry_rotation_cache = {}
+        self.stack_rotation_cache = {}
+        self.ignore_mouse_until = 0  # Suppress synthetic mouse events after finger events.
         self.running = True
         self.dragging = False
         self.pointer = (0, 0)
@@ -129,14 +138,14 @@ class ForkGame:
         self.state = 'PLAYING'
         self.dragging = False
         self.carried = None
-        self.near_target_secs = 0.0
+        # Unloading is manual: there is no bay auto-drop timer.
         self.elapsed = 0.0
         self.tier = None
         self.bonus = 0
         self.level_score = 0
         self.streak = 0
         self.total_alignment = 0.0
-        self.message = 'HOLD MOUSE / TOUCH TO DRIVE  •  LIFT AT THE FORKS'
+        self.message = 'HOLD TO DRIVE  •  TOUCH BEHIND TO REVERSE  •  DROP MANUALLY'
         self.message_time = 6.0
         self.target = (pygame.Rect(600, 385, 150, 150)
                        if self.level % 2 else pygame.Rect(72, 125, 150, 150))
@@ -187,8 +196,9 @@ class ForkGame:
             return False
         self.carried = pallet
         pallet.state = 'carried'
-        self.near_target_secs = 0.0
-        self.note('PALLET LIFTED  •  GUIDE IT TO THE GREEN BAY')
+        pallet.angle = self.angle
+        pallet.x, pallet.y = self.fork_tip()
+        self.note('PALLET ON FORKS  •  TAP DROP PALLET INSIDE THE BAY')
         return True
 
     def drop(self):
@@ -205,6 +215,8 @@ class ForkGame:
         self.carried = None
         pallet.state = 'stacked'
         pallet.level_index = len(self.stack)
+        pallet.angle = self.angle  # Preserve physical orientation at manual set-down.
+        pallet.x, pallet.y = x, y
         # Visible placement error, limited so the column cannot hover in air.
         pallet.dx = max(-14.0, min(14.0, (x-tx)*0.32))
         pallet.dy = max(-11.0, min(11.0, (y-ty)*0.28))
@@ -220,7 +232,6 @@ class ForkGame:
         neat = round(170 * pallet.accuracy)
         combo = min(150, max(0, self.streak - 1) * 30)
         self.level_score += base + neat + combo
-        self.near_target_secs = 0.0
         self.note(f'+{base + neat + combo}  •  ALIGNMENT {round(pallet.accuracy*100)}%')
         if self.placed == self.quantity:
             self.finish_level()
@@ -246,49 +257,76 @@ class ForkGame:
         self.total_score += self.level_score
         self.dragging = False
 
+    @staticmethod
+    def _angle_delta(destination, origin):
+        """Shortest signed turn from origin to destination, in degrees."""
+        return (destination - origin + 180.0) % 360.0 - 180.0
+
+    @staticmethod
+    def _rotated(surface, angle, cache):
+        # Shared 4-degree quantization keeps the pallet and forklift in sync.
+        key = int(round(angle / 4.0) * 4) % 360
+        if key not in cache:
+            cache[key] = pygame.transform.rotate(surface, key)
+        return cache[key]
+
     def _sprite(self):
-        # Rotation quantization avoids allocating a new rotated surface every frame.
-        key = round(self.angle / 4.0) * 4 % 360
-        if key not in self.rotation_cache:
-            self.rotation_cache[key] = pygame.transform.rotate(self.fork_image, key)
-        return self.rotation_cache[key]
+        return self._rotated(self.fork_image, self.angle, self.rotation_cache)
+
+    def _carry_sprite(self):
+        return self._rotated(self.carry_image, self.angle, self.carry_rotation_cache)
 
     def _move(self, dt):
         keys = pygame.key.get_pressed()
-        turn = (keys[pygame.K_a] or keys[pygame.K_LEFT]) - (keys[pygame.K_d] or keys[pygame.K_RIGHT])
-        throttle = (keys[pygame.K_w]) - (keys[pygame.K_s] or keys[pygame.K_DOWN])
+        turn = int(bool(keys[pygame.K_a] or keys[pygame.K_LEFT])) - int(bool(keys[pygame.K_d] or keys[pygame.K_RIGHT]))
+        throttle = int(bool(keys[pygame.K_w])) - int(bool(keys[pygame.K_s] or keys[pygame.K_DOWN]))
         if turn:
-            self.angle = (self.angle + float(turn)*145*dt) % 360
+            self.angle = (self.angle + turn * 145.0 * dt) % 360.0
         if throttle:
             rad = math.radians(self.angle)
-            self.truck_x += math.cos(rad)*205*dt*throttle
-            self.truck_y -= math.sin(rad)*205*dt*throttle
+            self.truck_x += math.cos(rad) * 205.0 * dt * throttle
+            self.truck_y -= math.sin(rad) * 205.0 * dt * throttle
         elif self.dragging:
-            dx, dy = self.pointer[0]-self.truck_x, self.pointer[1]-self.truck_y
-            d = math.hypot(dx,dy)
-            # Carrying a pallet: the pointer designates where the FORKS go.
-            # Otherwise the pointer steers the forklift's centre. This makes
-            # auto-unloading at the bay centre reliable, not a timed pixel hunt.
-            stop_distance = 114 if self.carried is not None else 10
-            if d > stop_distance:
-                self.angle = math.degrees(math.atan2(-dy,dx))%360
-                step = min(d-stop_distance, 225*dt)
-                self.truck_x += step*dx/d
-                self.truck_y += step*dy/d
-        self.truck_x = max(36, min(764, self.truck_x))
-        self.truck_y = max(102, min(563, self.truck_y))
+            dx = self.pointer[0] - self.truck_x
+            dy = self.pointer[1] - self.truck_y
+            distance = math.hypot(dx, dy)
+            if distance > 1.0:
+                pointer_heading = math.degrees(math.atan2(-dy, dx)) % 360.0
+                relative = self._angle_delta(pointer_heading, self.angle)
+
+                # Finger behind the truck (within +/-20 degrees): BACK UP.
+                # Steer slightly toward the finger, but never turn 180 degrees.
+                reversing = abs(relative) >= 180.0 - self.REVERSE_HALF_ANGLE
+                desired_heading = ((pointer_heading + 180.0) % 360.0
+                                   if reversing else pointer_heading)
+                correction = self._angle_delta(desired_heading, self.angle)
+                max_turn = self.POINTER_TURN_SPEED * dt
+                self.angle = (self.angle + max(-max_turn, min(max_turn, correction))) % 360.0
+
+                # For forward driving, the touch point is the destination for
+                # the forklift (empty) or its fork tips (carrying a pallet).
+                # Reversing targets the rear of the chassis, not the forks.
+                stop_distance = (36.0 if reversing else
+                                 114.0 if self.carried is not None else 10.0)
+                if distance > stop_distance:
+                    speed = 170.0 if reversing else 225.0
+                    step = min(distance - stop_distance, speed * dt)
+                    rad = math.radians(self.angle)
+                    direction = -1.0 if reversing else 1.0
+                    self.truck_x += math.cos(rad) * step * direction
+                    self.truck_y -= math.sin(rad) * step * direction
+
+        self.truck_x = max(36.0, min(764.0, self.truck_x))
+        self.truck_y = max(102.0, min(563.0, self.truck_y))
         if self.carried is None:
             if self.dragging or throttle:
                 self.pickup()
         else:
-            tx, ty = self.target.center
-            x, y = self.fork_tip()
-            if math.hypot(x-tx, y-ty) < 20:
-                self.near_target_secs += dt
-                if self.near_target_secs >= 0.30:
-                    self.drop()
-            else:
-                self.near_target_secs = 0.0
+            # The pallet is fixed to the forks, with the SAME orientation as
+            # the truck. Never independently steer or translate the pallet.
+            self.carried.x, self.carried.y = self.fork_tip()
+            self.carried.angle = self.angle
+            # Intentionally NO automatic drop (neither on arrival nor on stop).
 
     def update(self, dt):
         if self.state != 'PLAYING':
@@ -305,6 +343,13 @@ class ForkGame:
                 (y-self.scale_area.y)*H/max(1,self.scale_area.height))
 
     def handle_event(self, event):
+        if event.type in (pygame.FINGERDOWN, pygame.FINGERMOTION, pygame.FINGERUP):
+            # Browsers may synthesize mouse events from touch. A second input
+            # must not accidentally drive after tapping the on-screen button.
+            self.ignore_mouse_until = pygame.time.get_ticks() + 500
+        elif event.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP, pygame.MOUSEMOTION):
+            if pygame.time.get_ticks() < self.ignore_mouse_until:
+                return
         if event.type == pygame.QUIT:
             self.running = False
         elif event.type == pygame.KEYDOWN:
@@ -330,6 +375,10 @@ class ForkGame:
             pos = self.to_world((event.x,event.y) if touch else event.pos, touch)
             if self.HOME.collidepoint(pos):
                 self.running = False
+            elif self.state == 'PLAYING' and self.carried is not None and self.DROP.collidepoint(pos):
+                # A separate touch target is essential on phones, which have no Space key.
+                self.drop()
+                return  # Do not begin driving while pressing DROP PALLET.
             elif self.state == 'RESULTS':
                 if self.NEXT.collidepoint(pos):
                     self.level += 1
@@ -356,10 +405,7 @@ class ForkGame:
                 self.touch_id = None
             elif self.touch_id is not None:
                 return   # browser-synthesized mouse after a touch
-            if self.dragging and self.carried is not None:
-                x, y = self.fork_tip()
-                if math.hypot(x-self.target.centerx,y-self.target.centery) <= 58:
-                    self.drop()
+            # Letting go only stops driving. Unloading requires DROP or Space/Up.
             self.dragging = False
 
     def draw(self):
@@ -388,15 +434,27 @@ class ForkGame:
             y = round(self.target.centery + pallet.dy - i*12)
             pygame.draw.rect(surf,(92,70,47),(x-43,y-40,86,90),border_radius=5)
             pygame.draw.rect(surf,(66,47,34),(x-43,y+36,86,10),border_radius=3)
-            surf.blit(self.pallet_image,self.pallet_image.get_rect(center=(x,y)))
+            image = self._rotated(self.pallet_image, pallet.angle, self.stack_rotation_cache)
+            surf.blit(image, image.get_rect(center=(x, y)))
         sprite = self._sprite()
         surf.blit(sprite,sprite.get_rect(center=(round(self.truck_x),round(self.truck_y))))
         if self.carried is not None:
-            x,y = self.fork_tip()
-            shadow = pygame.Rect(0,0,82,16)
-            shadow.center=(round(x),round(y)+27)
-            pygame.draw.ellipse(surf,(62,57,52),shadow)
-            surf.blit(self.carry_image,self.carry_image.get_rect(center=(round(x),round(y)-8)))
+            x, y = self.fork_tip()
+            shadow = pygame.Rect(0, 0, 82, 16)
+            shadow.center = (round(x), round(y) + 27)
+            pygame.draw.ellipse(surf, (62, 57, 52), shadow)
+            image = self._carry_sprite()
+            surf.blit(image, image.get_rect(center=(round(x), round(y))))
+        if self.state == 'PLAYING' and self.carried is not None:
+            # Always-visible manual lowering control for both mouse and touch.
+            x, y = self.fork_tip()
+            can_drop = math.hypot(x - self.target.centerx, y - self.target.centery) <= 58
+            color = (35, 165, 104) if can_drop else (65, 78, 81)
+            pygame.draw.rect(surf, (13, 24, 29), self.DROP.move(0, 3), border_radius=11)
+            pygame.draw.rect(surf, color, self.DROP, border_radius=11)
+            pygame.draw.rect(surf, (177, 242, 199) if can_drop else (183, 195, 192),
+                             self.DROP, 2, border_radius=11)
+            _draw_text(surf, self.f_small, 'DROP PALLET', self.DROP.center)
         # Dark HUD improves readability on the existing floor artwork.
         pygame.draw.rect(surf,(27,42,48),pygame.Rect(111,10,678,82),border_radius=12)
         pygame.draw.rect(surf,(96,170,137),pygame.Rect(111,10,678,82),2,border_radius=12)
