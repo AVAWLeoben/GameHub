@@ -2,7 +2,7 @@
 """Kiddie Tic-Tac-Toe for GameHub (Pygame-ce / Pygbag).
 
 One-screen kids' UI, solo AI, local two-player, and browser-only PeerJS rooms.
-Version 2.1.6 fixes Firefox/Pyodide PeerJS constructor bridging.
+Version 2.1.7 moves PeerJS callbacks entirely into JavaScript; no pyodide.ffi needed.
 
 Integration: GameHub calls ``await main(screen, clock)``.
 Importing this module has no side effects. Returning from main() restores GameHub.
@@ -203,47 +203,148 @@ class PeerSession:
         if self.job and not self.job.done():
             self.job.cancel()
         self.job = None
-        if self.connection is not None:
-            try:
-                self.connection.close()
-            except Exception:
-                pass
-            self.connection = None
-        if self.peer is not None:
-            try:
-                self.peer.destroy()
-            except Exception:
-                pass
-            self.peer = None
-        # Clear the temporary browser global on exit/retry as well.
+        # Disconnect the browser-managed event bridge without a Python->JS
+        # callback or a JsProxy method call. Both can vary across Pyodide builds.
         try:
-            from js import window
-            setattr(window, '__gamehubTttActivePeer', None)
+            self._browser_eval("""(function(){
+              const bridge = window.__gamehubTttBridge;
+              if (bridge) {
+                bridge.disposed = true;
+                try { if (bridge.connection) bridge.connection.close(); } catch(e) {}
+                try { if (bridge.peer) bridge.peer.destroy(); } catch(e) {}
+              }
+              window.__gamehubTttBridge = null;
+              window.__gamehubTttActivePeer = null;
+              window.__gamehubTttEventsJSON = '[]';
+            })()""")
         except Exception:
             pass
-        for proxy in self.proxies:
-            try:
-                proxy.destroy()
-            except Exception:
-                pass
+        self.peer = None
+        self.connection = None
         self.proxies.clear()
 
-    def _listen(self, emitter, name, handler):
-        """Keep each Pyodide callback alive until the room closes."""
+    def _install_browser_events(self):
+        """Register JS-native listeners and queue JSON events for Python polling.
+
+        This does NOT import pyodide.ffi/create_proxy. The JS listeners exist
+        for the duration of the PeerJS session, and browser-side connection
+        creation, callbacks, and sending require no Python JsProxy callability.
+        """
+        host_flag = 'true' if self.role == 'CREATE' else 'false'
+        room_id = json.dumps(self.room_id)
+        script = """(function() {
+          const peer = window.__gamehubTttActivePeer;
+          if (!peer || typeof peer.on !== 'function') {
+            throw new Error('PeerJS instance has no event API');
+          }
+          const state = {
+            peer: peer, connection: null, disposed: false, events: []
+          };
+          window.__gamehubTttBridge = state;
+          window.__gamehubTttEventsJSON = '[]';
+          function emit(kind, data) {
+            if (state.disposed) return;
+            if (state.events.length >= 128) state.events.shift();
+            state.events.push({kind: kind, data: data === undefined ? null : data});
+          }
+          function errorCode(error) {
+            return String(error && (error.type || error.message) || error || 'unknown');
+          }
+          function attach(conn) {
+            if (!conn || typeof conn.on !== 'function') {
+              emit('conn_error', 'Missing PeerJS data-connection API');
+              return;
+            }
+            if (state.connection && state.connection !== conn) {
+              try { conn.close(); } catch (e) {}
+              return;
+            }
+            state.connection = conn;
+            let opened = false;
+            function openedOnce() {
+              if (opened || state.disposed) return;
+              opened = true;
+              emit('conn_open');
+            }
+            conn.on('open', openedOnce);
+            conn.on('data', data => {
+              try {
+                emit('conn_data', typeof data === 'string' ? data : JSON.stringify(data));
+              } catch(e) { emit('conn_error', 'Cannot serialize incoming data'); }
+            });
+            conn.on('close', () => {
+              if (state.connection === conn) state.connection = null;
+              emit('conn_close');
+            });
+            conn.on('error', error => emit('conn_error', errorCode(error)));
+            if (conn.open === true) openedOnce();
+          }
+          peer.on('open', id => {
+            emit('peer_open', String(id));
+            if (!__HOST__) {
+              try {
+                const conn = peer.connect(__ROOM__);
+                attach(conn);
+              } catch (error) {
+                emit('connect_error', errorCode(error));
+              }
+            }
+          });
+          peer.on('error', error => emit('peer_error', errorCode(error)));
+          peer.on('disconnected', () => emit('peer_disconnected'));
+          if (__HOST__) {
+            peer.on('connection', conn => attach(conn));
+          }
+          // If PeerJS opened in the interval before listener installation,
+          // process that state once. PeerJS normally opens asynchronously.
+          if (peer.open === true && peer.id) {
+            emit('peer_open', String(peer.id));
+            if (!__HOST__ && state.connection === null) {
+              try { attach(peer.connect(__ROOM__)); }
+              catch(error) { emit('connect_error', errorCode(error)); }
+            }
+          }
+        })()""".replace('__HOST__', host_flag).replace('__ROOM__', room_id)
+        self._browser_eval(script)
+
+    def _drain_browser_events(self):
+        """Read one JSON batch with no Python-side JS callback registration."""
         try:
-            from pyodide.ffi import create_proxy
-        except (ImportError, AttributeError) as exc:
-            raise RuntimeError('Pyodide callback bridge unavailable') from exc
-        if not callable(create_proxy):
-            raise RuntimeError('Pyodide create_proxy is not callable')
-        proxy = create_proxy(handler)
-        self.proxies.append(proxy)
-        # Calling a missing JS event method can otherwise surface only as
-        # the unhelpful 'NoneType object is not callable' in the game UI.
-        callback_registration = getattr(emitter, 'on', None)
-        if callback_registration is None or not callable(callback_registration):
-            raise RuntimeError('PeerJS listener API missing: ' + name)
-        callback_registration(name, proxy)
+            self._browser_eval("""(function() {
+              const bridge = window.__gamehubTttBridge;
+              window.__gamehubTttEventsJSON = JSON.stringify(
+                bridge && !bridge.disposed ? bridge.events.splice(0, 128) : []
+              );
+            })()""")
+            from js import window
+            raw = self._js_text(getattr(window, '__gamehubTttEventsJSON', '[]'), '[]')
+            events = json.loads(raw)
+            if not isinstance(events, list):
+                raise ValueError('Event queue was not a JSON array')
+            for event in events:
+                if self.closed or not isinstance(event, dict):
+                    break
+                kind, data = event.get('kind'), event.get('data')
+                if kind == 'peer_open':
+                    self._peer_open(data)
+                elif kind == 'peer_error':
+                    self._peer_error(data)
+                elif kind == 'peer_disconnected':
+                    self._peer_disconnected()
+                elif kind == 'conn_open':
+                    self._conn_open()
+                elif kind == 'conn_data' and isinstance(data, str):
+                    self._conn_data(data)
+                elif kind == 'conn_close':
+                    self._conn_close()
+                elif kind == 'conn_error':
+                    self._conn_error(data)
+                elif kind == 'connect_error':
+                    self.status = 'Cannot connect: ' + str(data)[:76]
+        except Exception as exc:
+            if not self.closed:
+                self.status = ('Reading online events: ' + type(exc).__name__ +
+                               ': ' + str(exc))[:190]
 
     @staticmethod
     def _browser_eval(source):
@@ -464,7 +565,11 @@ class PeerSession:
     def poll(self, now=None):
         """Turns a stalled connection into actionable feedback on screen."""
         import time
-        if self.closed or self.ready:
+        if self.closed:
+            return
+        if self.peer is not None:
+            self._drain_browser_events()
+        if self.ready:
             return
         if now is None:
             now = time.monotonic()
@@ -488,7 +593,7 @@ class PeerSession:
     async def _start(self):
         stage = 'loading PeerJS'
         try:
-            self.status = 'Online v2.1.6: checking PeerJS...'
+            self.status = 'Online v2.1.7: checking PeerJS...'
             await self._load_sdk()
             if self.closed:
                 return
@@ -498,12 +603,8 @@ class PeerSession:
             self.peer = self._construct_peer()
             self.status = ('Opening room...' if self.role == 'CREATE'
                            else 'Finding friend...')
-            stage = 'attaching PeerJS events'
-            self._listen(self.peer, 'open', self._peer_open)
-            self._listen(self.peer, 'error', self._peer_error)
-            self._listen(self.peer, 'disconnected', self._peer_disconnected)
-            if self.role == 'CREATE':
-                self._listen(self.peer, 'connection', self._incoming_connection)
+            stage = 'installing browser event queue'
+            self._install_browser_events()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -518,43 +619,19 @@ class PeerSession:
             return
         if self.role == 'CREATE':
             self._signaling_started = None
-            self.status = 'Room ready (v2.1.6)! Waiting for friend...'
+            self.status = 'Room ready (v2.1.7)! Waiting for friend...'
         else:
             self.status = 'Connecting to friend...'
-            try:
-                import time
-                self._connect_started = time.monotonic()
-                conn = self.peer.connect(self.room_id)
-                self._attach_connection(conn)
-            except Exception as exc:
-                self.status = 'Cannot connect: ' + str(exc)[:70]
-
-    def _incoming_connection(self, conn):
-        if self.closed:
-            try:
-                conn.close()
-            except Exception:
-                pass
-            return
-        if self.connection is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
-            return
-        self._attach_connection(conn)
-
-    def _attach_connection(self, conn):
-        self.connection = conn
-        self._listen(conn, 'open', self._conn_open)
-        self._listen(conn, 'data', self._conn_data)
-        self._listen(conn, 'close', self._conn_close)
-        self._listen(conn, 'error', self._conn_error)
+            import time
+            self._connect_started = time.monotonic()
+            # Guest peer.connect() already ran in JS and its events are queued.
 
     def _conn_open(self, *_):
         if self.closed:
             return
         self.ready = True
+        # JS owns the real connection. A sentinel is enough for Python state.
+        self.connection = True
         self.status = 'Friend connected!'
         self._ever_connected = True
         self._timeout_reported = False
@@ -634,16 +711,34 @@ class PeerSession:
         self.status = 'Connected'
 
     def send(self, payload):
-        if not self.ready or self.connection is None:
+        if not self.ready:
             return False
         try:
             data = dict(payload)
             data['v'] = PROTOCOL_VERSION
-            self.connection.send(json.dumps(data, separators=(',', ':')))
+            raw = json.dumps(data, separators=(',', ':'))
+            # Browser owns the DataConnection; avoid JsProxy.send() as well.
+            self._browser_eval("""(function() {
+              window.__gamehubTttSendError = '';
+              const bridge = window.__gamehubTttBridge;
+              if (!bridge || bridge.disposed || !bridge.connection ||
+                  bridge.connection.open !== true) {
+                window.__gamehubTttSendError = 'Connection is not open';
+                return;
+              }
+              try { bridge.connection.send(__DATA__); }
+              catch (error) {
+                window.__gamehubTttSendError = String(error);
+              }
+            })()""".replace('__DATA__', json.dumps(raw)))
+            from js import window
+            err = self._js_text(getattr(window, '__gamehubTttSendError', ''))
+            if err:
+                raise RuntimeError(err)
             return True
-        except Exception:
+        except Exception as exc:
             self.ready = False
-            self.status = 'Connection lost. Go back to retry.'
+            self.status = 'Connection send failed: ' + str(exc)[:80]
             return False
 
     def send_state(self):
@@ -680,7 +775,7 @@ class PeerSession:
     def _peer_error(self, error=None):
         if self.closed:
             return
-        code = str(getattr(error, 'type', ''))
+        code = error if isinstance(error, str) else str(getattr(error, 'type', ''))
         if code == 'unavailable-id':
             self.status = 'Room already in use. Choose another animal code.'
         elif code == 'peer-unavailable':
