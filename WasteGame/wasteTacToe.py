@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """WasteTacToe / GameHub — Firebase online multiplayer, 3-animal room codes.
 
-Version 3.0.0: replaces PeerJS/WebRTC with Firebase Auth + Realtime Database.
+Version 3.0.1: persistent rooms, verified creation and resilient joining.
 The existing children's interface, one-player AI and shared-device play stay intact.
 Requires Firebase anonymous sign-in and the shipped RTDB security rules to be enabled.
 GameHub calls ``await main(screen, clock)``; importing is side-effect free.
@@ -43,7 +43,7 @@ FIREBASE_BRIDGE_SCRIPT = r'''(function () {
   const s = {
     disposed: false, uid: null, role, roomCode, queue: [], room: null,
     busy: false, ready: false, ref: null, cancelListen: null,
-    disconnectGuard: null, firebase: null, close: null, move: null,
+    firebase: null, close: null, move: null,
     restart: null, pending: false
   };
   window.__ghTttFirebase = s;
@@ -104,11 +104,7 @@ FIREBASE_BRIDGE_SCRIPT = r'''(function () {
     // End the old room only if the current user still owns that seat.
     // The transaction check prevents deleting a room reused by someone else.
     if (s.ref && s.uid && s.firebase) {
-      const {runTransaction, onDisconnect} = s.firebase;
-      if (s.disconnectGuard) {
-        Promise.resolve(s.disconnectGuard.cancel()).catch(() => {});
-        s.disconnectGuard = null;
-      }
+      const {runTransaction} = s.firebase;
       runTransaction(s.ref, old => {
         if (!old || !member(old)) return;
         if (s.role === 'CREATE') return null;
@@ -175,34 +171,71 @@ FIREBASE_BRIDGE_SCRIPT = r'''(function () {
       s.firebase = dbSdk;
       const database = dbSdk.getDatabase(app, config.databaseURL);
       s.ref = dbSdk.ref(database, 'tttRooms/' + roomCode);
-      emit('status', role === 'CREATE' ? 'Creating room...' : 'Finding room...');
+      emit('status', role === 'CREATE' ? 'Creating room...' : 'Looking for room...');
       if (role === 'CREATE') {
         const outcome = await dbSdk.runTransaction(s.ref, old => {
-          if (fresh(old)) return;  // do not steal another active room
+          if (fresh(old)) return;  // never steal a live room
           return initialRoom(s.uid);
         }, {applyLocally: false});
-        if (!outcome.committed) throw new Error('Room already used. Choose another three animals.');
+        if (!outcome.committed) {
+          throw new Error('Code already in use. Choose another three animals.');
+        }
+        // Don't claim the room exists until a separate server read confirms it.
+        const verify = (await dbSdk.get(s.ref)).val();
+        if (!fresh(verify) || verify.hostUid !== s.uid) {
+          throw new Error('Room was not saved on the server. Check Database Rules and retry.');
+        }
+        emit('status', 'Room created on server. Waiting for friend...');
       } else {
-        const outcome = await dbSdk.runTransaction(s.ref, old => {
-          if (!fresh(old) || old.hostUid === s.uid ||
-              (old.guestUid && old.guestUid !== s.uid)) return;
-          return {...old, guestUid: s.uid, expiresAt: due()};
-        }, {applyLocally: false});
-        if (!outcome.committed) throw new Error('Room not available. Ask friend to create it first.');
+        // The host may still be completing anonymous sign-in / room creation.
+        // Waiting briefly avoids treating that normal startup race as a failure.
+        const end = Date.now() + 20000;
+        let joined = false;
+        while (!s.disposed && Date.now() < end) {
+          let existing;
+          try {
+            existing = (await dbSdk.get(s.ref)).val();
+          } catch (error) {
+            // A permissions failure is not a missing room; show the real error.
+            fail('reading room', error);
+            return;
+          }
+          if (!fresh(existing)) {
+            emit('status', 'Waiting for creator to finish setting up room...');
+            await new Promise(resolve => setTimeout(resolve, 1300));
+            continue;
+          }
+          if (existing.hostUid === s.uid) {
+            throw new Error('Both devices use the same guest account. Try separate browsers.');
+          }
+          if (existing.guestUid && existing.guestUid !== s.uid) {
+            throw new Error('Room already has two players. Choose a different code.');
+          }
+          const outcome = await dbSdk.runTransaction(s.ref, old => {
+            if (!fresh(old) || old.hostUid === s.uid ||
+                (old.guestUid && old.guestUid !== s.uid)) return;
+            return {...old, guestUid: s.uid, expiresAt: due()};
+          }, {applyLocally: false});
+          if (outcome.committed) {
+            const confirmed = (await dbSdk.get(s.ref)).val();
+            if (fresh(confirmed) && confirmed.guestUid === s.uid) {
+              joined = true;
+              break;
+            }
+          }
+          emit('status', 'Room changed while joining. Retrying...');
+          await new Promise(resolve => setTimeout(resolve, 1300));
+        }
+        if (s.disposed) return;
+        if (!joined) {
+          throw new Error('No active room found. On device 1, wait for "Room created on server" before joining.');
+        }
+        emit('status', 'Joined room on server. Syncing board...');
       }
       if (s.disposed) return;
-      // Clear the host's room / guest's seat when the browser disconnects.
-      const guardRef = role === 'CREATE' ? s.ref : dbSdk.child(s.ref, 'guestUid');
-      s.disconnectGuard = dbSdk.onDisconnect(guardRef);
-      try {
-        if (role === 'CREATE') await s.disconnectGuard.remove();
-        else await s.disconnectGuard.remove();
-      } catch (error) {
-        // Presence cleanup is a convenience; rule denial should not block play.
-        emit('notice', 'Offline cleanup unavailable; rooms expire automatically.');
-      }
-      if (s.disposed) return;
-      emit('status', role === 'CREATE' ? 'Waiting for friend...' : 'Joining room...');
+      // DO NOT use onDisconnect.remove() on the room: mobile/iPad tabs can
+      // disconnect briefly while backgrounded, deleting a room before joining.
+      // Explicit Back/HOME cleans up seats; abandoned rooms expire automatically.
       s.cancelListen = dbSdk.onValue(s.ref, snap => {
         if (!s.disposed) publish(snap.val());
       }, error => fail('watching room', error));
