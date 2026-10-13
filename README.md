@@ -1,27 +1,23 @@
-# WasteTacToe 2.1.5 — Firefox browser loader-state fix
+# WasteTacToe 2.1.6 — Firefox PeerJS constructor fix
 
 ## Install
 
-Copy `WasteGame/wasteTacToe.py` into the matching location in the GameHub GitHub repository, replacing the existing file. Wait for GitHub Pages deployment, then open a fresh private tab on both devices.
+Replace **only** `WasteGame/wasteTacToe.py` in your GameHub repository with the supplied file. Keep the 2.1.4 web-build PeerJS preload changes, if already installed. No modifications to `main.py` or the GitHub workflow are needed.
 
-This is a one-file Python patch. The **previous 2.1.4 build-script preload update** may remain in place; no additional changes to `build_itch.py`, `verify_web_build.py`, or the GitHub Actions workflow are required.
+Wait for the GitHub Pages deployment to finish, then open GameHub in a fresh private browser window on both devices. Both players must load the latest version.
 
-## Corrected
+## Root cause and fix
 
-- The PeerJS loader no longer checks that the return value from JavaScript `JSON.stringify(...)` is a native Python `str`. That caused `Cannot read browser SDK loader state` when the browser bridge returned a JavaScript proxy instead.
-- Reads loader `status` and `detail` directly from the browser's `window.__gamehubTttPeerLoader` object, converting proxy values safely.
-- Detects the `window.Peer` and `window.peerjs.Peer` constructor without relying on proxy truthiness or comparisons of proxy strings.
-- If the browser cannot initialize loader state, shows a more precise diagnostic after 1 second.
-- Preserves the host-authoritative online game protocol and all local play features.
+The previous version ran `js.eval('(function(...) {...})')` and then called the returned JS function proxy from Python. On the reported Firefox/Pyodide setup the function proxy was **not Python-callable** even though JavaScript supports the function. The error was `creating PeerJS peer: RuntimeError: PeerJS constructor bridge is not callable`.
 
-## Verification
+This patch invokes a *self-executing* script that constructs PeerJS **entirely in JavaScript** and stores the actual instance on `window.__gamehubTttActivePeer`; Python accesses that instance directly. There is no Python call to an evaluated JavaScript function, and session cleanup clears the reference.
 
-- Python syntax compiled successfully.
-- Mock tests passed with Firefox-like JS proxy strings, normal Python strings, both PeerJS exports, and failed/missing loader states.
-- A two-peer protocol mock confirmed board synchronization after both players move.
+## Test status
 
-**Not verified:** actual Firefox + Pygbag + PeerJS signaling/WebRTC connectivity; test with two devices after deployment.
+- Python compilation and offline bridge regression checks passed.
+- JavaScript constructor tests passed for both `window.Peer` and `window.peerjs.Peer`, including guest and host paths.
+- Live Pygbag/Firefox-to-Firefox signaling and WebRTC still require device testing; the simulator cannot prove that external connections work.
 
-## Expected UI
+## Expected status
 
-After starting a room, status should progress through `Online v2.1.5: checking PeerJS...`, then either `Room ready (v2.1.5)! Waiting for friend...` or a detailed error. A stuck `Cannot read browser SDK loader state` means a cached older file is still running.
+After selecting a three-animal code, expect `Online v2.1.6: checking PeerJS...`, then `Opening room...` or `Finding friend...`. On a registered host, `Room ready (v2.1.6)! Waiting for friend...` should appear. If another issue remains, the status includes the failing stage.

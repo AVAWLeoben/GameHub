@@ -2,7 +2,7 @@
 """Kiddie Tic-Tac-Toe for GameHub (Pygame-ce / Pygbag).
 
 One-screen kids' UI, solo AI, local two-player, and browser-only PeerJS rooms.
-Version 2.1.5 fixes the Firefox/Pyodide browser loader state bridge.
+Version 2.1.6 fixes Firefox/Pyodide PeerJS constructor bridging.
 
 Integration: GameHub calls ``await main(screen, clock)``.
 Importing this module has no side effects. Returning from main() restores GameHub.
@@ -215,6 +215,12 @@ class PeerSession:
             except Exception:
                 pass
             self.peer = None
+        # Clear the temporary browser global on exit/retry as well.
+        try:
+            from js import window
+            setattr(window, '__gamehubTttActivePeer', None)
+        except Exception:
+            pass
         for proxy in self.proxies:
             try:
                 proxy.destroy()
@@ -429,24 +435,31 @@ class PeerSession:
         raise RuntimeError('PeerJS loader exceeded 29 seconds; check build + cache')
 
     def _construct_peer(self):
-        """Construct the PeerJS class in JavaScript, not through JsProxy.new.
+        """Create the peer *inside* JavaScript, then read the JS object.
 
-        Browser builds of PeerJS support window.peerjs.Peer and window.Peer.
-        The result is an actual JS Peer instance with .on/.connect/.destroy.
+        Do not eval a JavaScript function and try to call its returned proxy:
+        in some Pygbag/Pyodide Firefox versions that proxy is not exposed as a
+        Python-callable object, despite being a valid function in JavaScript.
+        A self-executing script and a JS global eliminate that extra bridge.
         """
-        factory = self._browser_eval("""(function(isHost, roomId) {
+        host_id = json.dumps(self.room_id)
+        is_host = 'true' if self.role == 'CREATE' else 'false'
+        script = """(function() {
             const ctor = (window.peerjs && window.peerjs.Peer) || window.Peer;
             if (typeof ctor !== 'function') {
-                throw new Error('PeerJS constructor unavailable after loading');
+                throw new Error('PeerJS constructor missing after loading');
             }
-            return isHost ? new ctor(roomId) : new ctor();
-        })""")
-        if factory is None or not callable(factory):
-            raise RuntimeError('PeerJS constructor bridge is not callable')
-        result = factory(self.role == 'CREATE', self.room_id)
-        if result is None:
-            raise RuntimeError('PeerJS constructor returned no peer')
-        return result
+            // All construction happens on the JavaScript side.
+            // Keep the instance reachable without returning a JS function.
+            const peer = __HOST__ ? new ctor(__ROOM__) : new ctor();
+            window.__gamehubTttActivePeer = peer;
+        })();""".replace('__HOST__', is_host).replace('__ROOM__', host_id)
+        self._browser_eval(script)
+        from js import window
+        peer = getattr(window, '__gamehubTttActivePeer', None)
+        if peer is None:
+            raise RuntimeError('PeerJS instance not accessible after JS construction')
+        return peer
 
     def poll(self, now=None):
         """Turns a stalled connection into actionable feedback on screen."""
@@ -475,7 +488,7 @@ class PeerSession:
     async def _start(self):
         stage = 'loading PeerJS'
         try:
-            self.status = 'Online v2.1.5: checking PeerJS...'
+            self.status = 'Online v2.1.6: checking PeerJS...'
             await self._load_sdk()
             if self.closed:
                 return
@@ -505,7 +518,7 @@ class PeerSession:
             return
         if self.role == 'CREATE':
             self._signaling_started = None
-            self.status = 'Room ready (v2.1.5)! Waiting for friend...'
+            self.status = 'Room ready (v2.1.6)! Waiting for friend...'
         else:
             self.status = 'Connecting to friend...'
             try:
