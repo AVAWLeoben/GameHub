@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Waste Jump — dusk-city runner for GameHub (quality update 2.0).
+"""Waste Jump — dusk-city runner for GameHub (startup reliability 2.0.1).
 
 GameHub invokes ``await main(screen, clock)``. The game is self-contained,
 uses existing wasteJump truck/obstacle art and the standard retBut home asset.
@@ -10,6 +10,7 @@ import asyncio
 import math
 import os
 import random
+import traceback
 import pygame
 
 W, H = 800, 600
@@ -31,25 +32,107 @@ MINT = (125, 228, 185)
 SESSION_BEST = 0
 
 
-def _asset(name):
-    """Works from GameHub's WasteGame directory and as an imported module."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(here, 'assets', name),
+def _asset_candidates(name):
+    """Try both GameHub cwd and module-relative paths (Pygbag or desktop).
+
+    Checking os.path.isfile is intentionally avoided: assets inside some web
+    filesystems can be readable by pygame.image.load despite unreliable stat.
+    """
+    root = os.path.dirname(os.path.abspath(__file__))
+    return (
         os.path.join('assets', name),
+        os.path.join(root, 'assets', name),
         os.path.join('WasteGame', 'assets', name),
-    ]
-    for path in candidates:
-        if os.path.isfile(path):
-            return path
-    raise FileNotFoundError('Waste Jump asset not found: ' + name)
+    )
 
 
-def _img(path, size=None):
-    surface = pygame.image.load(_asset(path)).convert_alpha()
-    if size:
-        surface = pygame.transform.smoothscale(surface, tuple(map(int, size)))
-    return surface
+def _img(name, size=None):
+    """Load art without requiring conversion or smoothscale to succeed."""
+    last_error = None
+    for path in _asset_candidates(name):
+        try:
+            image = pygame.image.load(path)
+            try:
+                image = image.convert_alpha()
+            except (pygame.error, AttributeError, ValueError):
+                # Some browser renderers do not support format conversion yet.
+                pass
+            if size and image.get_size() != tuple(map(int, size)):
+                # Standard scale is supported by both pygame-ce and Pygbag.
+                image = pygame.transform.scale(image, tuple(map(int, size)))
+            return image
+        except (OSError, pygame.error, FileNotFoundError, ValueError) as exc:
+            last_error = exc
+    raise FileNotFoundError('Could not load '+name+': '+str(last_error))
+
+
+def _optional_img(name, size=None):
+    try:
+        return _img(name, size)
+    except Exception as exc:
+        print('[WasteJump] Using built-in art for '+name+': '+str(exc))
+        return None
+
+
+def _skyline_fallback():
+    """Original dusk-city look built once, no newly added PNGs required."""
+    width = 1600
+    sky = pygame.Surface((width, H))
+    top = (39, 36, 79)
+    bottom = (227, 122, 111)
+    for y in range(H):
+        t = min(1., y / 525.)
+        c = tuple(round(a * (1 - t) + b * t) for a, b in zip(top, bottom))
+        pygame.draw.line(sky, c, (0, y), (width, y))
+    pygame.draw.circle(sky, (253, 184, 142), (1150, 265), 82)
+    pygame.draw.circle(sky, (251, 200, 152), (1150, 265), 58)
+    far = pygame.Surface((width, H), pygame.SRCALPHA)
+    near = pygame.Surface((width, H), pygame.SRCALPHA)
+    rng = random.Random(21)
+    for layer, floor, shades, step in (
+        (far, 463, ((65, 61, 104), (78, 66, 112)), 76),
+        (near, 490, ((40, 45, 80), (45, 50, 85)), 97),
+    ):
+        for x in range(-10, width + step, step):
+            ht = rng.randint(120, 245) if layer is far else rng.randint(100, 195)
+            bw = rng.randint(step - 18, step + 15)
+            color = shades[rng.randrange(len(shades))]
+            pygame.draw.rect(layer, color, (x, floor - ht, bw, ht))
+            for xx in range(x + 11, x + bw - 6, 18):
+                for yy in range(floor - ht + 16, floor - 9, 22):
+                    if rng.random() < .55:
+                        pygame.draw.rect(layer, (238, 183, 131), (xx, yy, 6, 9))
+    return sky, far, near
+
+
+def _truck_fallback():
+    result = pygame.Surface((TRUCK_W, TRUCK_H), pygame.SRCALPHA)
+    pygame.draw.ellipse(result, (20, 21, 41, 100), (5, TRUCK_H - 15, TRUCK_W - 10, 12))
+    pygame.draw.rect(result, (242, 153, 77), (10, 31, 75, 50), border_radius=12)
+    pygame.draw.rect(result, (84, 177, 183), (70, 47, 38, 35), border_radius=9)
+    pygame.draw.rect(result, (40, 88, 109), (79, 51, 22, 18), border_radius=5)
+    for cx in (31, 91):
+        pygame.draw.circle(result, (26, 36, 54), (cx, 82), 13)
+        pygame.draw.circle(result, (189, 202, 209), (cx, 82), 6)
+    return result
+
+
+def _obstacle_fallback(index, size):
+    w, h = size
+    result = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.rect(result, (248, 162, 76), (6, h // 3, w - 12, h * 2 // 3 - 3), border_radius=8)
+    for y in range(h // 3 + 9, h - 9, 18):
+        pygame.draw.line(result, (237, 236, 212), (12, y), (w - 12, y), 6)
+    pygame.draw.rect(result, (67, 75, 95), (5, h // 3, w - 10, h * 2 // 3), 3, border_radius=8)
+    return result
+
+
+def _home_fallback():
+    result = pygame.Surface((100, 100), pygame.SRCALPHA)
+    pygame.draw.rect(result, (136, 83, 48), (16, 38, 68, 53), border_radius=9)
+    pygame.draw.polygon(result, (202, 128, 72), ((8, 47), (50, 10), (92, 47)))
+    pygame.draw.rect(result, (246, 222, 152), (43, 59, 19, 32), border_radius=3)
+    return result
 
 
 def font(size, bold=False):
@@ -145,24 +228,38 @@ class WasteJump:
     def __init__(self, screen, clock):
         self.screen = screen
         self.clock = clock
+        # Avoid convert() here; WebAssembly display formats differ by browser.
         self.canvas = (screen if screen.get_size() == (W, H)
-                       else pygame.Surface((W, H)).convert())
+                       else pygame.Surface((W, H)))
         self.scale_area = None
         sw,sh = screen.get_size()
         scale = min(sw/W, sh/H)
         self.scale_area = pygame.Rect(round((sw-W*scale)/2),round((sh-H*scale)/2),
                                       round(W*scale),round(H*scale))
         self.rng = random.Random()
-        self.sky = _img('wasteJump/city_dusk_sky.png')
-        self.city_far = _img('wasteJump/city_dusk_far.png')
-        self.city_near = _img('wasteJump/city_dusk_near.png')
-        self.home = _img('retBut.png', (100,100))
-        self.home_pressed = _img('retBut_clicked.png', (100,100))
-        self.truck = _img('wasteJump/player.png', (TRUCK_W,TRUCK_H))
+        self.sky = _optional_img('wasteJump/city_dusk_sky.png')
+        self.city_far = _optional_img('wasteJump/city_dusk_far.png')
+        self.city_near = _optional_img('wasteJump/city_dusk_near.png')
+        if self.sky is None or self.city_far is None or self.city_near is None:
+            fallback_sky, fallback_far, fallback_near = _skyline_fallback()
+            self.sky = self.sky if self.sky is not None else fallback_sky
+            self.city_far = self.city_far if self.city_far is not None else fallback_far
+            self.city_near = self.city_near if self.city_near is not None else fallback_near
+        self.home = _optional_img('retBut.png', (100,100))
+        if self.home is None:
+            self.home = _home_fallback()
+        self.home_pressed = _optional_img('retBut_clicked.png', (100,100))
+        if self.home_pressed is None:
+            self.home_pressed = self.home
+        self.truck = _optional_img('wasteJump/player.png', (TRUCK_W,TRUCK_H))
+        if self.truck is None:
+            self.truck = _truck_fallback()
         self.rotate_cache = {0: self.truck}
-        self.obstacle_images = [
-            _img('wasteJump/obstacle%d.png'%(i+1),Obstacle.SIZES[i]) for i in range(6)
-        ]
+        self.obstacle_images = []
+        for i in range(6):
+            image = _optional_img('wasteJump/obstacle%d.png' % (i+1), Obstacle.SIZES[i])
+            self.obstacle_images.append(image if image is not None
+                                        else _obstacle_fallback(i, Obstacle.SIZES[i]))
         self.f_big = font(72, True)
         self.f_title = font(43, True)
         self.f_large = font(42, True)
@@ -411,7 +508,7 @@ class WasteJump:
                 self.screen.blit(self.canvas,self.scale_area.topleft)
             else:
                 self.screen.fill((21,27,52))
-                scaled=pygame.transform.smoothscale(self.canvas,self.scale_area.size)
+                scaled=pygame.transform.scale(self.canvas,self.scale_area.size)
                 self.screen.blit(scaled,self.scale_area.topleft)
 
     def to_world(self, pos, touch=False):
@@ -492,15 +589,45 @@ class WasteJump:
             pass
 
 
+async def _startup_error_screen(screen, clock, exc):
+    """Keep GameHub responsive and show the real cause rather than freeze."""
+    print('[WasteJump] Fatal startup/runtime failure:')
+    traceback.print_exc()
+    f_title = pygame.font.Font(None, 48)
+    f_small = pygame.font.Font(None, 28)
+    reason = type(exc).__name__ + ': ' + str(exc)
+    for _ in range(60 * 20):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT or event.type in (pygame.MOUSEBUTTONDOWN,
+                                                            pygame.FINGERDOWN):
+                return
+            if event.type == pygame.KEYDOWN:
+                return
+        screen.fill((34, 37, 61))
+        title = f_title.render('Waste Jump could not start', True, (255, 215, 151))
+        screen.blit(title, title.get_rect(center=(screen.get_width()//2, 190)))
+        # Show a clipped diagnostic rather than a silent frozen GameHub menu.
+        line = f_small.render(reason[:65], True, (255, 239, 226))
+        screen.blit(line, line.get_rect(center=(screen.get_width()//2, 275)))
+        hint = f_small.render('Tap anywhere to return to GameHub', True, (181, 223, 221))
+        screen.blit(hint, hint.get_rect(center=(screen.get_width()//2, 365)))
+        pygame.display.flip()
+        clock.tick(30)
+        await asyncio.sleep(0)
+
+
 async def main(screen, clock):
-    """GameHub-compatible, asynchronous entry point."""
-    if not pygame.get_init():
-        pygame.init()
-    if not pygame.font.get_init():
-        pygame.font.init()
-    await WasteJump(screen,clock).run()
+    """GameHub-compatible entry point: missing files never hang the main menu."""
+    try:
+        if not pygame.get_init():
+            pygame.init()
+        if not pygame.font.get_init():
+            pygame.font.init()
+        await WasteJump(screen, clock).run()
+    except Exception as exc:
+        await _startup_error_screen(screen, clock, exc)
 
 
-if __name__=='__main__':
+if __name__ == '__main__':
     pygame.init()
     asyncio.run(main(pygame.display.set_mode((W,H)),pygame.time.Clock()))
