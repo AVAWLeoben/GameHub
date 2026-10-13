@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """WasteTacToe / GameHub — Firebase online multiplayer, 3-animal room codes.
 
-Version 3.0.1: persistent rooms, verified creation and resilient joining.
+Version 3.0.2: reliable guest seating and host room reset using server-checked writes.
 The existing children's interface, one-player AI and shared-device play stay intact.
 Requires Firebase anonymous sign-in and the shipped RTDB security rules to be enabled.
 GameHub calls ``await main(screen, clock)``; importing is side-effect free.
@@ -35,7 +35,10 @@ FIREBASE_BRIDGE_SCRIPT = r'''(function () {
   // This is executed via js.eval by the GameHub Pygbag Python module.
   // Every Firebase callback stays on the JavaScript side.
   const prior = window.__ghTttFirebase;
-  if (prior && typeof prior.close === 'function') prior.close();
+  // Wait for old room cleanup before creating another room with the same code.
+  // Otherwise a late delete from the prior session can remove the new room.
+  const previousClose = prior && typeof prior.close === 'function'
+      ? Promise.resolve(prior.close()) : Promise.resolve();
 
   const config = __FIREBASE_CONFIG__;
   const roomCode = __ROOM_CODE__;
@@ -58,7 +61,7 @@ FIREBASE_BRIDGE_SCRIPT = r'''(function () {
     const message = String(error && error.message || error || 'Unknown error').slice(0, 210);
     emit('error', {where, code, message});
   }
-  const due = () => Date.now() + 45 * 60 * 1000;
+  const due = () => Date.now() + 20 * 60 * 1000;
   const fresh = room => room && typeof room === 'object' &&
       Number(room.expiresAt) > Date.now() && typeof room.hostUid === 'string';
   const initialRoom = uid => ({
@@ -97,21 +100,22 @@ FIREBASE_BRIDGE_SCRIPT = r'''(function () {
     });
   }
   s.close = function () {
-    if (s.disposed) return;
+    if (s.closePromise) return s.closePromise;
     s.disposed = true;
     try { if (s.cancelListen) s.cancelListen(); } catch (_) {}
     s.cancelListen = null;
-    // End the old room only if the current user still owns that seat.
-    // The transaction check prevents deleting a room reused by someone else.
-    if (s.ref && s.uid && s.firebase) {
-      const {runTransaction} = s.firebase;
-      runTransaction(s.ref, old => {
-        if (!old || !member(old)) return;
-        if (s.role === 'CREATE') return null;
-        return {...old, guestUid: null};
-      }, {applyLocally: false}).catch(() => {});
-    }
     s.queue.length = 0;
+    // Don't use a transaction here: an uncached transaction can receive null
+    // and abort without ever asking the server to remove the room or seat.
+    // The published rules permit host deletion and guest seat removal only.
+    if (s.ref && s.uid && s.firebase) {
+      s.closePromise = (s.role === 'CREATE'
+          ? s.firebase.remove(s.ref)
+          : s.firebase.update(s.ref, {guestUid: null})).catch(() => {});
+    } else {
+      s.closePromise = Promise.resolve();
+    }
+    return s.closePromise;
   };
   async function transaction(update) {
     if (s.disposed || !s.ref || !s.firebase || s.busy) return;
@@ -149,6 +153,8 @@ FIREBASE_BRIDGE_SCRIPT = r'''(function () {
 
   (async function start() {
     try {
+      await previousClose;
+      if (s.disposed) return;
       emit('status', 'Loading Firebase...');
       const version = '13.0.0';
       const base = `https://www.gstatic.com/firebasejs/${version}/`;
@@ -173,22 +179,37 @@ FIREBASE_BRIDGE_SCRIPT = r'''(function () {
       s.ref = dbSdk.ref(database, 'tttRooms/' + roomCode);
       emit('status', role === 'CREATE' ? 'Creating room...' : 'Looking for room...');
       if (role === 'CREATE') {
-        const outcome = await dbSdk.runTransaction(s.ref, old => {
-          if (fresh(old)) return;  // never steal a live room
-          return initialRoom(s.uid);
-        }, {applyLocally: false});
-        if (!outcome.committed) {
-          throw new Error('Code already in use. Choose another three animals.');
+        // Never use a transaction that returns undefined on a first null
+        // snapshot: Firebase documents that null may only mean uncached data.
+        // The rules protect existing rooms against another creator's set().
+        const previous = (await dbSdk.get(s.ref)).val();
+        if (fresh(previous)) {
+          if (previous.hostUid !== s.uid) {
+            throw new Error('This animal code already has a room. Try another code.');
+          }
+          // Recreating your *own* code replaces a leftover test session.
+          // An explicit remove is permitted only to the original host UID.
+          emit('status', 'Resetting your previous room...');
+          await dbSdk.remove(s.ref);
         }
-        // Don't claim the room exists until a separate server read confirms it.
+        try {
+          await dbSdk.set(s.ref, initialRoom(s.uid));
+        } catch (error) {
+          if (String(error && error.code || '').includes('permission-denied')) {
+            const room = (await dbSdk.get(s.ref)).val();
+            if (fresh(room)) {
+              throw new Error('This animal code already has a room. Try another code.');
+            }
+          }
+          throw error;
+        }
+        // Only show success after the Firebase server confirms the new room.
         const verify = (await dbSdk.get(s.ref)).val();
         if (!fresh(verify) || verify.hostUid !== s.uid) {
           throw new Error('Room was not saved on the server. Check Database Rules and retry.');
         }
-        emit('status', 'Room created on server. Waiting for friend...');
+        emit('status', 'Room created on server (v3.0.2). Waiting for friend...');
       } else {
-        // The host may still be completing anonymous sign-in / room creation.
-        // Waiting briefly avoids treating that normal startup race as a failure.
         const end = Date.now() + 20000;
         let joined = false;
         while (!s.disposed && Date.now() < end) {
@@ -196,7 +217,6 @@ FIREBASE_BRIDGE_SCRIPT = r'''(function () {
           try {
             existing = (await dbSdk.get(s.ref)).val();
           } catch (error) {
-            // A permissions failure is not a missing room; show the real error.
             fail('reading room', error);
             return;
           }
@@ -206,31 +226,53 @@ FIREBASE_BRIDGE_SCRIPT = r'''(function () {
             continue;
           }
           if (existing.hostUid === s.uid) {
-            throw new Error('Both devices use the same guest account. Try separate browsers.');
+            throw new Error('Both devices share the same guest account. Use separate browsers.');
           }
           if (existing.guestUid && existing.guestUid !== s.uid) {
-            throw new Error('Room already has two players. Choose a different code.');
+            throw new Error('Room already has two players. Choose another animal code.');
           }
-          const outcome = await dbSdk.runTransaction(s.ref, old => {
-            if (!fresh(old) || old.hostUid === s.uid ||
-                (old.guestUid && old.guestUid !== s.uid)) return;
-            return {...old, guestUid: s.uid, expiresAt: due()};
-          }, {applyLocally: false});
-          if (outcome.committed) {
-            const confirmed = (await dbSdk.get(s.ref)).val();
-            if (fresh(confirmed) && confirmed.guestUid === s.uid) {
-              joined = true;
-              break;
+          if (existing.guestUid !== s.uid) {
+            try {
+              // Atomic, server-validated seat claim. No transaction updater
+              // to abort on an initially uncached null value. Concurrent
+              // guests cannot steal seats: the database rules forbid it.
+              await dbSdk.update(s.ref, {guestUid: s.uid, expiresAt: due()});
+            } catch (error) {
+              const code = String(error && error.code || '');
+              if (!code.includes('permission-denied')) {
+                fail('joining room', error);
+                return;
+              }
+              // Race: another guest joined, the room expired, or the host
+              // closed it. Inspect the actual server state once more.
+              const current = (await dbSdk.get(s.ref)).val();
+              if (fresh(current) && current.guestUid && current.guestUid !== s.uid) {
+                throw new Error('Room already has two players. Choose another animal code.');
+              }
+              if (fresh(current) && !current.guestUid &&
+                  current.hostUid === existing.hostUid) {
+                fail('joining room', error);  // Rules need checking.
+                return;
+              }
+              emit('status', 'Room changed during setup. Retrying...');
+              await new Promise(resolve => setTimeout(resolve, 1300));
+              continue;
             }
           }
-          emit('status', 'Room changed while joining. Retrying...');
+          const confirmed = (await dbSdk.get(s.ref)).val();
+          if (fresh(confirmed) && confirmed.hostUid === existing.hostUid &&
+              confirmed.guestUid === s.uid) {
+            joined = true;
+            break;
+          }
+          emit('status', 'Room changed during setup. Retrying...');
           await new Promise(resolve => setTimeout(resolve, 1300));
         }
         if (s.disposed) return;
         if (!joined) {
-          throw new Error('No active room found. On device 1, wait for "Room created on server" before joining.');
+          throw new Error('Room could not be joined. Make sure the creator is waiting and retry.');
         }
-        emit('status', 'Joined room on server. Syncing board...');
+        emit('status', 'Joined room on server (v3.0.2). Syncing board...');
       }
       if (s.disposed) return;
       // DO NOT use onDisconnect.remove() on the room: mobile/iPad tabs can
@@ -437,7 +479,7 @@ class FirebaseSession:
         self.ready = False
         try:
             self._browser_eval('(function(){const s=window.__ghTttFirebase; '
-                'if(s && s.close) s.close(); window.__ghTttFirebase=null;})()')
+                'if(s && s.close) s.close();})()')
         except Exception:
             pass
 
@@ -513,7 +555,7 @@ class FirebaseSession:
         self.ready=bool(data.get('ready'))
         self.last_error=False
         self.status=('Friend connected! Play together.' if self.ready else
-                    ('Waiting for friend...' if self.role=='CREATE' else
+                    ('Waiting for friend... (v3.0.2)' if self.role=='CREATE' else
                      'Waiting for host...'))
 
     def _send_action(self, action, index=None):
