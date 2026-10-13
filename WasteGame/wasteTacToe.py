@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Kiddie Tic-Tac-Toe for GameHub (Pygame-ce / Pygbag).
+"""WasteTacToe / GameHub — Firebase online multiplayer, 3-animal room codes.
 
-One-screen kids' UI, solo AI, local two-player, and browser-only PeerJS rooms.
-Version 2.1.8 retains the JS-only bridge and shows real WebRTC/ICE failure diagnostics.
-
-Integration: GameHub calls ``await main(screen, clock)``.
-Importing this module has no side effects. Returning from main() restores GameHub.
+Version 3.0.0: replaces PeerJS/WebRTC with Firebase Auth + Realtime Database.
+The existing children's interface, one-player AI and shared-device play stay intact.
+Requires Firebase anonymous sign-in and the shipped RTDB security rules to be enabled.
+GameHub calls ``await main(screen, clock)``; importing is side-effect free.
 """
 
 import asyncio
@@ -23,26 +22,196 @@ COLOR_GREEN = (46, 213, 115)
 COLOR_BLUE = (30, 144, 255)
 COLOR_PURPLE = (155, 89, 182)
 COLOR_ORANGE = (255, 127, 80)
-ICON_NAMES = ("Dog", "Cat", "Rabbit", "Fox", "Panda")
+ICON_NAMES = ('Dog', 'Cat', 'Rabbit', 'Fox', 'Panda')
+PROTOCOL_VERSION = 3
 
-# The build preloads the same-origin library before Pygbag runs. If that
-# preload is missing/cached, try the site's own copy and then two CDN backups.
-# Internet/WebRTC access is still required for the PeerJS signaling service.
-PEERJS_URLS = (
-    "vendor/peerjs-1.5.4.min.js",
-    "https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js",
-    "https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js",
-)
-PEERJS_SCRIPT_ID = "gamehub-tictactoe-peerjs"
-PROTOCOL_VERSION = 2
-CONNECTION_TIMEOUT = 35.0
+# Firebase Web config is public by design; server-side RTDB rules restrict writes.
+FIREBASE_CONFIG = {'apiKey': 'AIzaSyAwnGfsl7YoVcARQ67QD8JSm-e0zIjN8uU', 'authDomain': 'gamehub-1c72c.firebaseapp.com', 'projectId': 'gamehub-1c72c', 'storageBucket': 'gamehub-1c72c.firebasestorage.app', 'messagingSenderId': '857441682920', 'appId': '1:857441682920:web:d91a0bcb0e8da5cb4d905d', 'databaseURL': 'https://gamehub-1c72c-default-rtdb.europe-west1.firebasedatabase.app'}
 
-# Created by the game entry point, not at import time.
-font_title = None
-font_btn_title = None
-font_btn_sub = None
-font_status = None
+# Firebase SDK code executes inside the browser. Pygame only exchanges small
+# JSON messages with it, avoiding Pyodide JsProxy callback compatibility issues.
+FIREBASE_BRIDGE_SCRIPT = r'''(function () {
+  'use strict';
+  // This is executed via js.eval by the GameHub Pygbag Python module.
+  // Every Firebase callback stays on the JavaScript side.
+  const prior = window.__ghTttFirebase;
+  if (prior && typeof prior.close === 'function') prior.close();
 
+  const config = __FIREBASE_CONFIG__;
+  const roomCode = __ROOM_CODE__;
+  const role = __ROLE__;
+  const s = {
+    disposed: false, uid: null, role, roomCode, queue: [], room: null,
+    busy: false, ready: false, ref: null, cancelListen: null,
+    disconnectGuard: null, firebase: null, close: null, move: null,
+    restart: null, pending: false
+  };
+  window.__ghTttFirebase = s;
+  window.__ghTttFirebaseEventsJSON = '[]';
+  function emit(kind, data) {
+    if (s.disposed) return;
+    if (s.queue.length >= 96) s.queue.shift();
+    s.queue.push({kind, data: data === undefined ? null : data});
+  }
+  function fail(where, error) {
+    const code = String(error && error.code || '').slice(0, 72);
+    const message = String(error && error.message || error || 'Unknown error').slice(0, 210);
+    emit('error', {where, code, message});
+  }
+  const due = () => Date.now() + 45 * 60 * 1000;
+  const fresh = room => room && typeof room === 'object' &&
+      Number(room.expiresAt) > Date.now() && typeof room.hostUid === 'string';
+  const initialRoom = uid => ({
+    hostUid: uid, board: '---------', turn: 'X', winner: '',
+    round: 0, revision: 0, createdAt: Date.now(), expiresAt: due()
+  });
+  function gameWinner(board) {
+    for (const [a,b,c] of [
+      [0,1,2], [3,4,5], [6,7,8], [0,3,6], [1,4,7], [2,5,8], [0,4,8], [2,4,6]
+    ]) {
+      if (board[a] !== '-' && board[a] === board[b] && board[b] === board[c]) return board[a];
+    }
+    return board.indexOf('-') < 0 ? 'TIE' : '';
+  }
+  function member(room) {
+    return s.role === 'CREATE' ? room.hostUid === s.uid : room.guestUid === s.uid;
+  }
+  function publish(room) {
+    if (!fresh(room)) {
+      s.ready = false;
+      emit('lost', 'Room closed or expired. Go back to create/join.');
+      return;
+    }
+    if (!member(room)) {
+      s.ready = false;
+      emit('lost', 'Your seat is no longer active. Go back to rejoin.');
+      return;
+    }
+    s.room = room;
+    const ready = Boolean(room.hostUid && room.guestUid);
+    s.ready = ready;
+    emit('state', {
+      board: room.board, turn: room.turn, winner: room.winner,
+      round: room.round, revision: room.revision, ready,
+      role: s.role
+    });
+  }
+  s.close = function () {
+    if (s.disposed) return;
+    s.disposed = true;
+    try { if (s.cancelListen) s.cancelListen(); } catch (_) {}
+    s.cancelListen = null;
+    // End the old room only if the current user still owns that seat.
+    // The transaction check prevents deleting a room reused by someone else.
+    if (s.ref && s.uid && s.firebase) {
+      const {runTransaction, onDisconnect} = s.firebase;
+      if (s.disconnectGuard) {
+        Promise.resolve(s.disconnectGuard.cancel()).catch(() => {});
+        s.disconnectGuard = null;
+      }
+      runTransaction(s.ref, old => {
+        if (!old || !member(old)) return;
+        if (s.role === 'CREATE') return null;
+        return {...old, guestUid: null};
+      }, {applyLocally: false}).catch(() => {});
+    }
+    s.queue.length = 0;
+  };
+  async function transaction(update) {
+    if (s.disposed || !s.ref || !s.firebase || s.busy) return;
+    s.busy = true;
+    try {
+      const result = await s.firebase.runTransaction(s.ref, old => {
+        if (!fresh(old) || !member(old) || !old.guestUid) return;
+        return update(old);
+      }, {applyLocally: false});
+      if (!result.committed && !s.disposed) emit('notice', 'Move not accepted. Waiting for board update.');
+    } catch (error) { fail('saving move', error); }
+    finally { s.busy = false; }
+  }
+  s.move = function (index) {
+    if (!Number.isInteger(index) || index < 0 || index > 8 || !s.ready) return;
+    transaction(old => {
+      const symbol = s.role === 'CREATE' ? 'X' : 'O';
+      if (old.turn !== symbol || old.winner ||
+          typeof old.board !== 'string' || old.board.length !== 9 ||
+          old.board[index] !== '-') return;
+      const board = old.board.slice(0, index) + symbol + old.board.slice(index + 1);
+      const winner = gameWinner(board);
+      return {...old, board, turn: winner ? old.turn : (symbol === 'X' ? 'O' : 'X'),
+          winner, revision: old.revision + 1, expiresAt: due()};
+    });
+  };
+  s.restart = function () {
+    if (!s.ready) return;
+    transaction(old => {
+      if (!old.winner) return;
+      return {...old, board: '---------', turn: 'X', winner: '',
+          revision: 0, round: old.round + 1, expiresAt: due()};
+    });
+  };
+
+  (async function start() {
+    try {
+      emit('status', 'Loading Firebase...');
+      const version = '13.0.0';
+      const base = `https://www.gstatic.com/firebasejs/${version}/`;
+      const [appSdk, authSdk, dbSdk] = await Promise.all([
+        import(base + 'firebase-app.js'),
+        import(base + 'firebase-auth.js'),
+        import(base + 'firebase-database.js')
+      ]);
+      if (s.disposed) return;
+      emit('status', 'Signing in as a guest...');
+      const app = appSdk.getApps().find(a => a.name === 'gamehub-ttt-firebase') ||
+          appSdk.initializeApp(config, 'gamehub-ttt-firebase');
+      const auth = authSdk.getAuth(app);
+      // Let Firebase restore an earlier anonymous sign-in if available.
+      await auth.authStateReady();
+      let user = auth.currentUser;
+      if (!user) user = (await authSdk.signInAnonymously(auth)).user;
+      if (s.disposed) return;
+      s.uid = user.uid;
+      s.firebase = dbSdk;
+      const database = dbSdk.getDatabase(app, config.databaseURL);
+      s.ref = dbSdk.ref(database, 'tttRooms/' + roomCode);
+      emit('status', role === 'CREATE' ? 'Creating room...' : 'Finding room...');
+      if (role === 'CREATE') {
+        const outcome = await dbSdk.runTransaction(s.ref, old => {
+          if (fresh(old)) return;  // do not steal another active room
+          return initialRoom(s.uid);
+        }, {applyLocally: false});
+        if (!outcome.committed) throw new Error('Room already used. Choose another three animals.');
+      } else {
+        const outcome = await dbSdk.runTransaction(s.ref, old => {
+          if (!fresh(old) || old.hostUid === s.uid ||
+              (old.guestUid && old.guestUid !== s.uid)) return;
+          return {...old, guestUid: s.uid, expiresAt: due()};
+        }, {applyLocally: false});
+        if (!outcome.committed) throw new Error('Room not available. Ask friend to create it first.');
+      }
+      if (s.disposed) return;
+      // Clear the host's room / guest's seat when the browser disconnects.
+      const guardRef = role === 'CREATE' ? s.ref : dbSdk.child(s.ref, 'guestUid');
+      s.disconnectGuard = dbSdk.onDisconnect(guardRef);
+      try {
+        if (role === 'CREATE') await s.disconnectGuard.remove();
+        else await s.disconnectGuard.remove();
+      } catch (error) {
+        // Presence cleanup is a convenience; rule denial should not block play.
+        emit('notice', 'Offline cleanup unavailable; rooms expire automatically.');
+      }
+      if (s.disposed) return;
+      emit('status', role === 'CREATE' ? 'Waiting for friend...' : 'Joining room...');
+      s.cancelListen = dbSdk.onValue(s.ref, snap => {
+        if (!s.disposed) publish(snap.val());
+      }, error => fail('watching room', error));
+    } catch (error) { fail('starting online game', error); }
+  })();
+})();
+'''
+
+font_title = font_btn_title = font_btn_sub = font_status = None
 
 def init_fonts():
     global font_title, font_btn_title, font_btn_sub, font_status
@@ -178,713 +347,162 @@ def draw_symbol_o(surface, rect):
     pygame.draw.circle(surface, COLOR_GREEN, center, radius, width=12)
 
 
-class PeerSession:
-    """Host-authoritative PeerJS networking with explicit proxy lifetimes."""
+
+
+class FirebaseSession:
+    """Browser-owned Firebase session, polled through a JSON event queue."""
 
     def __init__(self, game):
         self.game = game
-        self.closed = False
         self.role = None
-        self.room_id = None
-        self.peer = None
-        self.connection = None
         self.ready = False
-        self.proxies = []
-        self.job = None
-        self.status = "Ready"
-        self._connect_started = None
-        self._signaling_started = None
-        self._ever_connected = False
-        self._timeout_reported = False
-        self._handshake_started = None
-        self._last_ice_state = ''
-        self._last_pc_state = ''
-        self._terminal_error = False
-
-    def stop(self):
-        self.closed = True
-        self.ready = False
-        if self.job and not self.job.done():
-            self.job.cancel()
-        self.job = None
-        # Disconnect the browser-managed event bridge without a Python->JS
-        # callback or a JsProxy method call. Both can vary across Pyodide builds.
-        try:
-            self._browser_eval("""(function(){
-              const bridge = window.__gamehubTttBridge;
-              if (bridge) {
-                bridge.disposed = true;
-                try { if (bridge.connection) bridge.connection.close(); } catch(e) {}
-                try { if (bridge.peer) bridge.peer.destroy(); } catch(e) {}
-              }
-              window.__gamehubTttBridge = null;
-              window.__gamehubTttActivePeer = null;
-              window.__gamehubTttEventsJSON = '[]';
-            })()""")
-        except Exception:
-            pass
-        self.peer = None
-        self.connection = None
-        self.proxies.clear()
-
-    def _install_browser_events(self):
-        """Register JS-native listeners and queue JSON events for Python polling.
-
-        This does NOT import pyodide.ffi/create_proxy. The JS listeners exist
-        for the duration of the PeerJS session, and browser-side connection
-        creation, callbacks, and sending require no Python JsProxy callability.
-        """
-        host_flag = 'true' if self.role == 'CREATE' else 'false'
-        room_id = json.dumps(self.room_id)
-        script = """(function() {
-          const peer = window.__gamehubTttActivePeer;
-          if (!peer || typeof peer.on !== 'function') {
-            throw new Error('PeerJS instance has no event API');
-          }
-          const state = {
-            peer: peer, connection: null, disposed: false, events: [],
-            lastIce: null, lastPc: null
-          };
-          window.__gamehubTttBridge = state;
-          window.__gamehubTttEventsJSON = '[]';
-          function emit(kind, data) {
-            if (state.disposed) return;
-            if (state.events.length >= 128) state.events.shift();
-            state.events.push({kind: kind, data: data === undefined ? null : data});
-          }
-          function errorCode(error) {
-            return String(error && (error.type || error.message) || error || 'unknown');
-          }
-          function errorDetail(error) {
-            return {
-              type: String(error && error.type || 'unknown').slice(0, 50),
-              message: String(error && error.message || error || 'unknown').slice(0, 160)
-            };
-          }
-          function attach(conn) {
-            if (!conn || typeof conn.on !== 'function') {
-              emit('conn_error', 'Missing PeerJS data-connection API');
-              return;
-            }
-            if (state.connection && state.connection !== conn) {
-              try { conn.close(); } catch (e) {}
-              return;
-            }
-            state.connection = conn;
-            state.lastIce = null;
-            state.lastPc = null;
-            emit('conn_pending');
-            let opened = false;
-            function openedOnce() {
-              if (opened || state.disposed) return;
-              opened = true;
-              emit('conn_open');
-            }
-            conn.on('open', openedOnce);
-            conn.on('data', data => {
-              try {
-                emit('conn_data', typeof data === 'string' ? data : JSON.stringify(data));
-              } catch(e) { emit('conn_error', 'Cannot serialize incoming data'); }
-            });
-            conn.on('close', () => {
-              if (state.connection === conn) state.connection = null;
-              emit('conn_close');
-            });
-            conn.on('error', error => emit('conn_error', errorDetail(error)));
-            if (conn.open === true) openedOnce();
-          }
-          peer.on('open', id => {
-            emit('peer_open', String(id));
-            if (!__HOST__) {
-              try {
-                const conn = peer.connect(__ROOM__);
-                attach(conn);
-              } catch (error) {
-                emit('connect_error', errorCode(error));
-              }
-            }
-          });
-          peer.on('error', error => emit('peer_error', errorDetail(error)));
-          peer.on('disconnected', () => emit('peer_disconnected'));
-          if (__HOST__) {
-            peer.on('connection', conn => attach(conn));
-          }
-          // If PeerJS opened in the interval before listener installation,
-          // process that state once. PeerJS normally opens asynchronously.
-          if (peer.open === true && peer.id) {
-            emit('peer_open', String(peer.id));
-            if (!__HOST__ && state.connection === null) {
-              try { attach(peer.connect(__ROOM__)); }
-              catch(error) { emit('connect_error', errorCode(error)); }
-            }
-          }
-        })()""".replace('__HOST__', host_flag).replace('__ROOM__', room_id)
-        self._browser_eval(script)
-
-    def _drain_browser_events(self):
-        """Read one JSON batch with no Python-side JS callback registration."""
-        try:
-            self._browser_eval("""(function() {
-              const bridge = window.__gamehubTttBridge;
-              if (bridge && !bridge.disposed && bridge.connection) {
-                // Observe WebRTC ICE state without attaching browser callbacks
-                // or returning JS function objects through Pyodide.
-                const pc = bridge.connection.peerConnection;
-                if (pc) {
-                  const ice = String(pc.iceConnectionState || 'unknown');
-                  const link = String(pc.connectionState || 'unknown');
-                  if (ice !== bridge.lastIce || link !== bridge.lastPc) {
-                    bridge.lastIce = ice;
-                    bridge.lastPc = link;
-                    bridge.events.push({kind: 'ice_state',
-                      data: {ice: ice, link: link}});
-                  }
-                }
-              }
-              window.__gamehubTttEventsJSON = JSON.stringify(
-                bridge && !bridge.disposed ? bridge.events.splice(0, 128) : []
-              );
-            })()""")
-            from js import window
-            raw = self._js_text(getattr(window, '__gamehubTttEventsJSON', '[]'), '[]')
-            events = json.loads(raw)
-            if not isinstance(events, list):
-                raise ValueError('Event queue was not a JSON array')
-            for event in events:
-                if self.closed or not isinstance(event, dict):
-                    break
-                kind, data = event.get('kind'), event.get('data')
-                if kind == 'peer_open':
-                    self._peer_open(data)
-                elif kind == 'peer_error':
-                    self._peer_error(data)
-                elif kind == 'peer_disconnected':
-                    self._peer_disconnected()
-                elif kind == 'conn_pending':
-                    self._conn_pending()
-                elif kind == 'conn_open':
-                    self._conn_open()
-                elif kind == 'ice_state':
-                    self._ice_state(data)
-                elif kind == 'conn_data' and isinstance(data, str):
-                    self._conn_data(data)
-                elif kind == 'conn_close':
-                    self._conn_close()
-                elif kind == 'conn_error':
-                    self._conn_error(data)
-                elif kind == 'connect_error':
-                    self._conn_error({'type': 'connect', 'message': data})
-        except Exception as exc:
-            if not self.closed:
-                self.status = ('Reading online events: ' + type(exc).__name__ +
-                               ': ' + str(exc))[:190]
+        self.closed = False
+        self.status = 'Starting Firebase...'
+        self.last_error = False
 
     @staticmethod
-    def _browser_eval(source):
-        """Execute simple JavaScript via Pyodide's built-in browser bridge.
-
-        PeerJS exposes a JS *constructor*. Constructing it inside JavaScript
-        avoids ambiguous access to a JsProxy ``.new`` attribute in Python.
-        """
+    def _browser_eval(script):
         from js import eval as js_eval
         if js_eval is None or not callable(js_eval):
-            raise RuntimeError('Browser JavaScript eval unavailable')
-        return js_eval(source)
+            raise RuntimeError('Pygbag browser JavaScript bridge is unavailable')
+        return js_eval(script)
 
     @staticmethod
     def _js_text(value, default=''):
-        """Safely extract a JS primitive without assuming it is a Python str.
-
-        Browser/Pyodide builds sometimes expose JS strings through proxy
-        wrappers.  In particular, ``isinstance(js_value, str)`` is not a
-        reliable test of a string returned from the browser bridge.
-        """
         if value is None:
             return default
         if isinstance(value, str):
             return value
-        # Conversion works for JsProxy values in Pyodide. If the object has
-        # no converter, str(proxy) calls the JS toString implementation.
         try:
             convert = getattr(value, 'to_py', None)
             if convert is not None and callable(convert):
-                converted = convert()
-                if converted is not None and converted is not value:
-                    return str(converted)
+                result = convert()
+                if result is not None and result is not value:
+                    return str(result)
         except Exception:
             pass
         return str(value)
 
-    @classmethod
-    def _has_peerjs(cls):
-        """Inspect browser globals directly; no fragile eval string compare.
-
-        Avoid truth tests on JsProxy objects: Pyodide can attempt ``len()``.
-        The PeerJS UMD build may export either window.Peer or
-        window.peerjs.Peer, depending on the build.
-        """
-        from js import window
-        for candidate in (getattr(window, 'Peer', None),):
-            if candidate is not None:
-                js_type = getattr(candidate, 'typeof', None)
-                if (cls._js_text(js_type) == 'function' or
-                        (js_type is None and callable(candidate))):
-                    return True
-        namespace = getattr(window, 'peerjs', None)
-        if namespace is not None:
-            candidate = getattr(namespace, 'Peer', None)
-            if candidate is not None:
-                js_type = getattr(candidate, 'typeof', None)
-                if (cls._js_text(js_type) == 'function' or
-                        (js_type is None and callable(candidate))):
-                    return True
-        return False
-
-    @classmethod
-    def _start_sdk_loader(cls):
-        """Run the script loading and retries entirely on the JS side.
-
-        Pyodide's JavaScript proxies can behave differently from native Python
-        values. This script uses browser-native DOM operations and reports a
-        plain string status to Python instead of holding JS DOM proxies.
-        """
-        urls_json = json.dumps(PEERJS_URLS)
-        script_id = json.dumps(PEERJS_SCRIPT_ID)
-        js_code = """(function() {
-          const existing = window.__gamehubTttPeerLoader;
-          const ctorReady = () =>
-              (typeof window.Peer === 'function') ||
-              (window.peerjs != null && typeof window.peerjs.Peer === 'function');
-          if (ctorReady()) {
-              window.__gamehubTttPeerLoader = {
-                  version: 214, status: 'ready', detail: 'PeerJS already present'
-              };
-              return;
-          }
-          if (existing && existing.version === 214 && existing.status === 'loading') {
-              return;
-          }
-          const urls = __URLS__;
-          const idPrefix = __ID__;
-          const state = {
-              version: 214, status: 'loading', detail: 'Starting script load',
-              index: 0, failures: []
-          };
-          window.__gamehubTttPeerLoader = state;
-          function tryNext() {
-              if (ctorReady()) {
-                  state.status = 'ready';
-                  state.detail = 'PeerJS loaded';
-                  return;
-              }
-              if (state.index >= urls.length) {
-                  state.status = 'failed';
-                  state.detail = state.failures.join('; ');
-                  return;
-              }
-              const url = urls[state.index];
-              const number = state.index++;
-              const label = number === 0 ? 'local vendor PeerJS' :
-                    (new URL(url, document.baseURI)).hostname;
-              let script = document.createElement('script');
-              script.id = idPrefix + '-' + number;
-              script.src = new URL(url, document.baseURI).href;
-              script.async = true;
-              state.detail = 'Trying ' + label;
-              let finished = false;
-              const timer = window.setTimeout(() => finish('timeout'), 8500);
-              function finish(reason) {
-                  if (finished || state.status !== 'loading') return;
-                  finished = true;
-                  window.clearTimeout(timer);
-                  script.onload = null;
-                  script.onerror = null;
-                  if (ctorReady()) {
-                      state.status = 'ready';
-                      state.detail = 'PeerJS loaded from ' + label;
-                      return;
-                  }
-                  state.failures.push(label + ': ' + reason);
-                  script.remove();
-                  tryNext();
-              }
-              script.onload = () => finish('loaded but PeerJS constructor missing');
-              script.onerror = () => finish('network/script error');
-              try {
-                  document.head.appendChild(script);
-              } catch (error) {
-                  finish('DOM error: ' + String(error));
-              }
-          }
-          tryNext();
-        })()""".replace('__URLS__', urls_json).replace('__ID__', script_id)
-        cls._browser_eval(js_code)
-
-    @classmethod
-    def _sdk_status(cls):
-        """Read the JS loader object directly (Firefox/Pyodide-safe).
-
-        Old code used ``JSON.stringify(...)`` through js.eval, then rejected
-        the result unless ``isinstance(raw, str)``. Firefox/Pyodide can hand
-        back a JS proxy even for a string; the check then failed before any
-        CDN/local-file diagnostic was available. This avoids eval entirely.
-        """
-        from js import window
-        state = getattr(window, '__gamehubTttPeerLoader', None)
-        if state is None:
-            return 'missing', 'loader not started in game frame'
-        if isinstance(state, dict):
-            return (cls._js_text(state.get('status'), 'missing'),
-                    cls._js_text(state.get('detail')))
-        return (cls._js_text(getattr(state, 'status', None), 'missing'),
-                cls._js_text(getattr(state, 'detail', None)))
-
-    async def _load_sdk(self):
-        """Detect preloaded library; try local file then CDNs with diagnostics."""
-        try:
-            from js import document  # noqa: F401 - confirms this is Pygbag
-        except ImportError as exc:
-            raise RuntimeError('Online play requires GameHub in a browser') from exc
-        if self._has_peerjs():
-            return
-        self._start_sdk_loader()
-        # JS attempts local + 2 x CDN, each with 8.5s timeout.
-        for attempt in range(290):
-            if self.closed:
-                raise asyncio.CancelledError()
-            if self._has_peerjs():
-                return
-            status, detail = self._sdk_status()
-            if status == 'ready':
-                if not self._has_peerjs():
-                    raise RuntimeError('Script loaded but constructor not found')
-                return
-            if status == 'missing' and attempt >= 10:
-                raise RuntimeError('Browser loader state missing after start; check generated HTML and JS console')
-            if status == 'failed':
-                raise RuntimeError('PeerJS sources failed: ' + detail)
-            if detail:
-                self.status = 'Loading online library: ' + detail
-            await asyncio.sleep(0.1)
-        raise RuntimeError('PeerJS loader exceeded 29 seconds; check build + cache')
-
-    def _construct_peer(self):
-        """Create the peer *inside* JavaScript, then read the JS object.
-
-        Do not eval a JavaScript function and try to call its returned proxy:
-        in some Pygbag/Pyodide Firefox versions that proxy is not exposed as a
-        Python-callable object, despite being a valid function in JavaScript.
-        A self-executing script and a JS global eliminate that extra bridge.
-        """
-        host_id = json.dumps(self.room_id)
-        is_host = 'true' if self.role == 'CREATE' else 'false'
-        script = """(function() {
-            const ctor = (window.peerjs && window.peerjs.Peer) || window.Peer;
-            if (typeof ctor !== 'function') {
-                throw new Error('PeerJS constructor missing after loading');
-            }
-            // All construction happens on the JavaScript side.
-            // Keep the instance reachable without returning a JS function.
-            const peer = __HOST__ ? new ctor(__ROOM__) : new ctor();
-            window.__gamehubTttActivePeer = peer;
-        })();""".replace('__HOST__', is_host).replace('__ROOM__', host_id)
-        self._browser_eval(script)
-        from js import window
-        peer = getattr(window, '__gamehubTttActivePeer', None)
-        if peer is None:
-            raise RuntimeError('PeerJS instance not accessible after JS construction')
-        return peer
-
-    def poll(self, now=None):
-        """Turns a stalled connection into actionable feedback on screen."""
-        import time
-        if self.closed:
-            return
-        if self.peer is not None:
-            self._drain_browser_events()
-        if self.ready or self._terminal_error:
-            return
-        if now is None:
-            now = time.monotonic()
-        if (self._handshake_started is not None and
-                now - self._handshake_started > CONNECTION_TIMEOUT and
-                not self._timeout_reported):
-            self._timeout_reported = True
-            self._terminal_error = True
-            stage = self._last_ice_state or 'unknown'
-            self.status = ('WebRTC timed out (ICE ' + stage + '). '
-                           'Try same Wi-Fi; TURN may be needed.')
-            return
-        if (self.role == 'JOIN' and self._connect_started is not None
-                and not self._timeout_reported
-                and now - self._connect_started > CONNECTION_TIMEOUT):
-            self._timeout_reported = True
-            self._terminal_error = True
-            self.status = 'Peer connection timed out. Check host and network.'
-            # A late connection can still succeed; _conn_open clears timeout.
-        elif (self._signaling_started is not None and self.peer is not None
-              and self._connect_started is None and not self._timeout_reported
-              and now - self._signaling_started > CONNECTION_TIMEOUT):
-            self._timeout_reported = True
-            self._terminal_error = True
-            self.status = 'Peer server timeout. Check internet and retry.'
-
     def launch(self, role, animals):
         self.role = role
-        self.room_id = 'gamehub-ttt-v2-' + '-'.join(ICON_NAMES[i].lower() for i in animals)
-        self.job = asyncio.create_task(self._start())
-
-    async def _start(self):
-        stage = 'loading PeerJS'
+        code = ''.join(str(i) for i in animals)
+        if len(code) != 3 or any(c not in '01234' for c in code):
+            self.status = 'Invalid animal code'
+            return
         try:
-            self.status = 'Online v2.1.8: checking PeerJS...'
-            await self._load_sdk()
-            if self.closed:
-                return
-            stage = 'creating PeerJS peer'
-            import time
-            self._signaling_started = time.monotonic()
-            self.peer = self._construct_peer()
-            self.status = ('Opening room...' if self.role == 'CREATE'
-                           else 'Finding friend...')
-            stage = 'installing browser event queue'
-            self._install_browser_events()
-        except asyncio.CancelledError:
-            raise
+            script = (FIREBASE_BRIDGE_SCRIPT
+                .replace('__FIREBASE_CONFIG__', json.dumps(FIREBASE_CONFIG))
+                .replace('__ROOM_CODE__', json.dumps(code))
+                .replace('__ROLE__', json.dumps(role)))
+            self._browser_eval(script)
+            self.status = 'Signing in to Firebase...'
         except Exception as exc:
-            if not self.closed:
-                # A named stage and exception class are more diagnostic than
-                # "Online unavailable: NoneType object is not callable".
-                self.status = (stage + ': ' + type(exc).__name__ +
-                               ': ' + str(exc))[:220]
+            self.status = ('Starting Firebase: ' + type(exc).__name__ + ': ' + str(exc))[:175]
 
-    def _peer_open(self, _peer_id=None):
-        if self.closed:
-            return
-        if self.role == 'CREATE':
-            self._signaling_started = None
-            self.status = 'Room ready (v2.1.8)! Waiting for friend...'
-        else:
-            self.status = 'Connecting to friend...'
-            import time
-            self._connect_started = time.monotonic()
-            # Guest peer.connect() already ran in JS and its events are queued.
+    def stop(self):
+        self.closed = True
+        self.ready = False
+        try:
+            self._browser_eval('(function(){const s=window.__ghTttFirebase; '
+                'if(s && s.close) s.close(); window.__ghTttFirebase=null;})()')
+        except Exception:
+            pass
 
-    def _conn_pending(self, *_):
-        if self.closed or self.ready or self._terminal_error:
-            return
-        import time
-        if self._handshake_started is None:
-            self._handshake_started = time.monotonic()
-        self.status = 'Friend found. Establishing WebRTC connection...'
-
-    def _ice_state(self, data):
-        if self.closed or not isinstance(data, dict):
-            return
-        ice = str(data.get('ice', 'unknown'))[:30]
-        link = str(data.get('link', 'unknown'))[:30]
-        self._last_ice_state = ice
-        self._last_pc_state = link
-        if self.ready or self._terminal_error:
-            return
-        if ice in ('failed', 'disconnected') or link == 'failed':
-            self._terminal_error = True
-            self._timeout_reported = True
-            self.status = ('WebRTC ICE ' + ice + '. Network may block P2P; '
-                           'try same Wi-Fi or TURN.')
-        elif ice == 'checking':
-            self.status = 'WebRTC: checking connection routes (ICE)...'
-        elif ice == 'connected' or link == 'connected':
-            self.status = 'WebRTC link established. Opening game channel...'
-
-    @staticmethod
-    def _error_details(error):
-        if isinstance(error, dict):
-            return (str(error.get('type') or 'unknown'),
-                    str(error.get('message') or 'unknown'))
-        return ('unknown', str(error or 'unknown'))
-
-    def _conn_open(self, *_):
-        if self.closed:
-            return
-        self.ready = True
-        self._terminal_error = False
-        self._handshake_started = None
-        # JS owns the real connection. A sentinel is enough for Python state.
-        self.connection = True
-        self.status = 'Friend connected!'
-        self._ever_connected = True
-        self._timeout_reported = False
-        self._signaling_started = None
-        self._connect_started = None
-        self.game.waiting_move = False
-        if self.role == 'CREATE':
-            self.send_state()
-        else:
-            # Avoid a lost initial state when the guest's open event arrives
-            # after the host's first state packet. Ask for an authoritative sync.
-            self.send({'type': 'hello', 'round': self.game.round_number})
-
-    def _conn_data(self, raw):
+    def poll(self):
         if self.closed:
             return
         try:
-            raw = str(raw)
-            if len(raw) > 2048:
+            self._browser_eval('''(function(){
+                const s=window.__ghTttFirebase;
+                window.__ghTttFirebaseEventsJSON=JSON.stringify(
+                  s && !s.disposed ? s.queue.splice(0,96) : []);
+            })()''')
+            from js import window
+            raw=self._js_text(getattr(window, '__ghTttFirebaseEventsJSON', '[]'), '[]')
+            events=json.loads(raw)
+            if not isinstance(events, list):
                 return
-            message = json.loads(raw)
-            if not isinstance(message, dict) or message.get('v') != PROTOCOL_VERSION:
-                return
-            if self.role == 'CREATE':
-                self._host_message(message)
-            else:
-                self._guest_message(message)
-        except (ValueError, TypeError, KeyError):
-            return
+            for e in events:
+                if self.closed or not isinstance(e, dict):
+                    break
+                kind=e.get('kind'); data=e.get('data')
+                if kind == 'status' and not self.last_error:
+                    self.status = str(data)[:175]
+                elif kind == 'notice' and not self.last_error:
+                    self.status = str(data)[:175]
+                    self.game.waiting_move=False
+                elif kind == 'error':
+                    self.ready=False
+                    self.last_error=True
+                    self.game.waiting_move=False
+                    where=str((data or {}).get('where', 'Firebase'))
+                    code=str((data or {}).get('code', ''))
+                    detail=str((data or {}).get('message',''))
+                    if 'permission-denied' in code or 'PERMISSION_DENIED' in detail:
+                        self.status = 'Permission denied: publish Firebase Database rules.'
+                    elif 'auth/operation-not-allowed' in code:
+                        self.status = 'Enable Anonymous sign-in in Firebase Authentication.'
+                    else:
+                        self.status = (where + ': ' + code + ' ' + detail)[:220]
+                elif kind == 'lost':
+                    self.ready=False
+                    self.game.waiting_move=False
+                    self.status=str(data)[:200]
+                elif kind == 'state' and isinstance(data, dict):
+                    self._handle_state(data)
+        except Exception as exc:
+            self.status=('Reading Firebase events: '+type(exc).__name__+': '+str(exc))[:190]
 
-    def _host_message(self, message):
-        game = self.game
-        if message.get('type') == 'hello':
-            self.send_state()
+    def _handle_state(self, data):
+        board=data.get('board')
+        turn=data.get('turn')
+        winner=data.get('winner')
+        round_no=data.get('round')
+        revision=data.get('revision')
+        if not (isinstance(board,str) and len(board)==9 and
+                all(c in '-XO' for c in board) and turn in ('X','O') and
+                winner in ('','X','O','TIE') and type(round_no) is int and
+                round_no>=0 and type(revision) is int and revision>=0):
+            self.status='Invalid online board state'
             return
-        if message.get('round') != game.round_number:
-            self.send_state()
-            return
-        kind = message.get('type')
-        if kind == 'move':
-            # Only the host mutates authoritative board state; guest is O.
-            index = message.get('index')
-            if (type(index) is int and 0 <= index < 9 and
-                    game.current_turn == 'O' and game.winner is None and
-                    game.board[index] == ''):
-                game.apply_move(index, 'O')
-            self.send_state()  # also acknowledges invalid/stale move
-        elif kind == 'restart' and game.winner is not None:
-            game.new_round()
-            self.send_state()
-
-    def _guest_message(self, message):
-        if message.get('type') != 'state':
-            return
-        board = message.get('board')
-        turn = message.get('turn')
-        winner = message.get('winner')
-        round_no = message.get('round')
-        revision = message.get('revision')
-        if (not isinstance(board, list) or len(board) != 9 or
-                not all(x in ('', 'X', 'O') for x in board) or
-                turn not in ('X', 'O') or
-                winner not in (None, 'X', 'O', 'TIE') or
-                type(round_no) is not int or round_no < 0 or
-                type(revision) is not int or revision < 0):
-            return
-        game = self.game
+        game=self.game
+        new_board=['' if c=='-' else c for c in board]
+        # Ignore duplicate / stale snapshots that could arrive due to reconnect.
         if (round_no < game.round_number or
-                (round_no == game.round_number and revision < game.revision)):
+                (round_no==game.round_number and revision < game.revision)):
             return
-        game.board = list(board)
-        game.current_turn = turn
-        game.winner = winner
-        game.round_number = round_no
-        game.revision = revision
-        game.waiting_move = False
-        self.status = 'Connected'
+        game.board=new_board
+        game.current_turn=turn
+        game.winner=winner if winner else None
+        game.round_number=round_no
+        game.revision=revision
+        game.waiting_move=False
+        self.ready=bool(data.get('ready'))
+        self.last_error=False
+        self.status=('Friend connected! Play together.' if self.ready else
+                    ('Waiting for friend...' if self.role=='CREATE' else
+                     'Waiting for host...'))
 
-    def send(self, payload):
-        if not self.ready:
+    def _send_action(self, action, index=None):
+        if self.closed or not self.ready:
             return False
         try:
-            data = dict(payload)
-            data['v'] = PROTOCOL_VERSION
-            raw = json.dumps(data, separators=(',', ':'))
-            # Browser owns the DataConnection; avoid JsProxy.send() as well.
-            self._browser_eval("""(function() {
-              window.__gamehubTttSendError = '';
-              const bridge = window.__gamehubTttBridge;
-              if (!bridge || bridge.disposed || !bridge.connection ||
-                  bridge.connection.open !== true) {
-                window.__gamehubTttSendError = 'Connection is not open';
-                return;
-              }
-              try { bridge.connection.send(__DATA__); }
-              catch (error) {
-                window.__gamehubTttSendError = String(error);
-              }
-            })()""".replace('__DATA__', json.dumps(raw)))
-            from js import window
-            err = self._js_text(getattr(window, '__gamehubTttSendError', ''))
-            if err:
-                raise RuntimeError(err)
+            if action=='move':
+                script='(function(){const s=window.__ghTttFirebase; if(s && s.move) s.move('+str(int(index))+');})()'
+            else:
+                script='(function(){const s=window.__ghTttFirebase; if(s && s.restart) s.restart();})()'
+            self._browser_eval(script)
             return True
         except Exception as exc:
-            self.ready = False
-            self.status = 'Connection send failed: ' + str(exc)[:80]
+            self.status=('Saving game: '+str(exc))[:170]
             return False
 
-    def send_state(self):
-        game = self.game
-        return self.send({
-            'type': 'state', 'board': game.board,
-            'turn': game.current_turn, 'winner': game.winner,
-            'round': game.round_number, 'revision': game.revision,
-        })
-
     def send_move(self, index):
-        return self.send({'type': 'move', 'index': index,
-                          'round': self.game.round_number})
+        return self._send_action('move', index)
 
     def request_restart(self):
-        return self.send({'type': 'restart',
-                          'round': self.game.round_number})
+        return self._send_action('restart')
 
-    def _conn_close(self, *_):
-        if self.closed:
-            return
-        if self._terminal_error:
-            return  # Do not hide the specific WebRTC error with a generic close.
-        self.ready = False
-        self.connection = None
-        self.game.waiting_move = False
-        self.status = ('Friend left. Waiting for friend...' if self.role == 'CREATE'
-                       else 'Friend disconnected. Go back to retry.')
-
-    def _conn_error(self, error=None):
-        if self.closed:
-            return
-        self.ready = False
-        self.game.waiting_move = False
-        self._terminal_error = True
-        self._timeout_reported = True
-        kind, message = self._error_details(error)
-        ice = self._last_ice_state or 'unknown'
-        if ice == 'failed':
-            self.status = ('WebRTC ICE failed. Try same Wi-Fi; '
-                           'TURN relay may be required.')
-        else:
-            self.status = ('Connection ' + kind + ' (ICE ' + ice + '): ' + message)[:200]
-
-    def _peer_error(self, error=None):
-        if self.closed:
-            return
-        code, message = self._error_details(error)
-        self._terminal_error = True
-        if code == 'unavailable-id':
-            self.status = 'Room already in use. Choose another animal code.'
-        elif code == 'peer-unavailable':
-            self.status = 'No room yet. Host must open same code first.'
-        elif code in ('network', 'server-error', 'socket-error', 'socket-closed'):
-            self.status = 'Cannot reach room server. Check network / retry.'
-        elif code in ('webrtc', 'browser-incompatible'):
-            self.status = 'WebRTC blocked. Try a different browser / network.'
-        else:
-            self.status = 'PeerJS ' + code[:28] + ': ' + message[:120]
-        self.ready = False
-        self._timeout_reported = True
-
-    def _peer_disconnected(self, *_):
-        if not self.closed and not self._terminal_error:
-            self.status = 'Room server disconnected. Go Back and retry.'
-            self.ready = False
 
 
 class TicTacToeGame:
@@ -972,14 +590,11 @@ class TicTacToeGame:
         if self.net_type == 'REMOTE':
             if self.net is None or not self.net.ready:
                 return
-            if self.room_role == 'CREATE':
-                if self.current_turn == 'X' and self.apply_move(index, 'X'):
-                    self.net.send_state()
-            else:
-                if self.current_turn == 'O' and not self.waiting_move:
-                    self.waiting_move = True
-                    if not self.net.send_move(index):
-                        self.waiting_move = False
+            my_symbol = 'X' if self.room_role == 'CREATE' else 'O'
+            if self.current_turn == my_symbol and not self.waiting_move:
+                self.waiting_move = True
+                if not self.net.send_move(index):
+                    self.waiting_move = False
         else:
             symbol = self.current_turn
             if self.apply_move(index, symbol):
@@ -993,18 +608,14 @@ class TicTacToeGame:
         if self.net_type == 'REMOTE':
             if self.net is None or not self.net.ready or self.winner is None:
                 return
-            if self.room_role == 'CREATE':
-                self.new_round()
-                self.net.send_state()
-            else:
-                self.net.request_restart()
-                self.net.status = 'Waiting for a new round...'
+            if self.net.request_restart():
+                self.net.status = 'Starting new round...'
         else:
             self.new_round()
 
     def _start_network(self):
         self._close_online()
-        self.net = PeerSession(self)
+        self.net = FirebaseSession(self)
         self.net.launch(self.room_role, self.selected_pass)
         self.state = 'PLAYING'
         self.board = ['']*9
@@ -1166,7 +777,7 @@ class TicTacToeGame:
                 if self.waiting_move:
                     status='Sending move...'
                 if self.net is not None and self.net.ready and not self.waiting_move:
-                    status=('You are X (host)' if self.room_role=='CREATE' else 'You are O (guest)')
+                    status=('You are X - your move' if self.room_role=='CREATE' else 'You are O - your move')
                 # Keep the diagnostic stage visible, including on small iPads.
                 # Two lines avoid cutting off errors before the meaningful part.
                 color=(COLOR_GOLD if (self.net is not None and not self.net.ready)
