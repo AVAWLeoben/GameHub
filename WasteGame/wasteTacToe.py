@@ -2,7 +2,7 @@
 """Kiddie Tic-Tac-Toe for GameHub (Pygame-ce / Pygbag).
 
 One-screen kids' UI, solo AI, local two-player, and browser-only PeerJS rooms.
-Version 2.1.7 moves PeerJS callbacks entirely into JavaScript; no pyodide.ffi needed.
+Version 2.1.8 retains the JS-only bridge and shows real WebRTC/ICE failure diagnostics.
 
 Integration: GameHub calls ``await main(screen, clock)``.
 Importing this module has no side effects. Returning from main() restores GameHub.
@@ -35,7 +35,7 @@ PEERJS_URLS = (
 )
 PEERJS_SCRIPT_ID = "gamehub-tictactoe-peerjs"
 PROTOCOL_VERSION = 2
-CONNECTION_TIMEOUT = 24.0
+CONNECTION_TIMEOUT = 35.0
 
 # Created by the game entry point, not at import time.
 font_title = None
@@ -196,6 +196,10 @@ class PeerSession:
         self._signaling_started = None
         self._ever_connected = False
         self._timeout_reported = False
+        self._handshake_started = None
+        self._last_ice_state = ''
+        self._last_pc_state = ''
+        self._terminal_error = False
 
     def stop(self):
         self.closed = True
@@ -238,7 +242,8 @@ class PeerSession:
             throw new Error('PeerJS instance has no event API');
           }
           const state = {
-            peer: peer, connection: null, disposed: false, events: []
+            peer: peer, connection: null, disposed: false, events: [],
+            lastIce: null, lastPc: null
           };
           window.__gamehubTttBridge = state;
           window.__gamehubTttEventsJSON = '[]';
@@ -250,6 +255,12 @@ class PeerSession:
           function errorCode(error) {
             return String(error && (error.type || error.message) || error || 'unknown');
           }
+          function errorDetail(error) {
+            return {
+              type: String(error && error.type || 'unknown').slice(0, 50),
+              message: String(error && error.message || error || 'unknown').slice(0, 160)
+            };
+          }
           function attach(conn) {
             if (!conn || typeof conn.on !== 'function') {
               emit('conn_error', 'Missing PeerJS data-connection API');
@@ -260,6 +271,9 @@ class PeerSession:
               return;
             }
             state.connection = conn;
+            state.lastIce = null;
+            state.lastPc = null;
+            emit('conn_pending');
             let opened = false;
             function openedOnce() {
               if (opened || state.disposed) return;
@@ -276,7 +290,7 @@ class PeerSession:
               if (state.connection === conn) state.connection = null;
               emit('conn_close');
             });
-            conn.on('error', error => emit('conn_error', errorCode(error)));
+            conn.on('error', error => emit('conn_error', errorDetail(error)));
             if (conn.open === true) openedOnce();
           }
           peer.on('open', id => {
@@ -290,7 +304,7 @@ class PeerSession:
               }
             }
           });
-          peer.on('error', error => emit('peer_error', errorCode(error)));
+          peer.on('error', error => emit('peer_error', errorDetail(error)));
           peer.on('disconnected', () => emit('peer_disconnected'));
           if (__HOST__) {
             peer.on('connection', conn => attach(conn));
@@ -312,6 +326,21 @@ class PeerSession:
         try:
             self._browser_eval("""(function() {
               const bridge = window.__gamehubTttBridge;
+              if (bridge && !bridge.disposed && bridge.connection) {
+                // Observe WebRTC ICE state without attaching browser callbacks
+                // or returning JS function objects through Pyodide.
+                const pc = bridge.connection.peerConnection;
+                if (pc) {
+                  const ice = String(pc.iceConnectionState || 'unknown');
+                  const link = String(pc.connectionState || 'unknown');
+                  if (ice !== bridge.lastIce || link !== bridge.lastPc) {
+                    bridge.lastIce = ice;
+                    bridge.lastPc = link;
+                    bridge.events.push({kind: 'ice_state',
+                      data: {ice: ice, link: link}});
+                  }
+                }
+              }
               window.__gamehubTttEventsJSON = JSON.stringify(
                 bridge && !bridge.disposed ? bridge.events.splice(0, 128) : []
               );
@@ -331,8 +360,12 @@ class PeerSession:
                     self._peer_error(data)
                 elif kind == 'peer_disconnected':
                     self._peer_disconnected()
+                elif kind == 'conn_pending':
+                    self._conn_pending()
                 elif kind == 'conn_open':
                     self._conn_open()
+                elif kind == 'ice_state':
+                    self._ice_state(data)
                 elif kind == 'conn_data' and isinstance(data, str):
                     self._conn_data(data)
                 elif kind == 'conn_close':
@@ -340,7 +373,7 @@ class PeerSession:
                 elif kind == 'conn_error':
                     self._conn_error(data)
                 elif kind == 'connect_error':
-                    self.status = 'Cannot connect: ' + str(data)[:76]
+                    self._conn_error({'type': 'connect', 'message': data})
         except Exception as exc:
             if not self.closed:
                 self.status = ('Reading online events: ' + type(exc).__name__ +
@@ -569,21 +602,32 @@ class PeerSession:
             return
         if self.peer is not None:
             self._drain_browser_events()
-        if self.ready:
+        if self.ready or self._terminal_error:
             return
         if now is None:
             now = time.monotonic()
+        if (self._handshake_started is not None and
+                now - self._handshake_started > CONNECTION_TIMEOUT and
+                not self._timeout_reported):
+            self._timeout_reported = True
+            self._terminal_error = True
+            stage = self._last_ice_state or 'unknown'
+            self.status = ('WebRTC timed out (ICE ' + stage + '). '
+                           'Try same Wi-Fi; TURN may be needed.')
+            return
         if (self.role == 'JOIN' and self._connect_started is not None
                 and not self._timeout_reported
                 and now - self._connect_started > CONNECTION_TIMEOUT):
             self._timeout_reported = True
-            self.status = 'Timed out. Check code / Wi-Fi; go Back and retry.'
+            self._terminal_error = True
+            self.status = 'Peer connection timed out. Check host and network.'
             # A late connection can still succeed; _conn_open clears timeout.
         elif (self._signaling_started is not None and self.peer is not None
               and self._connect_started is None and not self._timeout_reported
               and now - self._signaling_started > CONNECTION_TIMEOUT):
             self._timeout_reported = True
-            self.status = 'Room server timeout. Check internet; retry.'
+            self._terminal_error = True
+            self.status = 'Peer server timeout. Check internet and retry.'
 
     def launch(self, role, animals):
         self.role = role
@@ -593,7 +637,7 @@ class PeerSession:
     async def _start(self):
         stage = 'loading PeerJS'
         try:
-            self.status = 'Online v2.1.7: checking PeerJS...'
+            self.status = 'Online v2.1.8: checking PeerJS...'
             await self._load_sdk()
             if self.closed:
                 return
@@ -619,17 +663,53 @@ class PeerSession:
             return
         if self.role == 'CREATE':
             self._signaling_started = None
-            self.status = 'Room ready (v2.1.7)! Waiting for friend...'
+            self.status = 'Room ready (v2.1.8)! Waiting for friend...'
         else:
             self.status = 'Connecting to friend...'
             import time
             self._connect_started = time.monotonic()
             # Guest peer.connect() already ran in JS and its events are queued.
 
+    def _conn_pending(self, *_):
+        if self.closed or self.ready or self._terminal_error:
+            return
+        import time
+        if self._handshake_started is None:
+            self._handshake_started = time.monotonic()
+        self.status = 'Friend found. Establishing WebRTC connection...'
+
+    def _ice_state(self, data):
+        if self.closed or not isinstance(data, dict):
+            return
+        ice = str(data.get('ice', 'unknown'))[:30]
+        link = str(data.get('link', 'unknown'))[:30]
+        self._last_ice_state = ice
+        self._last_pc_state = link
+        if self.ready or self._terminal_error:
+            return
+        if ice in ('failed', 'disconnected') or link == 'failed':
+            self._terminal_error = True
+            self._timeout_reported = True
+            self.status = ('WebRTC ICE ' + ice + '. Network may block P2P; '
+                           'try same Wi-Fi or TURN.')
+        elif ice == 'checking':
+            self.status = 'WebRTC: checking connection routes (ICE)...'
+        elif ice == 'connected' or link == 'connected':
+            self.status = 'WebRTC link established. Opening game channel...'
+
+    @staticmethod
+    def _error_details(error):
+        if isinstance(error, dict):
+            return (str(error.get('type') or 'unknown'),
+                    str(error.get('message') or 'unknown'))
+        return ('unknown', str(error or 'unknown'))
+
     def _conn_open(self, *_):
         if self.closed:
             return
         self.ready = True
+        self._terminal_error = False
+        self._handshake_started = None
         # JS owns the real connection. A sentinel is enough for Python state.
         self.connection = True
         self.status = 'Friend connected!'
@@ -760,22 +840,34 @@ class PeerSession:
     def _conn_close(self, *_):
         if self.closed:
             return
+        if self._terminal_error:
+            return  # Do not hide the specific WebRTC error with a generic close.
         self.ready = False
         self.connection = None
         self.game.waiting_move = False
         self.status = ('Friend left. Waiting for friend...' if self.role == 'CREATE'
                        else 'Friend disconnected. Go back to retry.')
 
-    def _conn_error(self, _error=None):
-        if not self.closed:
-            self.ready = False
-            self.status = 'Connection error. Go back to retry.'
-            self.game.waiting_move = False
+    def _conn_error(self, error=None):
+        if self.closed:
+            return
+        self.ready = False
+        self.game.waiting_move = False
+        self._terminal_error = True
+        self._timeout_reported = True
+        kind, message = self._error_details(error)
+        ice = self._last_ice_state or 'unknown'
+        if ice == 'failed':
+            self.status = ('WebRTC ICE failed. Try same Wi-Fi; '
+                           'TURN relay may be required.')
+        else:
+            self.status = ('Connection ' + kind + ' (ICE ' + ice + '): ' + message)[:200]
 
     def _peer_error(self, error=None):
         if self.closed:
             return
-        code = error if isinstance(error, str) else str(getattr(error, 'type', ''))
+        code, message = self._error_details(error)
+        self._terminal_error = True
         if code == 'unavailable-id':
             self.status = 'Room already in use. Choose another animal code.'
         elif code == 'peer-unavailable':
@@ -785,12 +877,12 @@ class PeerSession:
         elif code in ('webrtc', 'browser-incompatible'):
             self.status = 'WebRTC blocked. Try a different browser / network.'
         else:
-            self.status = 'Online error: ' + (code or str(error))[:60]
+            self.status = 'PeerJS ' + code[:28] + ': ' + message[:120]
         self.ready = False
         self._timeout_reported = True
 
     def _peer_disconnected(self, *_):
-        if not self.closed:
+        if not self.closed and not self._terminal_error:
             self.status = 'Room server disconnected. Go Back and retry.'
             self.ready = False
 
