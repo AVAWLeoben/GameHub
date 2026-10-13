@@ -7,14 +7,15 @@ No external Python packages, GUI.Button dependency, or online services.
 """
 
 import asyncio
+from functools import lru_cache
 import math
 import os
 import random
 import traceback
 import pygame
-
 W, H = 800, 600
 FPS = 60
+SIM_DT = 1.0 / 120.0
 ROAD_Y = 483
 TRUCK_X = 118
 TRUCK_W, TRUCK_H = 114, 108
@@ -27,14 +28,12 @@ MUTED = (220, 213, 217)
 AMBER = (255, 204, 112)
 CORAL = (245, 117, 101)
 MINT = (125, 228, 185)
-
 # Remember the record while moving between GameHub games in one session.
 SESSION_BEST = 0
 
 
 def _asset_candidates(name):
     """Try both GameHub cwd and module-relative paths (Pygbag or desktop).
-
     Checking os.path.isfile is intentionally avoided: assets inside some web
     filesystems can be readable by pygame.image.load despite unreliable stat.
     """
@@ -44,7 +43,6 @@ def _asset_candidates(name):
         os.path.join(root, 'assets', name),
         os.path.join('WasteGame', 'assets', name),
     )
-
 
 def _img(name, size=None):
     """Load art without requiring conversion or smoothscale to succeed."""
@@ -65,14 +63,12 @@ def _img(name, size=None):
             last_error = exc
     raise FileNotFoundError('Could not load '+name+': '+str(last_error))
 
-
 def _optional_img(name, size=None):
     try:
         return _img(name, size)
     except Exception as exc:
         print('[WasteJump] Using built-in art for '+name+': '+str(exc))
         return None
-
 
 def _skyline_fallback():
     """Original dusk-city look built once, no newly added PNGs required."""
@@ -104,7 +100,6 @@ def _skyline_fallback():
                         pygame.draw.rect(layer, (238, 183, 131), (xx, yy, 6, 9))
     return sky, far, near
 
-
 def _truck_fallback():
     result = pygame.Surface((TRUCK_W, TRUCK_H), pygame.SRCALPHA)
     pygame.draw.ellipse(result, (20, 21, 41, 100), (5, TRUCK_H - 15, TRUCK_W - 10, 12))
@@ -116,7 +111,6 @@ def _truck_fallback():
         pygame.draw.circle(result, (189, 202, 209), (cx, 82), 6)
     return result
 
-
 def _obstacle_fallback(index, size):
     w, h = size
     result = pygame.Surface((w, h), pygame.SRCALPHA)
@@ -125,7 +119,6 @@ def _obstacle_fallback(index, size):
         pygame.draw.line(result, (237, 236, 212), (12, y), (w - 12, y), 6)
     pygame.draw.rect(result, (67, 75, 95), (5, h // 3, w - 10, h * 2 // 3), 3, border_radius=8)
     return result
-
 
 def _home_fallback():
     result = pygame.Surface((100, 100), pygame.SRCALPHA)
@@ -140,7 +133,6 @@ def font(size, bold=False):
     f.set_bold(bold)
     return f
 
-
 def text(surf, message, f, colour, centre=None, topleft=None):
     image = f.render(str(message), True, colour)
     rect = image.get_rect()
@@ -151,17 +143,20 @@ def text(surf, message, f, colour, centre=None, topleft=None):
     surf.blit(image, rect)
     return rect
 
-
-def panel(surf, rect, fill=(36, 39, 70), edge=(250, 205, 170), alpha=237, radius=22):
-    """Reusable clear, strong-contrast panel with shallow offset shadow."""
-    shadow = pygame.Surface(rect.size, pygame.SRCALPHA)
+@lru_cache(maxsize=48)
+def _panel_images(size, fill, edge, alpha, radius):
+    shadow = pygame.Surface(size, pygame.SRCALPHA)
     pygame.draw.rect(shadow, (11, 18, 39, 140), shadow.get_rect(), border_radius=radius)
-    surf.blit(shadow, (rect.x, rect.y + 7))
-    layer = pygame.Surface(rect.size, pygame.SRCALPHA)
+    layer = pygame.Surface(size, pygame.SRCALPHA)
     pygame.draw.rect(layer, (*fill, alpha), layer.get_rect(), border_radius=radius)
     pygame.draw.rect(layer, (*edge, 240), layer.get_rect(), 3, border_radius=radius)
-    surf.blit(layer, rect.topleft)
+    return shadow, layer
 
+
+def panel(surf, rect, fill=(36, 39, 70), edge=(250, 205, 170), alpha=237, radius=22):
+    shadow, layer = _panel_images(rect.size, tuple(fill), tuple(edge), alpha, radius)
+    surf.blit(shadow, (rect.x, rect.y + 7))
+    surf.blit(layer, rect.topleft)
 
 def button(surf, rect, label, f, bg=CORAL, foreground=PAPER, style='play'):
     shadow = rect.move(0, 5)
@@ -178,7 +173,6 @@ def button(surf, rect, label, f, bg=CORAL, foreground=PAPER, style='play'):
         pygame.draw.polygon(surf, AMBER, [(cx-7,cy-11),(cx+12,cy),(cx-7,cy+11)])
     text(surf, label, f, foreground, centre=(rect.centerx+25,rect.centery-1))
 
-
 class Obstacle:
     # Widths and heights are matched to the original six obstacle PNGs.
     SIZES = ((68,82), (116,81), (92,91), (94,77), (63,106), (110,79))
@@ -188,13 +182,13 @@ class Obstacle:
         self.image = image
         self.w, self.h = image.get_size()
         self.x = float(x)
+        self.previous_x = self.x
         self.passed = False
         self.spark_phase = random.uniform(0, 6.28)
 
     @property
     def rect(self):
         return pygame.Rect(round(self.x), ROAD_Y+8-self.h, self.w, self.h)
-
     @property
     def hitbox(self):
         r = self.rect
@@ -203,11 +197,12 @@ class Obstacle:
                            max(15,round(self.w*.60)), max(15,round(self.h*.69)))
 
     def update(self, dt, speed):
+        self.previous_x = self.x
         self.x -= speed * dt
         self.spark_phase += 4 * dt
-
-    def draw(self, screen):
-        r = self.rect
+    def draw(self, screen, alpha=1.0):
+        x = self.previous_x + (self.x - self.previous_x) * alpha
+        r = pygame.Rect(round(x), ROAD_Y + 8 - self.h, self.w, self.h)
         if r.right < -15 or r.left > W + 15:
             return
         pygame.draw.ellipse(screen, (14, 17, 28), (r.centerx-self.w//3,ROAD_Y+1,
@@ -218,13 +213,11 @@ class Obstacle:
             glow = 2 + math.sin(self.spark_phase)*1.5
             pygame.draw.circle(screen, AMBER, (r.centerx, r.y+13), max(2,round(glow)))
 
-
 class WasteJump:
     START_RECT = pygame.Rect(281, 365, 238, 76)
     AGAIN_RECT = pygame.Rect(250, 394, 300, 80)
     PAUSE_RECT = pygame.Rect(735, 21, 51, 51)
     HOME_RECT = pygame.Rect(10, 10, 100, 100)
-
     def __init__(self, screen, clock):
         self.screen = screen
         self.clock = clock
@@ -235,7 +228,10 @@ class WasteJump:
         sw,sh = screen.get_size()
         scale = min(sw/W, sh/H)
         self.scale_area = pygame.Rect(round((sw-W*scale)/2),round((sh-H*scale)/2),
-                                      round(W*scale),round(H*scale))
+                                       round(W*scale),round(H*scale))
+        self.scaled_canvas = (pygame.Surface(self.scale_area.size)
+                              if self.canvas is not screen and self.scale_area.size != (W,H)
+                              else None)
         self.rng = random.Random()
         self.sky = _optional_img('wasteJump/city_dusk_sky.png')
         self.city_far = _optional_img('wasteJump/city_dusk_far.png')
@@ -276,7 +272,6 @@ class WasteJump:
         self.dedup_pos = (-9999,-9999)
         self.dedup_type = None
         self.reset_round()
-
     def reset_round(self):
         self.score = 0
         self.lives = 3
@@ -293,7 +288,11 @@ class WasteJump:
         self.game_seconds = 0.0
         self.last_kind = None
         self.since = 0.0
-
+        self.prev_distance = self.total_distance
+        self.prev_jump_height = self.jump_height
+        self.render_distance = self.total_distance
+        self.render_height = self.jump_height
+        self._rendering = False
     def _rounded_angle(self):
         if self.jump_height <= 0 and self.prejump <= 0:
             return 0
@@ -302,9 +301,8 @@ class WasteJump:
         flight = 2 * JUMP_SPEED / GRAVITY
         progress = min(1, self.airtime/flight)
         # Preserve original truck's playful barrel-roll jump; one full rotation.
-        a = int(round((progress*360)/10)*10)%360
+        a = int(round((progress*360)/6)*6)%360
         return a
-
     def _truck_sprite(self):
         angle=self._rounded_angle()
         if angle not in self.rotate_cache:
@@ -312,11 +310,11 @@ class WasteJump:
         return self.rotate_cache[angle]
 
     def truck_rect(self):
-        y = ROAD_Y+7-TRUCK_H-round(self.jump_height)
+        height = self.render_height if self._rendering else self.jump_height
+        y = ROAD_Y+7-TRUCK_H-round(height)
         if self.prejump>0:
             y+=round(9*min(1,self.prejump/.09))
         return pygame.Rect(TRUCK_X,y,TRUCK_W,TRUCK_H)
-
     def truck_hitbox(self):
         r=self.truck_rect()
         return pygame.Rect(r.x+25,r.y+30, r.w-43, r.h-41)
@@ -324,9 +322,8 @@ class WasteJump:
     def jump(self):
         if self.state != 'PLAYING' or self.prejump>0 or self.jump_height>0 or self.vertical_speed>0:
             return
-        self.prejump=.085
+        self.prejump=.045
         self.airtime=0.0
-
     def _spawn(self):
         candidates=list(range(6))
         if self.last_kind is not None and self.last_kind in candidates:
@@ -336,7 +333,6 @@ class WasteJump:
         self.obstacles.append(Obstacle(index,self.obstacle_images[index],W+30))
         # Long enough to land between hazards even at the fastest speed.
         self.spawn_timer=self.rng.uniform(1.75,2.20)
-
     def _bonk(self):
         if self.invincible>0 or self.state!='PLAYING':
             return
@@ -347,19 +343,19 @@ class WasteJump:
         if self.lives <= 0:
             self.state='OVER'
             self.feedback_timer=0
-
     def update(self, dt):
         self.since+=dt
         self.home_down=False
         if self.state != 'PLAYING':
             return
+        self.prev_distance = self.total_distance
+        self.prev_jump_height = self.jump_height
         self.game_seconds+=dt
         self.speed=min(370., 248.0 + self.score*5.0)
         self.total_distance+=dt*self.speed
         self.spawn_timer-=dt
         if self.spawn_timer<=0:
             self._spawn()
-
         if self.prejump>0:
             self.prejump-=dt
             if self.prejump<=0:
@@ -374,7 +370,6 @@ class WasteJump:
                 self.jump_height=0
                 self.vertical_speed=0
                 self.airtime=0
-
         self.invincible=max(0,self.invincible-dt)
         self.feedback_timer=max(0,self.feedback_timer-dt)
         me=self.truck_hitbox()
@@ -388,14 +383,12 @@ class WasteJump:
                 global SESSION_BEST
                 SESSION_BEST=max(SESSION_BEST,self.score)
         self.obstacles=[ob for ob in self.obstacles if ob.rect.right>-35]
-
     def _parallax(self,surface,layer,scroll):
         w=layer.get_width()
         offset=round(scroll)%w
         surface.blit(layer,(-offset,0))
         if w-offset<W:
             surface.blit(layer,(w-offset,0))
-
     def draw_road(self, surf):
         pygame.draw.rect(surf,(33,34,55),(0,ROAD_Y,W,H-ROAD_Y))
         pygame.draw.rect(surf,(247,184,130),(0,ROAD_Y-9,W,9))
@@ -404,24 +397,22 @@ class WasteJump:
         pygame.draw.line(surf,(69,67,84),(0,ROAD_Y+17),(W,ROAD_Y+17),2)
         # dashed road markings, continuous across the screen as world scrolls
         step=156
-        off=round(self.total_distance)%step
+        off=round(self.render_distance)%step
         for x in range(-off-step,W+step,step):
             pygame.draw.rect(surf,(255,202,128),(x+10,545,78,7),border_radius=3)
         # subtle pavement highlights
         pygame.draw.line(surf,(50,47,69),(0,H-2),(W,H-2),3)
-
     def _backdrop(self,surf):
         surf.blit(self.sky,(0,0))
-        self._parallax(surf,self.city_far,self.total_distance*.14)
-        self._parallax(surf,self.city_near,self.total_distance*.27)
+        self._parallax(surf,self.city_far,self.render_distance*.14)
+        self._parallax(surf,self.city_near,self.render_distance*.27)
         self.draw_road(surf)
-
     def _draw_truck(self, surf,menu=False):
         rect=self.truck_rect()
         if menu:
             rect=pygame.Rect(88, ROAD_Y+7-TRUCK_H,TRUCK_W,TRUCK_H)
         # Contact shadow shrinks when airborne.
-        lift=max(0.,float(self.jump_height))
+        lift=max(0.,float(self.render_height if self._rendering else self.jump_height))
         shw=max(29,round(76-lift*.14))
         pygame.draw.ellipse(surf,(20,23,40),(rect.centerx-shw//2,ROAD_Y+1,shw,12))
         if (self.invincible>0 and not menu and int(self.invincible*10)%2==0):
@@ -436,7 +427,6 @@ class WasteJump:
                 cx=rect.centerx+math.cos(angle)*65
                 cy=rect.centery+math.sin(angle)*43
                 pygame.draw.circle(surf,AMBER,(round(cx),round(cy)),3)
-
     def _draw_hud(self,surf):
         panel(surf,pygame.Rect(596,15,126,71),alpha=215,radius=16,edge=(239,168,139))
         text(surf,'SCORE',self.f_hint,AMBER,centre=(660,37))
@@ -454,7 +444,6 @@ class WasteJump:
             pygame.draw.polygon(surf,colour,[(cx-15,49),(cx+15,49),(cx,69)])
         if self.feedback_timer>0:
             text(surf,self.feedback,self.f_large,AMBER,centre=(240,323))
-
     def _draw_menu(self,surf):
         self._draw_truck(surf,menu=True)
         panel(surf,pygame.Rect(228,131,344,321),fill=(36,43,74),alpha=241)
@@ -464,12 +453,10 @@ class WasteJump:
         text(surf,'Hop over roadworks!',self.f_small,MUTED,centre=(400,307))
         button(surf,self.START_RECT,'PLAY',self.f_button, bg=CORAL)
         text(surf,'ONE TAP  •  ONE JUMP',self.f_hint,(251,228,197),centre=(400,341))
-
     def _draw_pause(self,surf):
         panel(surf,pygame.Rect(241,165,318,267),alpha=246)
         text(surf,'PAUSED',self.f_big,AMBER,centre=(400,231))
         button(surf,pygame.Rect(284,319,231,73),'GO!',self.f_button,bg=(75,167,141))
-
     def _draw_over(self,surf):
         panel(surf,pygame.Rect(209,135,382,354),alpha=250)
         text(surf,'NICE TRY!',self.f_big,AMBER,centre=(400,199))
@@ -479,24 +466,28 @@ class WasteJump:
         text(surf,str(SESSION_BEST),self.f_large,PAPER,centre=(495,304))
         button(surf,self.AGAIN_RECT,'AGAIN!',self.f_button,bg=CORAL,style='again')
         text(surf,'YOU CAN DO IT!',self.f_hint,MUTED,centre=(400,357))
-
-    def draw(self):
+    def draw(self, alpha=1.0):
+        self.render_distance = (self.prev_distance +
+                                (self.total_distance-self.prev_distance)*alpha)
+        self.render_height = (self.prev_jump_height +
+                              (self.jump_height-self.prev_jump_height)*alpha)
+        self._rendering = True
         surf=self.canvas
         self._backdrop(surf)
         if self.state=='PLAYING':
             for obstacle in self.obstacles:
-                obstacle.draw(surf)
+                obstacle.draw(surf, alpha)
             self._draw_truck(surf)
             self._draw_hud(surf)
         elif self.state=='PAUSED':
             for obstacle in self.obstacles:
-                obstacle.draw(surf)
+                obstacle.draw(surf, alpha)
             self._draw_truck(surf)
             self._draw_hud(surf)
             self._draw_pause(surf)
         elif self.state=='OVER':
             for obstacle in self.obstacles:
-                obstacle.draw(surf)
+                obstacle.draw(surf, alpha)
             self._draw_truck(surf)
             self._draw_over(surf)
         else:
@@ -508,9 +499,9 @@ class WasteJump:
                 self.screen.blit(self.canvas,self.scale_area.topleft)
             else:
                 self.screen.fill((21,27,52))
-                scaled=pygame.transform.scale(self.canvas,self.scale_area.size)
-                self.screen.blit(scaled,self.scale_area.topleft)
-
+                pygame.transform.scale(self.canvas,self.scale_area.size,self.scaled_canvas)
+                self.screen.blit(self.scaled_canvas,self.scale_area.topleft)
+        self._rendering = False
     def to_world(self, pos, touch=False):
         if touch:
             sx=pos[0]*self.screen.get_width()
@@ -521,7 +512,6 @@ class WasteJump:
             return (-1000,-1000)
         return (int((sx-self.scale_area.x)*W/max(self.scale_area.width,1)),
                 int((sy-self.scale_area.y)*H/max(self.scale_area.height,1)))
-
     def press(self, pos, source):
         tick=pygame.time.get_ticks()
         # Some iPad browsers emit BOTH touch and synthesized mouse events.
@@ -555,11 +545,11 @@ class WasteJump:
                 self.state='PAUSED'
             else:
                 self.jump()
-
     async def run(self):
         try:
+            accumulator = 0.0
             while self.running:
-                dt=min(.045,self.clock.tick(FPS)/1000.)
+                frame_dt = min(.05, self.clock.tick(FPS)/1000.)
                 for event in pygame.event.get():
                     if event.type==pygame.QUIT:
                         self.running=False
@@ -580,14 +570,18 @@ class WasteJump:
                                 self.state='PLAYING'
                         elif event.key==pygame.K_p and self.state in ('PLAYING','PAUSED'):
                             self.state='PAUSED' if self.state=='PLAYING' else 'PLAYING'
-                self.update(dt)
-                self.draw()
+                # Physics is independent of variable browser frame times.
+                # Cap catch-up to prevent spiral-of-death after tab suspension.
+                accumulator = min(.075, accumulator + frame_dt)
+                while accumulator >= SIM_DT:
+                    self.update(SIM_DT)
+                    accumulator -= SIM_DT
+                self.draw(max(0.0, min(1.0, accumulator / SIM_DT)))
                 pygame.display.flip()
                 await asyncio.sleep(0)
         finally:
             # Leave the shared display and mixer alive for GameHub.
             pass
-
 
 async def _startup_error_screen(screen, clock, exc):
     """Keep GameHub responsive and show the real cause rather than freeze."""
@@ -614,7 +608,6 @@ async def _startup_error_screen(screen, clock, exc):
         pygame.display.flip()
         clock.tick(30)
         await asyncio.sleep(0)
-
 
 async def main(screen, clock):
     """GameHub-compatible entry point: missing files never hang the main menu."""
