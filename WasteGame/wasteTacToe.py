@@ -2,7 +2,7 @@
 """Kiddie Tic-Tac-Toe for GameHub (Pygame-ce / Pygbag).
 
 One-screen kids' UI, solo AI, local two-player, and browser-only PeerJS rooms.
-Version 2.1.2 fixes JavaScript Peer construction and displays network stages.
+Version 2.1.4 fixes PeerJS detection, local-first loading, and load diagnostics.
 
 Integration: GameHub calls ``await main(screen, clock)``.
 Importing this module has no side effects. Returning from main() restores GameHub.
@@ -25,11 +25,13 @@ COLOR_PURPLE = (155, 89, 182)
 COLOR_ORANGE = (255, 127, 80)
 ICON_NAMES = ("Dog", "Cat", "Rabbit", "Fox", "Panda")
 
-# The SDK loads only if a player chooses online mode. Uses PeerJS's public
-# signaling service; internet/WebRTC access is necessary on both devices.
+# The build preloads the same-origin library before Pygbag runs. If that
+# preload is missing/cached, try the site's own copy and then two CDN backups.
+# Internet/WebRTC access is still required for the PeerJS signaling service.
 PEERJS_URLS = (
-    "https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js",
-    "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js",
+    "vendor/peerjs-1.5.4.min.js",
+    "https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js",
+    "https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js",
 )
 PEERJS_SCRIPT_ID = "gamehub-tictactoe-peerjs"
 PROTOCOL_VERSION = 2
@@ -251,43 +253,130 @@ class PeerSession:
 
     @classmethod
     def _has_peerjs(cls):
-        # Only native Python booleans cross this boundary, never a JS proxy
-        # whose truthiness could raise 'object has no len()'.
-        return cls._browser_eval("""(
-            typeof window !== 'undefined' &&
-            ((window.peerjs && typeof window.peerjs.Peer === 'function') ||
-             typeof window.Peer === 'function')
-        )""") is True
+        """Return a Python bool; never compare JS Boolean proxies using `is True`."""
+        return cls._browser_eval("""(function () {
+            return (typeof window !== 'undefined' &&
+               ((window.peerjs && typeof window.peerjs.Peer === 'function') ||
+                typeof window.Peer === 'function')) ? 'ready' : 'missing';
+        })()""") == 'ready'
+
+    @classmethod
+    def _start_sdk_loader(cls):
+        """Run the script loading and retries entirely on the JS side.
+
+        Pyodide's JavaScript proxies can behave differently from native Python
+        values. This script uses browser-native DOM operations and reports a
+        plain string status to Python instead of holding JS DOM proxies.
+        """
+        urls_json = json.dumps(PEERJS_URLS)
+        script_id = json.dumps(PEERJS_SCRIPT_ID)
+        js_code = """(function() {
+          const existing = window.__gamehubTttPeerLoader;
+          const ctorReady = () =>
+              (typeof window.Peer === 'function') ||
+              (window.peerjs != null && typeof window.peerjs.Peer === 'function');
+          if (ctorReady()) {
+              window.__gamehubTttPeerLoader = {
+                  version: 214, status: 'ready', detail: 'PeerJS already present'
+              };
+              return;
+          }
+          if (existing && existing.version === 214 && existing.status === 'loading') {
+              return;
+          }
+          const urls = __URLS__;
+          const idPrefix = __ID__;
+          const state = {
+              version: 214, status: 'loading', detail: 'Starting script load',
+              index: 0, failures: []
+          };
+          window.__gamehubTttPeerLoader = state;
+          function tryNext() {
+              if (ctorReady()) {
+                  state.status = 'ready';
+                  state.detail = 'PeerJS loaded';
+                  return;
+              }
+              if (state.index >= urls.length) {
+                  state.status = 'failed';
+                  state.detail = state.failures.join('; ');
+                  return;
+              }
+              const url = urls[state.index];
+              const number = state.index++;
+              const label = number === 0 ? 'local vendor PeerJS' :
+                    (new URL(url, document.baseURI)).hostname;
+              let script = document.createElement('script');
+              script.id = idPrefix + '-' + number;
+              script.src = new URL(url, document.baseURI).href;
+              script.async = true;
+              state.detail = 'Trying ' + label;
+              let finished = false;
+              const timer = window.setTimeout(() => finish('timeout'), 8500);
+              function finish(reason) {
+                  if (finished || state.status !== 'loading') return;
+                  finished = true;
+                  window.clearTimeout(timer);
+                  script.onload = null;
+                  script.onerror = null;
+                  if (ctorReady()) {
+                      state.status = 'ready';
+                      state.detail = 'PeerJS loaded from ' + label;
+                      return;
+                  }
+                  state.failures.push(label + ': ' + reason);
+                  script.remove();
+                  tryNext();
+              }
+              script.onload = () => finish('loaded but PeerJS constructor missing');
+              script.onerror = () => finish('network/script error');
+              try {
+                  document.head.appendChild(script);
+              } catch (error) {
+                  finish('DOM error: ' + String(error));
+              }
+          }
+          tryNext();
+        })()""".replace('__URLS__', urls_json).replace('__ID__', script_id)
+        cls._browser_eval(js_code)
+
+    @classmethod
+    def _sdk_status(cls):
+        """Return [status, detail] as JSON from JS, not unwrapped proxies."""
+        raw = cls._browser_eval("""JSON.stringify(
+          window.__gamehubTttPeerLoader ||
+          {status:'missing',detail:'loader not started'})""")
+        if not isinstance(raw, str):
+            raise RuntimeError('Cannot read browser SDK loader state')
+        state = json.loads(raw)
+        return state.get('status','missing'), state.get('detail','')
 
     async def _load_sdk(self):
-        """Load PeerJS only for online mode. Return when its JS constructor exists."""
+        """Detect preloaded library; try local file then CDNs with diagnostics."""
         try:
-            from js import document
+            from js import document  # noqa: F401 - confirms this is Pygbag
         except ImportError as exc:
             raise RuntimeError('Online play requires GameHub in a browser') from exc
         if self._has_peerjs():
             return
-        for attempt, url in enumerate(PEERJS_URLS):
+        self._start_sdk_loader()
+        # JS attempts local + 2 x CDN, each with 8.5s timeout.
+        for _ in range(290):
             if self.closed:
                 raise asyncio.CancelledError()
-            self.status = ('Loading online service...' if attempt == 0
-                           else 'Trying backup online service...')
-            script_id = PEERJS_SCRIPT_ID + '-' + str(attempt)
-            script = document.getElementById(script_id)
-            if script is None:
-                script = document.createElement('script')
-                script.id = script_id
-                script.src = url
-                script.async_ = True
-                document.head.appendChild(script)
-            # Nonblocking, allowing Pygbag to keep drawing while loading.
-            for _ in range(90):
-                if self.closed:
-                    raise asyncio.CancelledError()
-                if self._has_peerjs():
-                    return
-                await asyncio.sleep(0.1)
-        raise RuntimeError('PeerJS did not load; check internet or CDN blocking')
+            if self._has_peerjs():
+                return
+            status, detail = self._sdk_status()
+            if status == 'ready':
+                if not self._has_peerjs():
+                    raise RuntimeError('Script loaded but constructor not found')
+                return
+            if status == 'failed':
+                raise RuntimeError('PeerJS sources failed: ' + detail)
+            if detail:
+                self.status = 'Loading online library: ' + detail
+            await asyncio.sleep(0.1)
+        raise RuntimeError('PeerJS loader exceeded 29 seconds; check build + cache')
 
     def _construct_peer(self):
         """Construct the PeerJS class in JavaScript, not through JsProxy.new.
@@ -336,7 +425,7 @@ class PeerSession:
     async def _start(self):
         stage = 'loading PeerJS'
         try:
-            self.status = 'Loading online play...'
+            self.status = 'Online v2.1.4: checking PeerJS...'
             await self._load_sdk()
             if self.closed:
                 return
@@ -359,14 +448,14 @@ class PeerSession:
                 # A named stage and exception class are more diagnostic than
                 # "Online unavailable: NoneType object is not callable".
                 self.status = (stage + ': ' + type(exc).__name__ +
-                               ': ' + str(exc))[:160]
+                               ': ' + str(exc))[:220]
 
     def _peer_open(self, _peer_id=None):
         if self.closed:
             return
         if self.role == 'CREATE':
             self._signaling_started = None
-            self.status = 'Room ready! Waiting for friend...'
+            self.status = 'Room ready (v2.1.4)! Waiting for friend...'
         else:
             self.status = 'Connecting to friend...'
             try:
@@ -843,9 +932,9 @@ class TicTacToeGame:
                         line=trial
                 if line:
                     lines.append(line)
-                for j,chunk in enumerate(lines[:2]):
+                for j,chunk in enumerate(lines[:3]):
                     txt=font_btn_sub.render(chunk,True,color)
-                    y=(475 if self.winner is None else 433) + j*22
+                    y=(453 if self.winner is None else 420) + j*21
                     surf.blit(txt,txt.get_rect(center=(WIDTH//2,y)))
         width,height=self.screen.get_size()
         if (width,height)==(WIDTH,HEIGHT):
