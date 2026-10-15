@@ -369,10 +369,16 @@ class Bullet:
 
 
 class EnemyBullet:
-    def __init__(self, x, y, vx, vy, damage=7, color=(255, 114, 56), size=6):
+    """Enemy-only hazard shot, conspicuous on sea, sand and bright snow."""
+
+    def __init__(self, x, y, vx, vy, damage=7, color=None, size=6):
         self.x, self.y = float(x), float(y)
         self.vx, self.vy = vx, vy
-        self.damage, self.color, self.size = damage, color, size
+        # A uniform magenta hazard colour replaces the old desert orange and
+        # arctic cyan, which were difficult to see against the terrain.
+        # Bosses may still pass their older colour arguments; they are ignored
+        # intentionally to keep all enemy shots instantly recognisable.
+        self.damage, self.color, self.size = damage, (255, 42, 178), size
         self.rect = pygame.Rect(round(x)-size, round(y)-size, size*2, size*2)
 
     def update(self):
@@ -389,21 +395,29 @@ class EnemyBullet:
 
     def draw(self):
         px, py = round(self.x), round(self.y)
-        pygame.draw.line(SCREEN, self.color, (px-round(self.vx*2), py-round(self.vy*2)),
-                         (px, py), max(2, self.size))
-        pygame.draw.circle(SCREEN, (255, 240, 202), (px, py), max(2, self.size//2))
+        # Solid dark outline ensures contrast against both snow and dunes.
+        # The magenta interior and white centre distinguish hostile shots
+        # from the player's yellow/orange projectiles at a glance.
+        radius = max(5, self.size)
+        tail = (px-round(self.vx*3), py-round(self.vy*3))
+        pygame.draw.line(SCREEN, (24, 12, 44), tail, (px, py), radius+5)
+        pygame.draw.line(SCREEN, self.color, tail, (px, py), max(3, radius-1))
+        pygame.draw.circle(SCREEN, (24, 12, 44), (px, py), radius+3)
+        pygame.draw.circle(SCREEN, self.color, (px, py), radius+1)
+        pygame.draw.circle(SCREEN, (255, 253, 255), (px, py), max(2, radius//2))
 
 
 class Player:
     def __init__(self):
         self.base_image = FIGHTER_IMAGES[SELECTED_AIRPLANE]
-        # On the naval carrier the jet starts at half size and smoothly grows
-        # to its normal flight sprite, conveying the climb away from the deck.
-        # Cached stages avoid a smoothscale allocation on every frame.
-        self.takeoff_images = self.make_takeoff_images() if nMISSION == 0 else None
-        self.image = self.takeoff_images[0] if self.takeoff_images else self.base_image
+        # Every mission begins with a half-size aircraft on the launch strip.
+        # Cached growth stages avoid scaling surfaces inside the game loop.
+        self.takeoff_images = self.make_takeoff_images()
+        self.image = self.takeoff_images[0]
         self.x = SCREEN.get_width() / 2
-        self.y = SCREEN.get_height() * .76
+        self.takeoff_start_y = SCREEN.get_height() * .76
+        self.takeoff_end_y = SCREEN.get_height() * .42
+        self.y = self.takeoff_start_y
         self.vx = self.vy = 0.0
         self.airspeed = 3.7
         self.health = self.maxHealth = 100
@@ -429,8 +443,8 @@ class Player:
 
     def changeImage(self):
         self.base_image = FIGHTER_IMAGES[SELECTED_AIRPLANE]
-        self.takeoff_images = self.make_takeoff_images() if nMISSION == 0 else None
-        self.image = self.takeoff_images[0] if self.takeoff_images else self.base_image
+        self.takeoff_images = self.make_takeoff_images()
+        self.image = self.takeoff_images[0] if STATE == "TAKEOFF" else self.base_image
         self.sync_rect()
 
     def sync_rect(self):
@@ -448,42 +462,50 @@ class Player:
             self.invulnerable -= 1
         self.shot_timer += 1
         if STATE == "ACTIVE":
-            keys = pygame.key.get_pressed()
-            dx = (1 if keys[pygame.K_RIGHT] or keys[pygame.K_d] else 0) - (
-                1 if keys[pygame.K_LEFT] or keys[pygame.K_a] else 0)
-            dy = (1 if keys[pygame.K_DOWN] or keys[pygame.K_s] else 0) - (
-                1 if keys[pygame.K_UP] or keys[pygame.K_w] else 0)
+            # Absolute touch/pointer tracking is deliberately responsive:
+            # the jet closes 52% of the remaining distance each frame, so a
+            # new finger position is followed within a handful of frames.
+            # No momentum or long, speed-capped chase after the finger.
+            min_x = self.rect.w/2 + 7
+            max_x = SCREEN.get_width()-self.rect.w/2-7
+            min_y = max(self.rect.h/2+6, min(95, SCREEN.get_height()*.15))
+            max_y = SCREEN.get_height()-self.rect.h/2-12
             if INPUT_DOWN:
-                mx, my = INPUT_POS
-                delta_x, delta_y = mx-self.x, my-self.y
-                distance = math.hypot(delta_x, delta_y)
-                if distance > 7:
-                    dx += delta_x / distance
-                    dy += delta_y / distance
-                else:
-                    self.vx *= .65
-                    self.vy *= .65
-            dist = math.hypot(dx, dy)
-            if dist:
-                self.vx += dx / dist * 1.9
-                self.vy += dy / dist * 1.9
-            self.vx = clamp(self.vx*.83, -8.4, 8.4)
-            self.vy = clamp(self.vy*.83, -8.4, 8.4)
-            self.x = clamp(self.x + self.vx, self.rect.w/2 + 7, SCREEN.get_width()-self.rect.w/2-7)
-            self.y = clamp(self.y + self.vy, max(110, self.rect.h/2 + 6),
-                           SCREEN.get_height()-self.rect.h/2-12)
+                target_x = clamp(INPUT_POS[0], min_x, max_x)
+                target_y = clamp(INPUT_POS[1], min_y, max_y)
+                self.x += (target_x-self.x)*.52
+                self.y += (target_y-self.y)*.52
+                if abs(target_x-self.x) < .6:
+                    self.x = target_x
+                if abs(target_y-self.y) < .6:
+                    self.y = target_y
+                self.vx = self.vy = 0.0
+            else:
+                keys = pygame.key.get_pressed()
+                dx = (1 if keys[pygame.K_RIGHT] or keys[pygame.K_d] else 0) - (
+                    1 if keys[pygame.K_LEFT] or keys[pygame.K_a] else 0)
+                dy = (1 if keys[pygame.K_DOWN] or keys[pygame.K_s] else 0) - (
+                    1 if keys[pygame.K_UP] or keys[pygame.K_w] else 0)
+                dist = math.hypot(dx, dy)
+                if dist:
+                    # Immediate, predictable keyboard movement without inertia.
+                    self.x += dx / dist * 11.5
+                    self.y += dy / dist * 11.5
+                self.vx = self.vy = 0.0
+            self.x = clamp(self.x, min_x, max_x)
+            self.y = clamp(self.y, min_y, max_y)
             if self.shot_timer >= 7:
                 for shift in (-self.rect.width*.21, self.rect.width*.21):
                     self.bullets.append(Bullet(self.x+shift, self.y-self.rect.height*.38))
                 self.shot_timer = 0
         elif STATE == "TAKEOFF":
-            self.y = max(SCREEN.get_height()*.74, self.y-1)
-            if self.takeoff_images is not None:
-                progress = clamp(MISSION_FRAME / 105.0, 0.0, 1.0)
-                # Ease the ascent: stable first frames and a gentle finish.
-                progress = progress * progress * (3.0 - 2.0 * progress)
-                frame = round(progress * (len(self.takeoff_images)-1))
-                self.image = self.takeoff_images[frame]
+            progress = clamp(MISSION_FRAME / 105.0, 0.0, 1.0)
+            # The jet advances visibly north while its sprite grows from 50%
+            # to 100%, mimicking liftoff and the climb away from the runway.
+            smooth = progress * progress * (3.0 - 2.0 * progress)
+            self.y = self.takeoff_start_y + (self.takeoff_end_y-self.takeoff_start_y)*smooth
+            frame = round(smooth * (len(self.takeoff_images)-1))
+            self.image = self.takeoff_images[frame]
         elif STATE == "EXTRACTION":
             target_y = SCREEN.get_height()*.70
             self.x += (SCREEN.get_width()/2-self.x)*.065
@@ -496,11 +518,9 @@ class Player:
             b.draw()
         if self.invulnerable > 0 and (self.invulnerable // 5) % 2:
             return
+        # Do not draw a synthetic engine flame here; at this sprite size it
+        # appeared as an orange bar protruding from the aircraft's tail.
         SCREEN.blit(self.image, self.rect)
-        if STATE == "ACTIVE":
-            # Engine exhaust is cheap and helps indicate direction/speed.
-            tip = self.rect.midbottom
-            pygame.draw.line(SCREEN, (255, 186, 77), tip, (tip[0], tip[1]+9), 3)
 
 
 class Enemy:
