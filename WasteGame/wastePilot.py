@@ -1,923 +1,1111 @@
-"""WastePilot – a Mode 7-style helicopter ring-and-coin course for GameHub.
-
-Drop-in replacement for WasteGame/wastePilot.py. All art uses the existing
-assets/wastePilot directory; no additional images or libraries are required.
-
-Entry point: await main(screen, clock)
-"""
-
-import asyncio
-import math
-import random
-from functools import lru_cache
-
-import numpy as np
 import pygame
+import math
+import asyncio
 import pygame.surfarray
-
+import numpy as np
 from GUI import Button
 
 
-# The old Mode 7 map uses hundreds of thousands of ground projection units.
-# Converting the altitude display to this projection scale lets rings and
-# coins genuinely sit above the terrain rather than on the horizon.
-ALT_SCALE = 1000.0
-MIN_ALT = 65.0
-MAX_ALT = 360.0
-START_ALT = 190.0
-TARGET_FPS = 60
-BASE_SPEED = 275.0
-BOOST_SPEED = 390.0
-TURN_SPEED = 79.0
-CLIMB_SPEED = 57.0
-COLLECT_RADIUS = 65.0
-COIN_ALT_TOLERANCE = 20.0
-
-HELICOPTERS = [
-    {"name": "SKY SCOUT", "color": (253, 190, 63), "trim": (246, 106, 49),
-     "detail": "Amber patrol livery"},
-    {"name": "RESCUE ONE", "color": (242, 244, 236), "trim": (238, 82, 74),
-     "detail": "White and red rescue livery"},
-    {"name": "NIGHT HAWK", "color": (83, 199, 198), "trim": (45, 74, 110),
-     "detail": "Teal and midnight livery"},
-]
-
-COURSES = [
-    {"name": "COASTAL WARM-UP", "gates": 6, "time": 70.0,
-     "side": [0, 110, -100, 155, -145, 40],
-     "alt": [190, 204, 184, 217, 195, 210],
-     "ring_radius": 94.0, "ring_alt": 30.0, "accent": (76, 237, 228)},
-    {"name": "LOW & HIGH", "gates": 8, "time": 83.0,
-     "side": [0, -150, 175, 35, -205, 160, -105, 60],
-     "alt": [195, 232, 182, 255, 207, 164, 230, 192],
-     "ring_radius": 82.0, "ring_alt": 25.0, "accent": (255, 200, 82)},
-    {"name": "ACE PILOT", "gates": 10, "time": 101.0,
-     "side": [0, 160, -205, 150, -95, 225, -195, 95, -145, 30],
-     "alt": [190, 242, 190, 270, 205, 155, 241, 177, 265, 200],
-     "ring_radius": 73.0, "ring_alt": 22.0, "accent": (244, 117, 198)},
-]
+def tint_image(image, tint_color):
+    """Returns a new image tinted with the given RGB color."""
+    tinted_image = image.copy()
+    tinted_image.fill((0, 0, 0, 255), None, pygame.BLEND_RGBA_MULT)  # remove original color
+    tinted_image.fill(tint_color[0:3] + (0,), None, pygame.BLEND_RGBA_ADD)  # apply tint
+    return tinted_image
 
 
-def clamp(value, lo, hi):
-    return max(lo, min(value, hi))
+# Ring-course gameplay. Coordinates use the same continuous X/Y flight space and
+# altitude units as the existing Mode 7 renderer.
+ALT_MIN = 55000
+ALT_MAX = 390000
+RING_RADIUS_XY = 255.0
+RING_RADIUS_Z = 36000.0
+# Map altitude units are much larger than ground X/Y units. This scale makes
+# visible ring height agree with its 3-D collision opening.
+RING_VERTICAL_SCALE = 3.0
+
+# Two small coins between each pair of rings act as navigational breadcrumbs.
+# Collecting them is optional and provides only a modest score bonus.
+GUIDE_COIN_FRACTIONS = (0.34, 0.67)
+GUIDE_COIN_REWARD = 15
+GUIDE_COIN_PICKUP_XY = 220.0
+GUIDE_COIN_PICKUP_Z = 29000.0
+GUIDE_COIN_MAX_DIAMETER = 23
+
+# These courses join together across the existing scrolling map. The map texture
+# wraps as before; the helicopter is never teleported between courses.
+COURSE_SPECS = (
+    {"name": "HORIZON RUN", "subtitle": "Gentle turns and introductory climbs",
+     "count": 18, "spacing": 9200, "color": (90, 237, 201)},
+    {"name": "SWITCHBACK", "subtitle": "Sharper turns and changing elevations",
+     "count": 20, "spacing": 8600, "color": (255, 192, 96)},
+    {"name": "SKY CIRCUIT", "subtitle": "Long climbing turns and precision flying",
+     "count": 22, "spacing": 9000, "color": (128, 181, 255)},
+)
 
 
-def mix(a, b, amount):
-    return a + (b - a) * amount
+def project_flight_object(x, y, z):
+    """Use the original Mode 7 bearing/horizon with readable altitude scale."""
+    dx, dy = x - player_x, y - player_y
+    rad = math.radians(player_angle)
+    forward = dx * math.cos(rad) + dy * math.sin(rad)
+    if forward <= 35:
+        return None
+    side = -dx * math.sin(rad) + dy * math.cos(rad)
+    if abs(math.atan2(side, forward)) > math.pi / 4:
+        return None
+    screen_x = SCREEN.get_width() / 2 - SCREEN.get_width() / 2 * (side / forward)
+    screen_y = 200 + int(player_v) + (player_height - z) * RING_VERTICAL_SCALE / forward
+    return screen_x, screen_y, forward
 
 
-def brighten(color, factor):
-    return tuple(int(clamp(c * factor, 0, 255)) for c in color)
+class FlightRing:
+    """A vertical checkpoint plane, approached along the incoming route."""
 
-
-@lru_cache(maxsize=44)
-def font(size, bold=False):
-    # pygame's default font is available in both desktop builds and Pygbag.
-    return pygame.font.Font(None, max(12, int(size)))
-
-
-def text(surface, label, x, y, size=24, color=(255, 255, 255),
-         center=False, bold=False, shadow=True):
-    label = str(label)
-    face = font(size, bold)
-    image = face.render(label, True, color)
-    rect = image.get_rect()
-    if center:
-        rect.center = (int(x), int(y))
-    else:
-        rect.topleft = (int(x), int(y))
-    if shadow:
-        dark = face.render(label, True, (14, 25, 37))
-        surface.blit(dark, rect.move(1, 2))
-    surface.blit(image, rect)
-    return rect
-
-
-def panel(surface, rect, color=(10, 28, 48), alpha=216, radius=13,
-          outline=None):
-    rect = pygame.Rect(rect)
-    layer = pygame.Surface(rect.size, pygame.SRCALPHA)
-    pygame.draw.rect(layer, (*color, alpha), layer.get_rect(),
-                     border_radius=radius)
-    if outline is not None:
-        pygame.draw.rect(layer, (*outline, 200), layer.get_rect(),
-                         width=2, border_radius=radius)
-    surface.blit(layer, rect.topleft)
-
-
-def load_image(path, alpha=True):
-    image = pygame.image.load(path)
-    return image.convert_alpha() if alpha else image.convert()
-
-
-class Coin:
-    def __init__(self, x, y, z, valuable=False):
-        self.x = float(x)
-        self.y = float(y)
-        self.z = float(z)
-        self.valuable = valuable
-        self.value = 30 if valuable else 10
-        self.phase = random.random() * math.tau
-        self.taken = False
-
-
-class Ring:
-    def __init__(self, x, y, z, radius, vertical):
-        self.x = float(x)
-        self.y = float(y)
-        self.z = float(z)
-        self.radius = float(radius)
-        self.vertical = float(vertical)
-        self.resolved = False
-        self.passed = False
-
-
-class Spark:
-    """Lightweight feedback particle in screen space."""
-    def __init__(self, x, y, color):
-        angle = random.random() * math.tau
-        speed = random.uniform(35, 130)
-        self.x = float(x)
-        self.y = float(y)
-        self.vx = math.cos(angle) * speed
-        self.vy = math.sin(angle) * speed
-        self.life = random.uniform(.27, .58)
-        self.total = self.life
+    def __init__(self, x, y, z, index, direction, color):
+        self.x, self.y, self.z = float(x), float(y), float(z)
+        self.index = index
+        self.nx, self.ny = math.cos(direction), math.sin(direction)
         self.color = color
 
-    def update(self, dt):
-        self.x += self.vx * dt
-        self.y += self.vy * dt
-        self.vy += 65 * dt
-        self.life -= dt
+    def crossing(self, old_x, old_y, old_z, new_x, new_y, new_z):
+        """Detect travel THROUGH the hoop, including fast frame-to-frame motion.
 
-    def draw(self, surface):
-        if self.life > 0:
-            size = max(1, int(4 * self.life / self.total))
-            pygame.draw.circle(surface, self.color,
-                               (int(self.x), int(self.y)), size)
+        The ring plane is crossed from the approach side. Interpolating the
+        crossing avoids missed collisions at 60/120 FPS. The lateral offset
+        and altitude offset must lie inside the same elliptical opening.
+        """
+        before = (old_x - self.x) * self.nx + (old_y - self.y) * self.ny
+        after = (new_x - self.x) * self.nx + (new_y - self.y) * self.ny
+        if not (before <= 0.0 < after):
+            return False, False, False
+        fraction = -before / (after - before)
+        x = old_x + (new_x - old_x) * fraction
+        y = old_y + (new_y - old_y) * fraction
+        z = old_z + (new_z - old_z) * fraction
+        lateral = -(x - self.x) * self.ny + (y - self.y) * self.nx
+        height_diff = z - self.z
+        norm = (lateral / RING_RADIUS_XY) ** 2 + (height_diff / RING_RADIUS_Z) ** 2
+        # A miss notification is only shown if the helicopter was near the gate.
+        near_miss = abs(lateral) < 1300 and abs(height_diff) < 115000
+        return norm <= 1.0, norm <= .16, near_miss
 
-
-class FlightGame:
-    def __init__(self, screen, clock):
-        self.screen = screen
-        self.clock = clock
-        self.w, self.h = screen.get_size()
-        self.home = Button(10, 10, 100, 100,
-                           "assets/retBut.png", "assets/retBut_clicked.png",
-                           self.leave)
-        self.running = True
-        self.state = "select"
-        self.helicopter = 0
-        self.course_index = 0
-        self.map_image = load_image("assets/wastePilot/map_lrg.jpg", False)
-        self.map_array = pygame.surfarray.array3d(self.map_image)
-        self.map_w, self.map_h = self.map_image.get_size()
-        # Fixed geometry avoids building a full (800x600) Python pixel grid.
-        self.scan_step = 2
-        self.x_rays = np.linspace(-1.0, 1.0, self.w, dtype=np.float32)[None, :]
-        self.sky = load_image("assets/wastePilot/sky.png", False)
-        self.sky_strip = pygame.transform.smoothscale(
-            self.sky, (max(self.w, 1), max(1, int(self.h * .43))))
-        self.cockpit = load_image("assets/wastePilot/cockpit_2.png")
-        if self.cockpit.get_size() != (self.w, self.h):
-            self.cockpit = pygame.transform.smoothscale(self.cockpit,
-                                                        (self.w, self.h))
-        self.coin_frames = [load_image(
-            "assets/wastePilot/coin/star coin rotate %d.png" % i)
-            for i in range(1, 6)]
-        self.coin_cache = {}
-        self.pointers = {}
-        self.down_keys = set()
-        self.mouse_down = False
-        self.mouse_pos = (0, 0)
-        self.anim = 0.0
-        self.ui_pressed = set()
-        self.notice = ""
-        self.notice_timer = 0.0
-        self.sparks = []
-        self.popups = []
-        self.setup_flight(0)
-
-    def leave(self):
-        self.running = False
-
-    @property
-    def accent(self):
-        return HELICOPTERS[self.helicopter]["color"]
-
-    @property
-    def mission(self):
-        return COURSES[self.course_index]
-
-    def setup_flight(self, index):
-        self.course_index = index
-        self.px = 800.0
-        self.py = 600.0
-        self.angle = -90.0
-        self.alt = START_ALT
-        self.speed = BASE_SPEED * .75
-        self.elapsed = 0.0
-        self.score = 0
-        self.coins_collected = 0
-        self.coins_total = 0
-        self.coin_streak = 0
-        self.streak_timer = 0.0
-        self.gates_passed = 0
-        self.gates_missed = 0
-        self.next_gate = 0
-        self.rings = []
-        self.coins = []
-        self.sparks = []
-        self.popups = []
-        self.notice = "LINE UP WITH THE FIRST RING"
-        self.notice_timer = 3.4
-        self.pointers.clear()
-        self.mouse_down = False
-        self.make_course()
-
-    def make_course(self):
-        conf = self.mission
-        start_x, start_y = self.px, self.py
-        previous_x, previous_y, previous_z = start_x, start_y, START_ALT
-        # Course geometry is in continuous world space. Only the terrain
-        # texture wraps; waypoint placement never jumps across map seams.
-        for i in range(conf["gates"]):
-            x = start_x + conf["side"][i]
-            y = start_y - 760 - 600 * i
-            z = conf["alt"][i]
-            ring = Ring(x, y, z, conf["ring_radius"], conf["ring_alt"])
-            self.rings.append(ring)
-            # A staggered 3D approach trail nudges pilots towards the ring
-            # while demanding that they match its height to earn coins.
-            for step in range(1, 6):
-                t = step / 6.0
-                cx = mix(previous_x, x, t)
-                cy = mix(previous_y, y, t)
-                cz = mix(previous_z, z, t)
-                self.coins.append(Coin(cx, cy, cz,
-                                       valuable=(step == 5)))
-            # Two optional coins are deliberately off the ideal line, at
-            # different heights. A perfect line cannot collect every coin.
-            if i > 0:
-                self.coins.append(Coin(x + (-105 if i % 2 else 105),
-                                       y + 190, clamp(z + 39, MIN_ALT, MAX_ALT),
-                                       valuable=True))
-                self.coins.append(Coin(x + (125 if i % 2 else -125),
-                                       y + 255, clamp(z - 37, MIN_ALT, MAX_ALT),
-                                       valuable=True))
-            previous_x, previous_y, previous_z = x, y, z
-        self.coins_total = len(self.coins)
-
-    def horizon(self):
-        return int(self.h * .34)
-
-    def project(self, x, y, z):
-        """Perspective: x/y world bearing and *actual* z altitude."""
-        dx, dy = x - self.px, y - self.py
-        rad = math.radians(self.angle)
-        ca, sa = math.cos(rad), math.sin(rad)
-        ahead = ca * dx + sa * dy
-        side = -sa * dx + ca * dy
-        if ahead <= 15:
-            return None
-        focal = self.w * .5
-        sx = self.w * .5 + focal * side / ahead
-        sy = self.horizon() + (self.alt - z) * ALT_SCALE / ahead
-        return sx, sy, ahead, side
-
-    def add_notice(self, message, duration=1.65):
-        self.notice = message
-        self.notice_timer = duration
-
-    def burst(self, x, y, color, amount=10):
-        for _ in range(amount):
-            self.sparks.append(Spark(x, y, color))
-
-    def popup(self, value, x, y, color):
-        self.popups.append([str(value), float(x), float(y), 1.1, color])
-
-    def get_control_rects(self):
-        # Wide, bottom-anchored targets work with both fingers and mice.
-        width = min(self.w * .176, 126)
-        height = clamp(self.h * .126, 56, 83)
-        bottom = self.h - height - 10
-        centers = [.09, .285, .5, .715, .91]
-        names = ("left", "up", "boost", "down", "right")
-        result = {}
-        for name, center in zip(names, centers):
-            result[name] = pygame.Rect(int(self.w * center - width / 2),
-                                       int(bottom), int(width), int(height))
-        return result
-
-    def all_pointer_positions(self):
-        points = list(self.pointers.values())
-        if self.mouse_down:
-            points.append(self.mouse_pos)
-        return points
-
-    def controls(self, keys):
-        rects = self.get_control_rects()
-        held = set()
-        for point in self.all_pointer_positions():
-            for name, rect in rects.items():
-                if rect.collidepoint(point):
-                    held.add(name)
-        if keys[pygame.K_a] or keys[pygame.K_LEFT]:
-            held.add("left")
-        if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
-            held.add("right")
-        if keys[pygame.K_w] or keys[pygame.K_UP] or keys[pygame.K_f]:
-            held.add("up")
-        if keys[pygame.K_s] or keys[pygame.K_DOWN] or keys[pygame.K_r]:
-            held.add("down")
-        if keys[pygame.K_SPACE] or keys[pygame.K_LSHIFT]:
-            held.add("boost")
-        self.ui_pressed = held
-        return held
-
-    def update_flight(self, dt, keys):
-        self.anim += dt
-        self.elapsed += dt
-        self.notice_timer = max(0.0, self.notice_timer - dt)
-        self.streak_timer -= dt
-        if self.streak_timer <= 0:
-            self.coin_streak = 0
-        held = self.controls(keys)
-        turn = int("right" in held) - int("left" in held)
-        lift = int("up" in held) - int("down" in held)
-        self.angle += turn * TURN_SPEED * dt
-        self.alt = clamp(self.alt + lift * CLIMB_SPEED * dt, MIN_ALT, MAX_ALT)
-        target_speed = BOOST_SPEED if "boost" in held else BASE_SPEED
-        self.speed += (target_speed - self.speed) * min(1.0, dt * 2.8)
-        rad = math.radians(self.angle)
-        self.px += math.cos(rad) * self.speed * dt
-        self.py += math.sin(rad) * self.speed * dt
-        self.update_collectibles()
-        self.update_particles(dt)
-        if self.next_gate >= len(self.rings) or self.elapsed >= self.mission["time"]:
-            # Remaining gates count as misses on a timed-out run.
-            if self.elapsed >= self.mission["time"]:
-                self.gates_missed += len(self.rings) - self.next_gate
-                self.next_gate = len(self.rings)
-            self.state = "results"
-            self.mouse_down = False
-            self.pointers.clear()
-
-    def update_collectibles(self):
-        # Collect by 3D proximity, not by touching an arbitrary 2D sprite.
-        for coin in self.coins:
-            if coin.taken:
-                continue
-            dx, dy = coin.x - self.px, coin.y - self.py
-            if dx * dx + dy * dy > COLLECT_RADIUS ** 2:
-                continue
-            if abs(self.alt - coin.z) > COIN_ALT_TOLERANCE:
-                continue
-            coin.taken = True
-            self.coins_collected += 1
-            self.coin_streak += 1
-            self.streak_timer = 3.2
-            multiplier = min(5, 1 + self.coin_streak // 4)
-            points = coin.value * multiplier
-            self.score += points
-            position = self.project(coin.x, coin.y, coin.z)
-            fx, fy = (position[0], position[1]) if position else (self.w // 2, self.horizon())
-            fx, fy = clamp(fx, 0, self.w), clamp(fy, 85, self.h - 120)
-            hue = (255, 218, 91) if coin.valuable else (255, 245, 174)
-            self.burst(fx, fy, hue, 13 if coin.valuable else 8)
-            self.popup("+%d  x%d" % (points, multiplier), fx, fy - 20, hue)
-            if coin.valuable:
-                self.add_notice("GOLD COIN!  +%d" % points, 1.0)
-
-        if self.next_gate >= len(self.rings):
+    def draw(self, active=True):
+        p = project_flight_object(self.x, self.y, self.z)
+        if p is None:
             return
-        gate = self.rings[self.next_gate]
-        dx = gate.x - self.px
-        dy = gate.y - self.py
-        # Success requires lateral AND altitude precision, with forward
-        # motion through the ring. Intersecting its display sprite is not enough.
-        # Gates face north because each predefined course advances north.
-        north_distance = -dy
-        lateral_distance = abs(dx)
-        altitude_distance = abs(gate.z - self.alt)
-        if abs(north_distance) < 48 and lateral_distance <= gate.radius and altitude_distance <= gate.vertical:
-            gate.resolved = True
-            gate.passed = True
-            self.gates_passed += 1
-            self.next_gate += 1
-            bonus = 350 + 50 * self.course_index
-            if lateral_distance < gate.radius * .45 and altitude_distance < gate.vertical * .45:
-                bonus += 200
-                self.add_notice("PERFECT RING  +%d" % bonus, 2.0)
-            else:
-                self.add_notice("RING CLEAR  +%d" % bonus, 1.7)
-            self.score += bonus
-            self.burst(self.w / 2, self.horizon(), self.mission["accent"], 26)
-            self.popup("+%d" % bonus, self.w / 2, self.horizon() + 30,
-                       self.mission["accent"])
-        elif self.py < gate.y - 145:
-            # The course continues after a missed ring, so one error never
-            # forces players into a tedious U-turn around the entire map.
-            gate.resolved = True
-            self.gates_missed += 1
-            self.next_gate += 1
-            self.coin_streak = 0
-            self.add_notice("RING MISSED - LINE UP THE NEXT ONE", 1.8)
-
-    def update_particles(self, dt):
-        for spark in self.sparks:
-            spark.update(dt)
-        self.sparks = [p for p in self.sparks if p.life > 0]
-        for popup in self.popups:
-            popup[2] -= 37 * dt
-            popup[3] -= dt
-        self.popups = [p for p in self.popups if p[3] > 0]
-
-    def draw_terrain(self):
-        self.screen.fill((119, 169, 214))
-        horizon = self.horizon()
-        # Keep the original sky texture while avoiding per-scanline slicing.
-        offset = int((self.angle + 90) / 360.0 * self.w) % self.w
-        self.screen.blit(self.sky_strip, (-offset, 0))
-        self.screen.blit(self.sky_strip, (self.w - offset, 0))
-        pygame.draw.line(self.screen, (193, 214, 218),
-                         (0, horizon), (self.w, horizon), 2)
-        if horizon >= self.h:
+        sx, sy, depth = p
+        w, h = SCREEN.get_size()
+        if sx < -180 or sx > w + 180 or sy < -175 or sy > h + 175:
             return
-        scanlines = np.arange(horizon, self.h, self.scan_step)
-        rel = np.maximum(1, scanlines - horizon + 1).astype(np.float32)
-        distance = (self.alt * ALT_SCALE / rel)[:, None]
-        theta = math.radians(self.angle)
-        forward_x, forward_y = math.cos(theta), math.sin(theta)
-        right_x, right_y = -forward_y, forward_x
-        # At the screen edges the ray is +/-45 degrees from the bearing.
-        positions_x = (self.px + distance *
-                       (forward_x + right_x * self.x_rays))
-        positions_y = (self.py + distance *
-                       (forward_y + right_y * self.x_rays))
-        xs = np.mod(positions_x.astype(np.int32), self.map_w)
-        ys = np.mod(positions_y.astype(np.int32), self.map_h)
-        colors = self.map_array[xs, ys]  # (number of rows, width, RGB)
-        surface_array = pygame.surfarray.pixels3d(self.screen)
-        try:
-            for i, sy in enumerate(scanlines):
-                surface_array[:, sy] = colors[i]
-                if sy + 1 < self.h:
-                    surface_array[:, sy + 1] = colors[i]
-        finally:
-            del surface_array
+        radius = min(170, max(7, int(108000 / max(350, depth))))
+        cx, cy = int(sx), int(sy)
+        correct_height = abs(player_height - self.z) <= RING_RADIUS_Z
+        color = ((96, 240, 162) if correct_height else (255, 184, 91)) if active else (82, 119, 147)
+        outline = (235, 255, 222) if active else (128, 159, 174)
+        pygame.draw.circle(SCREEN, (14, 41, 55), (cx, cy), radius + 5,
+                           max(2, min(13, radius // 7)))
+        pygame.draw.circle(SCREEN, color, (cx, cy), radius,
+                           max(3, min(13, radius // 6)))
+        pygame.draw.circle(SCREEN, outline, (cx, cy), max(3, radius - 5),
+                           max(1, radius // 16))
+        if active and radius >= 14:
+            for a in (0, math.pi / 2, math.pi, 3 * math.pi / 2):
+                mark = (cx + int(radius * math.cos(a)),
+                        cy + int(radius * math.sin(a)))
+                pygame.draw.circle(SCREEN, (255, 251, 212), mark,
+                                   max(2, radius // 11))
+        # The next gate is marked; following gates are deliberately subdued.
+        if active and radius >= 15:
+            number = HUD_SMALL_FONT.render(str(self.index + 1), True, (245, 252, 244))
+            SCREEN.blit(number, number.get_rect(center=(cx, cy)))
 
-    def draw_coin(self, coin):
-        projected = self.project(coin.x, coin.y,
-                                 coin.z + math.sin(self.anim * 3 + coin.phase) * 2.3)
-        if projected is None:
+
+class FlightCoin:
+    """Small optional waypoint marker placed on the 3D line to a ring."""
+
+    def __init__(self, x, y, z):
+        self.x = float(x)
+        self.y = float(y)
+        self.z = float(z)
+        self.collected = False
+
+    def picked_up_on_segment(self, old_x, old_y, old_z, new_x, new_y, new_z):
+        # Find the closest position along this movement step, preventing a
+        # fast frame from skipping a coin between the previous/current frame.
+        dx, dy = new_x - old_x, new_y - old_y
+        length_sq = dx * dx + dy * dy
+        t = (max(0.0, min(1.0,
+             ((self.x - old_x) * dx + (self.y - old_y) * dy) / length_sq))
+             if length_sq > 0.00001 else 1.0)
+        px, py = old_x + dx * t, old_y + dy * t
+        pz = old_z + (new_z - old_z) * t
+        return ((px - self.x) ** 2 + (py - self.y) ** 2
+                <= GUIDE_COIN_PICKUP_XY ** 2
+                and abs(pz - self.z) <= GUIDE_COIN_PICKUP_Z)
+
+    def draw(self):
+        if self.collected:
             return
-        x, y, ahead, _ = projected
-        if ahead > 2100 or x < -90 or x > self.w + 90 or y < -85 or y > self.h + 95:
+        p = project_flight_object(self.x, self.y, self.z)
+        if p is None:
             return
-        size = int(clamp(16000 / ahead, 8, 76))
-        frame = int(self.anim * 11 + coin.phase) % len(self.coin_frames)
-        key = (frame, size)
-        image = self.coin_cache.get(key)
-        if image is None:
-            original = self.coin_frames[frame]
-            width, height = original.get_size()
-            new_w = max(1, round(size * width / max(width, height)))
-            new_h = max(1, round(size * height / max(width, height)))
-            image = pygame.transform.smoothscale(original, (new_w, new_h))
-            if len(self.coin_cache) > 300:
-                self.coin_cache.clear()
-            self.coin_cache[key] = image
-        if coin.valuable:
-            pygame.draw.circle(self.screen, (255, 197, 50), (int(x), int(y)),
-                               int(size * .58), max(1, int(size / 13)))
-        self.screen.blit(image, image.get_rect(center=(int(x), int(y))))
-        # Nearby altitude markers make a high or low coin visually distinct.
-        if ahead < 850 and size >= 15:
-            text(self.screen, "%dm" % round(coin.z), x, y + size * .54 + 2,
-                 max(15, min(19, size // 2)), (229, 251, 255), center=True)
-
-    def draw_ring(self, ring, active):
-        projected = self.project(ring.x, ring.y, ring.z)
-        if projected is None:
+        sx, sy, distance = p
+        w, h = SCREEN.get_size()
+        if sx < -28 or sx > w + 28 or sy < -28 or sy > h + 28:
             return
-        x, y, ahead, _ = projected
-        if ahead > 3000:
-            return
-        xr = clamp(self.w * .5 * ring.radius / ahead, 8, 350)
-        yr = clamp(ALT_SCALE * ring.vertical / ahead, 8, 300)
-        if x + xr < -30 or x - xr > self.w + 30 or y + yr < -35 or y - yr > self.h + 35:
-            return
-        accent = self.mission["accent"] if active else (116, 169, 179)
-        outline = (26, 74, 96)
-        points = []
-        for n in range(33):
-            theta = math.tau * n / 32
-            points.append((int(x + math.cos(theta) * xr),
-                           int(y + math.sin(theta) * yr)))
-        thick = int(clamp(xr / 18, 2, 10))
-        pygame.draw.lines(self.screen, outline, True, points, thick + 4)
-        pygame.draw.lines(self.screen, accent, True, points, thick)
-        pygame.draw.lines(self.screen, brighten(accent, 1.38), False,
-                          points[16:29], max(1, thick // 2))
-        if active:
-            # Central aiming cross only on the current ring.
-            center = (int(x), int(y))
-            pygame.draw.circle(self.screen, brighten(accent, 1.2), center,
-                               max(3, int(min(xr, yr) * .13)), 1)
-            if 55 < ahead < 1300:
-                info = "%dm" % round(ring.z)
-                text(self.screen, info, x, y - yr - 25, 21, accent, center=True)
-
-    def draw_world_objects(self):
-        objects = []
-        # Sort far to near so coins and rings occlude each other coherently.
-        for coin in self.coins:
-            if not coin.taken:
-                projected = self.project(coin.x, coin.y, coin.z)
-                if projected and projected[2] < 2150:
-                    objects.append((projected[2], 0, coin))
-        for n, ring in enumerate(self.rings):
-            if not ring.resolved and n <= self.next_gate + 2:
-                projected = self.project(ring.x, ring.y, ring.z)
-                if projected and projected[2] < 3000:
-                    objects.append((projected[2], 1, (ring, n == self.next_gate)))
-        objects.sort(key=lambda obj: -obj[0])
-        for _, kind, obj in objects:
-            if kind == 0:
-                self.draw_coin(obj)
-            else:
-                self.draw_ring(obj[0], obj[1])
-
-    def draw_helicopter(self, surface, center, size, index):
-        """Asset-free vector helicopter for selection and cockpit insignia."""
-        scheme = HELICOPTERS[index]
-        color = scheme["color"]
-        trim = scheme["trim"]
-        x, y = center
-        scale = size / 150.0
-
-        def p(dx, dy):
-            return int(x + dx * scale), int(y + dy * scale)
-
-        pygame.draw.line(surface, (36, 54, 72), p(-80, -15), p(80, -15),
-                         max(3, int(8 * scale)))
-        pygame.draw.line(surface, (30, 51, 65), p(-73, -52), p(73, 22),
-                         max(1, int(4 * scale)))
-        pygame.draw.line(surface, (30, 51, 65), p(-73, 22), p(73, -52),
-                         max(1, int(4 * scale)))
-        pygame.draw.polygon(surface, (24, 39, 52),
-                            [p(-14, 0), p(14, 0), p(6, 87), p(-6, 87)])
-        pygame.draw.polygon(surface, color,
-                            [p(0, -52), p(19, -38), p(25, 19),
-                             p(13, 48), p(-13, 48), p(-25, 19), p(-19, -38)])
-        pygame.draw.polygon(surface, trim,
-                            [p(-20, 10), p(20, 10), p(17, 23), p(-17, 23)])
-        pygame.draw.ellipse(surface, (24, 62, 84),
-                            pygame.Rect(p(-16, -43), (int(32 * scale), int(36 * scale))))
-        pygame.draw.line(surface, brighten(color, .7), p(-20, -34), p(20, -34),
-                         max(2, int(3 * scale)))
-        pygame.draw.line(surface, (28, 45, 60), p(-22, 58), p(22, 58),
-                         max(1, int(4 * scale)))
-
-    def draw_rotor(self):
-        # Subtle translucent sweep instead of the original huge opaque circles.
-        width = self.w
-        layer = pygame.Surface((width, 24), pygame.SRCALPHA)
-        r = int((self.anim * 11) % 80)
-        pygame.draw.ellipse(layer, (213, 232, 239, 36),
-                            (-40 + r, 0, width + 80, 10), 2)
-        pygame.draw.line(layer, (194, 219, 227, 25), (0, 8), (width, 8), 2)
-        self.screen.blit(layer, (0, 0))
-
-    def draw_compass(self):
-        if self.next_gate >= len(self.rings):
-            return
-        ring = self.rings[self.next_gate]
-        dx, dy = ring.x - self.px, ring.y - self.py
-        angle_to = math.degrees(math.atan2(dy, dx))
-        error = (angle_to - self.angle + 180) % 360 - 180
-        # Heading cue is useful even while the target is out of view.
-        cx, y = self.w // 2, int(self.h * .17)
-        panel(self.screen, (cx - 111, y - 18, 222, 36),
-              (13, 37, 58), 193, 14)
-        for offset in (-60, -30, 0, 30, 60):
-            xp = cx + offset
-            pygame.draw.line(self.screen, (104, 155, 174),
-                             (xp, y - 5), (xp, y + 6), 1)
-        target_x = cx + clamp(error * 1.35, -95, 95)
-        pygame.draw.polygon(self.screen, self.mission["accent"],
-                            [(int(target_x), y - 13),
-                             (int(target_x) - 7, y - 2),
-                             (int(target_x) + 7, y - 2)])
-        pygame.draw.line(self.screen, (244, 247, 250),
-                         (cx, y + 4), (cx, y + 12), 2)
-
-    def draw_altitude_gauge(self):
-        if self.next_gate >= len(self.rings):
-            return
-        ring = self.rings[self.next_gate]
-        diff = round(ring.z - self.alt)
-        gauge_h = max(103, int(self.h * .23))
-        x = self.w - 77
-        y = int(self.h * .30)
-        panel(self.screen, (x - 12, y - 38, 75, gauge_h + 65),
-              (10, 28, 49), 206, 13, (73, 128, 151))
-        text(self.screen, "ALT", x + 25, y - 30, 20,
-             (217, 234, 243), center=True)
-        pygame.draw.line(self.screen, (76, 116, 137),
-                         (x + 16, y + 5), (x + 16, y + gauge_h - 3), 4)
-        def alt_y(alt):
-            return int(y + gauge_h - 4 - (alt - MIN_ALT) /
-                       (MAX_ALT - MIN_ALT) * (gauge_h - 8))
-        ty = alt_y(ring.z)
-        py = alt_y(self.alt)
-        pygame.draw.line(self.screen, self.mission["accent"],
-                         (x + 5, ty), (x + 29, ty), 4)
-        pygame.draw.polygon(self.screen, (255, 255, 255),
-                            [(x + 16, py - 6), (x + 29, py), (x + 16, py + 6)])
-        text(self.screen, "%dm" % round(self.alt), x + 25, y + gauge_h + 12,
-             17, (255, 255, 255), center=True)
-        if abs(diff) <= ring.vertical:
-            guide, color = "LEVEL", (99, 245, 183)
-        elif diff > 0:
-            guide, color = "+%dm" % diff, (255, 208, 84)
+        # Deliberately far smaller than the original 100px collectible.
+        diameter = min(GUIDE_COIN_MAX_DIAMETER,
+                       max(6, int(72000 / max(1200, distance))))
+        x, y = int(sx), int(sy)
+        if GUIDE_COIN_FRAMES:
+            image = GUIDE_COIN_FRAMES[(frame // 8) % len(GUIDE_COIN_FRAMES)]
+            key = ((frame // 8) % len(GUIDE_COIN_FRAMES), diameter)
+            sprite = GUIDE_COIN_SCALED.get(key)
+            if sprite is None:
+                sprite = pygame.transform.smoothscale(image, (diameter, diameter))
+                GUIDE_COIN_SCALED[key] = sprite
+            SCREEN.blit(sprite, (x - diameter // 2, y - diameter // 2))
         else:
-            guide, color = "%dm" % diff, (255, 147, 125)
-        text(self.screen, guide, x + 25, y - 8, 19, color, center=True)
+            # Asset-free fallback so coins still work in stripped GameHub builds.
+            radius = max(3, diameter // 2)
+            pygame.draw.circle(SCREEN, (113, 73, 23), (x, y), radius + 1)
+            pygame.draw.circle(SCREEN, (247, 191, 69), (x, y), radius)
+            if diameter >= 10:
+                pygame.draw.circle(SCREEN, (255, 241, 154), (x - 1, y - 1),
+                                   max(2, radius // 2))
 
-    def draw_hud(self):
-        w = self.w
-        accent = self.mission["accent"]
-        panel(self.screen, (124, 6, w - 136, 66), (12, 28, 48), 223, 12)
-        text(self.screen, "GATE %d/%d" % (self.next_gate + 1 if self.next_gate < len(self.rings) else len(self.rings),
-                                          len(self.rings)), 140, 12, 28, accent)
-        text(self.screen, self.mission["name"], 140, 42, 18,
-             (201, 225, 239))
-        # The right-hand score is anchored independently of mission length.
-        right_mask = pygame.Rect(w - 212, 8, 199, 32)
-        panel(self.screen, right_mask, (12, 28, 48), 249, 8)
-        score_img = font(28).render("%d PTS" % self.score, True, (255, 230, 159))
-        self.screen.blit(score_img,
-                         (w - 24 - score_img.get_width(), 12))
-        clock_x = int(w * .46)
-        remaining = max(0.0, self.mission["time"] - self.elapsed)
-        text(self.screen, "TIME %02d" % int(math.ceil(remaining)),
-             clock_x, 41, 20, (246, 247, 253))
-        text(self.screen, "COINS %d" % self.coins_collected,
-             int(w * .63), 41, 20, (255, 222, 124))
-        if self.coin_streak >= 4:
-            text(self.screen, "COMBO x%d" % min(5, 1 + self.coin_streak // 4),
-                 int(w * .76), 41, 20, (123, 244, 196))
-        self.draw_compass()
-        self.draw_altitude_gauge()
-        if self.notice_timer > 0:
-            width = min(w - 170, 490)
-            y = int(self.h * .25)
-            panel(self.screen, (w / 2 - width / 2, y - 17, width, 38),
-                  (12, 34, 50), 195, 9)
-            text(self.screen, self.notice, w / 2, y + 2,
-                 min(23, int(w / max(19, len(self.notice)) * 1.3)),
-                 (249, 246, 221), center=True)
-        # Camera reticle shows the actual flight path through the ring.
-        cy = self.horizon()
-        pygame.draw.line(self.screen, (255, 252, 222),
-                         (w // 2 - 14, cy), (w // 2 - 5, cy), 1)
-        pygame.draw.line(self.screen, (255, 252, 222),
-                         (w // 2 + 5, cy), (w // 2 + 14, cy), 1)
-        pygame.draw.line(self.screen, (255, 252, 222),
-                         (w // 2, cy - 11), (w // 2, cy - 4), 1)
-        pygame.draw.line(self.screen, (255, 252, 222),
-                         (w // 2, cy + 4), (w // 2, cy + 11), 1)
 
-    def draw_controls(self):
-        names = ("left", "up", "boost", "down", "right")
-        labels = ("TURN L", "CLIMB", "BOOST", "DIVE", "TURN R")
-        symbols = ("<", "+", ">>", "-", ">")
-        for name, label, symbol in zip(names, labels, symbols):
-            rect = self.get_control_rects()[name]
-            pressed = name in self.ui_pressed
-            fill = self.accent if pressed else (15, 39, 61)
-            outline = brighten(self.accent, .95) if pressed else (84, 141, 171)
-            panel(self.screen, rect, fill, 233 if pressed else 215, 15, outline)
-            ink = (17, 45, 58) if pressed else (242, 251, 255)
-            text(self.screen, symbol, rect.centerx, rect.y + rect.h * .34,
-                 int(clamp(rect.h * .47, 23, 39)), ink, center=True)
-            text(self.screen, label, rect.centerx, rect.y + rect.h * .80,
-                 17, ink, center=True)
+def build_guidance_coins(courses, entries):
+    """Two evenly separated breadcrumb coins on each approach to a ring."""
+    result = []
+    for course_index, rings in enumerate(courses):
+        previous = entries[course_index]
+        course_coins = []
+        for ring in rings:
+            coins = []
+            for fraction in GUIDE_COIN_FRACTIONS:
+                coins.append(FlightCoin(
+                    previous[0] + (ring.x - previous[0]) * fraction,
+                    previous[1] + (ring.y - previous[1]) * fraction,
+                    previous[2] + (ring.z - previous[2]) * fraction))
+            course_coins.append(coins)
+            previous = ring.x, ring.y, ring.z
+        result.append(course_coins)
+    return result
 
-    def draw_flight(self):
-        self.draw_terrain()
-        self.screen.blit(self.cockpit, (0, 0))
-        self.draw_world_objects()
-        self.draw_rotor()
-        # Actual paint scheme visible through consistent panel trim / badge.
-        pygame.draw.rect(self.screen, self.accent,
-                         pygame.Rect(0, self.h - 9, self.w, 9))
-        self.draw_helicopter(self.screen, (self.w - 120, self.h - 114), 45,
-                             self.helicopter)
-        for part in self.sparks:
-            part.draw(self.screen)
-        for message, x, y, life, color in self.popups:
-            text(self.screen, message, x, y, 25, color, center=True)
-        self.draw_hud()
-        self.draw_controls()
 
-    def selection_rects(self):
-        pad = 28
-        usable = self.w - pad * 2
-        gap = 16
-        card_w = (usable - gap * 2) / 3
-        y = int(self.h * .27)
-        height = int(self.h * .47)
-        return [pygame.Rect(int(pad + i * (card_w + gap)), y,
-                            int(card_w), height) for i in range(3)]
+def collect_guidance_coins(old_x, old_y, old_z):
+    """Coins are never required to clear a gate or finish a course."""
+    global SCORE
+    if SHOW_COURSE_RESULT or COURSE_GATE_INDEX >= len(GUIDE_COINS[COURSE_INDEX]):
+        return
+    for coin in GUIDE_COINS[COURSE_INDEX][COURSE_GATE_INDEX]:
+        if not coin.collected and coin.picked_up_on_segment(
+                old_x, old_y, old_z, player_x, player_y, player_height):
+            coin.collected = True
+            SCORE += GUIDE_COIN_REWARD
 
-    def draw_select(self):
-        self.draw_terrain()
-        overlay = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
-        overlay.fill((5, 23, 41, 128))
-        self.screen.blit(overlay, (0, 0))
-        text(self.screen, "WASTE PILOT", self.w // 2, int(self.h * .10),
-             58, (250, 252, 254), center=True)
-        text(self.screen, "CHOOSE YOUR HELICOPTER", self.w // 2,
-             int(self.h * .19), 25, (197, 225, 237), center=True)
-        for index, rect in enumerate(self.selection_rects()):
-            helicopter = HELICOPTERS[index]
-            chosen = index == self.helicopter
-            border = helicopter["color"] if chosen else (98, 141, 165)
-            panel(self.screen, rect, (15, 42, 63), 239, 17, border)
-            self.draw_helicopter(self.screen,
-                                 (rect.centerx, int(rect.y + rect.h * .44)),
-                                 min(rect.w * .52, rect.h * .60), index)
-            text(self.screen, helicopter["name"], rect.centerx,
-                 rect.y + 19, 26, helicopter["color"], center=True)
-            text(self.screen, helicopter["detail"], rect.centerx,
-                 rect.bottom - 39, 16, (213, 232, 238), center=True)
-            if chosen:
-                text(self.screen, "SELECTED", rect.centerx,
-                     rect.bottom - 66, 17, (255, 255, 255), center=True)
-        button = self.start_rect()
-        panel(self.screen, button, self.accent, 245, 14)
-        text(self.screen, "START FLIGHT", button.centerx, button.centery,
-             29, (20, 39, 49), center=True)
-        text(self.screen, "3 ring courses   /   Collect coins   /   Match altitude",
-             self.w // 2, self.h - 20, 20, (223, 238, 241), center=True)
 
-    def start_rect(self):
-        return pygame.Rect(self.w // 2 - 128, int(self.h * .78), 256, 60)
+def draw_guidance_coins():
+    """Only show the current approach; no clutter beyond the next ring."""
+    if COURSE_GATE_INDEX < len(GUIDE_COINS[COURSE_INDEX]):
+        for coin in GUIDE_COINS[COURSE_INDEX][COURSE_GATE_INDEX]:
+            coin.draw()
 
-    def grade(self):
-        rate = self.gates_passed / max(1, len(self.rings))
-        coin_rate = self.coins_collected / max(1, self.coins_total)
-        time_ratio = min(1, self.elapsed / self.mission["time"])
-        rating = rate * .77 + coin_rate * .15 + (1 - time_ratio) * .08
-        if rate == 1 and rating >= .83:
-            return "S", (255, 227, 113)
-        if rate >= .8 and rating >= .69:
-            return "A", (125, 234, 185)
-        if rate >= .65 and rating >= .54:
-            return "B", (112, 197, 249)
-        if rate >= .45:
-            return "C", (251, 178, 101)
-        return "D", (252, 139, 135)
 
-    def result_buttons(self):
-        button_w, button_h = 180, 54
-        y = int(self.h * .79)
-        gap = 16
-        x = self.w // 2 - button_w * 1.5 - gap
-        return [pygame.Rect(int(x + i * (button_w + gap)), y,
-                            button_w, button_h) for i in range(3)]
+def reset_guidance_coins(course_index=None):
+    courses = (GUIDE_COINS if course_index is None
+               else (GUIDE_COINS[course_index],))
+    for course in courses:
+        for leg in course:
+            for coin in leg:
+                coin.collected = False
 
-    def draw_results(self):
-        self.draw_terrain()
-        veil = pygame.Surface((self.w, self.h), pygame.SRCALPHA)
-        veil.fill((5, 22, 41, 163))
-        self.screen.blit(veil, (0, 0))
-        main_rect = pygame.Rect(int(self.w * .12), int(self.h * .12),
-                                int(self.w * .76), int(self.h * .75))
-        panel(self.screen, main_rect, (12, 34, 53), 242, 20,
-              self.mission["accent"])
-        text(self.screen, "FLIGHT COMPLETE" if self.elapsed < self.mission["time"]
-             else "TIME'S UP", self.w // 2, int(self.h * .18),
-             35, (246, 250, 251), center=True)
-        text(self.screen, self.mission["name"], self.w // 2,
-             int(self.h * .245), 22, (185, 219, 233), center=True)
-        tier, hue = self.grade()
-        text(self.screen, tier, self.w // 2, int(self.h * .39), 119,
-             hue, center=True)
-        text(self.screen, "%d POINTS" % self.score,
-             self.w // 2, int(self.h * .50), 38, (255, 231, 145), center=True)
-        text(self.screen, "RINGS  %d/%d" %
-             (self.gates_passed, len(self.rings)), self.w // 2,
-             int(self.h * .59), 24, (233, 246, 250), center=True)
-        text(self.screen, "COINS  %d/%d" %
-             (self.coins_collected, self.coins_total), self.w // 2,
-             int(self.h * .65), 23, (249, 219, 121), center=True)
-        text(self.screen, "TIME  %.1fs" % self.elapsed,
-             self.w // 2, int(self.h * .71), 23, (200, 221, 231), center=True)
-        labels = ("NEXT COURSE" if self.course_index < len(COURSES) - 1
-                  else "COURSE 1", "RETRY", "HANGAR")
-        for label, rect in zip(labels, self.result_buttons()):
-            panel(self.screen, rect, (27, 67, 88), 248, 11, hue)
-            text(self.screen, label, rect.centerx, rect.centery,
-                 22, (251, 251, 251), center=True)
 
-    def on_click(self, pos):
-        if self.state == "select":
-            for n, rect in enumerate(self.selection_rects()):
-                if rect.collidepoint(pos):
-                    self.helicopter = n
-                    return
-            if self.start_rect().collidepoint(pos):
-                self.setup_flight(0)
-                self.state = "play"
-        elif self.state == "results":
-            for n, rect in enumerate(self.result_buttons()):
-                if not rect.collidepoint(pos):
-                    continue
-                if n == 0:
-                    self.setup_flight((self.course_index + 1) % len(COURSES))
-                    self.state = "play"
-                elif n == 1:
-                    self.setup_flight(self.course_index)
-                    self.state = "play"
-                else:
-                    self.state = "select"
-                return
+def load_guidance_coin_art():
+    """Original rotating coin art if available, otherwise Pygame circles."""
+    images = []
+    for i in range(1, 6):
+        try:
+            image = pygame.image.load(
+                'assets/wastePilot/coin/star coin rotate %d.png' % i).convert_alpha()
+            images.append(image)
+        except (OSError, pygame.error, ValueError):
+            return []
+    return images
 
-    def handle_events(self, events):
-        finger_event_in_batch = any(event.type in (pygame.FINGERDOWN, pygame.FINGERMOTION, pygame.FINGERUP)
-                                    for event in events)
-        for event in events:
-            if event.type == pygame.QUIT:
-                self.leave()
-            elif event.type == pygame.FINGERDOWN:
-                pos = (event.x * self.w, event.y * self.h)
-                self.pointers[event.finger_id] = pos
-                if self.state != "play":
-                    self.on_click(pos)
-            elif event.type == pygame.FINGERMOTION:
-                if event.finger_id in self.pointers:
-                    self.pointers[event.finger_id] = (event.x * self.w,
-                                                       event.y * self.h)
-            elif event.type == pygame.FINGERUP:
-                self.pointers.pop(event.finger_id, None)
-            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                # Most browsers synthesize mouse clicks for taps. Ignore
-                # those when a real touch event is already being handled.
-                if not (getattr(event, "touch", False) and finger_event_in_batch):
-                    self.mouse_down = True
-                    self.mouse_pos = event.pos
-                    if self.state != "play":
-                        self.on_click(event.pos)
-            elif event.type == pygame.MOUSEMOTION:
-                self.mouse_pos = event.pos
-            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-                self.mouse_down = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    self.leave()
-                elif self.state == "select" and event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                    self.setup_flight(0)
-                    self.state = "play"
-                elif self.state == "select" and event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
-                    self.helicopter = event.key - pygame.K_1
-                elif self.state == "results" and event.key == pygame.K_RETURN:
-                    self.setup_flight((self.course_index + 1) % len(COURSES))
-                    self.state = "play"
-                elif self.state == "results" and event.key == pygame.K_r:
-                    self.setup_flight(self.course_index)
-                    self.state = "play"
 
-    async def run(self):
-        while self.running:
-            dt = clamp(self.clock.tick(TARGET_FPS) / 1000.0, 0.0, .05)
-            events = pygame.event.get()
-            self.handle_events(events)
-            if not self.running:
-                break
-            if self.state == "play":
-                self.update_flight(dt, pygame.key.get_pressed())
-                if self.state == "play":
-                    self.draw_flight()
-                else:
-                    self.draw_results()
-            elif self.state == "select":
-                self.anim += dt
-                self.draw_select()
+def build_flight_courses(start_x, start_y):
+    """Three substantial, connected courses with reproducible gate locations.
+
+    Distinct curves and increasing changes of altitude make the player steer
+    and climb, rather than simply flying straight through short gate chains.
+    """
+    courses = []
+    entries = []
+    previous = (float(start_x), float(start_y), 200000.0)
+    for course_id, spec in enumerate(COURSE_SPECS):
+        entries.append(previous)
+        gates = []
+        for i in range(spec['count']):
+            if course_id == 0:
+                angle = -math.pi / 2 + .20 * math.sin(i * .48) + .10 * math.sin(i * .20)
+                altitude = 200000 + 36000 * math.sin(i * .55)
+            elif course_id == 1:
+                angle = -math.pi / 2 + .48 * math.sin(i * .64) + .16 * math.sin(i * .21)
+                altitude = 210000 + 69000 * math.sin(i * .66) + 13000 * math.sin(i * .27)
             else:
-                self.anim += dt
-                self.draw_results()
-            self.home.update(events)
-            self.home.draw(self.screen)
-            pygame.display.flip()
-            await asyncio.sleep(0)
+                angle = -math.pi / 2 + .19 * i + .11 * math.sin(i * .39)
+                altitude = 242000 + 93000 * math.sin(i * .43)
+            # The first gate keeps roughly the same heading as the launch.
+            distance = spec['spacing'] + 650 * math.sin(i * .8)
+            x = previous[0] + math.cos(angle) * distance
+            y = previous[1] + math.sin(angle) * distance
+            z = max(ALT_MIN + 10000, min(ALT_MAX - 10000, altitude))
+            gates.append(FlightRing(x, y, z, i, angle, spec['color']))
+            previous = (x, y, z)
+        courses.append(gates)
+    return courses, entries
+
+
+def active_ring():
+    if COURSE_INDEX < len(COURSES) and COURSE_GATE_INDEX < len(COURSES[COURSE_INDEX]):
+        return COURSES[COURSE_INDEX][COURSE_GATE_INDEX]
+    return None
+
+
+def format_flight_time(milliseconds):
+    seconds = max(0, int(milliseconds) // 1000)
+    return '%02d:%02d' % (seconds // 60, seconds % 60)
+
+
+def finish_course():
+    global SHOW_COURSE_RESULT, COURSE_FINISH_TICK, COURSE_BEST
+    SHOW_COURSE_RESULT = True
+    COURSE_FINISH_TICK = pygame.time.get_ticks()
+    score = SCORE - COURSE_SCORE_START
+    previous_best = COURSE_BEST[COURSE_INDEX]
+    if previous_best is None or score > previous_best:
+        COURSE_BEST[COURSE_INDEX] = score
+
+
+def course_rank():
+    count = len(COURSES[COURSE_INDEX])
+    if COURSE_MISSES == 0 and COURSE_PERFECT >= (count + 2) // 3:
+        return 'S'
+    if COURSE_MISSES <= 2 and COURSE_PERFECT >= count // 4:
+        return 'A'
+    if COURSE_MISSES <= 4:
+        return 'B'
+    if COURSE_MISSES <= 8:
+        return 'C'
+    return 'D'
+
+
+def collect_ring_if_crossed(old_x, old_y, old_z):
+    global COURSE_GATE_INDEX, COURSE_PERFECT, COURSE_MISSES, SCORE
+    global RING_MESSAGE, RING_MESSAGE_FRAMES
+    ring = active_ring()
+    if ring is None:
+        return
+    cleared, perfect, near_miss = ring.crossing(
+        old_x, old_y, old_z, player_x, player_y, player_height)
+    if cleared:
+        COURSE_GATE_INDEX += 1
+        if perfect:
+            COURSE_PERFECT += 1
+        reward = 450 if perfect else 250
+        SCORE += reward
+        RING_MESSAGE = 'PERFECT PASS  +450' if perfect else 'RING CLEARED  +250'
+        RING_MESSAGE_FRAMES = 100
+        if COURSE_GATE_INDEX == len(COURSES[COURSE_INDEX]):
+            SCORE += 1500
+            RING_MESSAGE = 'COURSE COMPLETE  +1500'
+            finish_course()
+    elif near_miss:
+        COURSE_MISSES += 1
+        RING_MESSAGE = 'MISSED RING - TURN BACK AND TRY AGAIN'
+        RING_MESSAGE_FRAMES = 135
+
+
+def course_button_rect(primary):
+    cx = SCREEN.get_width() // 2
+    cy = SCREEN.get_height() // 2
+    return pygame.Rect(cx + (7 if primary else -221), cy + 137, 214, 53)
+
+
+def begin_next_course():
+    global COURSE_INDEX, COURSE_GATE_INDEX, COURSE_PERFECT, COURSE_MISSES
+    global SHOW_COURSE_RESULT, COURSE_START_TICK, COURSE_SCORE_START
+    global RING_MESSAGE, RING_MESSAGE_FRAMES
+    if COURSE_INDEX == len(COURSES) - 1:
+        restart_ring_run()
+        return
+    COURSE_INDEX += 1
+    COURSE_GATE_INDEX, COURSE_PERFECT, COURSE_MISSES = 0, 0, 0
+    COURSE_START_TICK = pygame.time.get_ticks()
+    COURSE_SCORE_START = SCORE
+    SHOW_COURSE_RESULT = False
+    RING_MESSAGE, RING_MESSAGE_FRAMES = '', 0
+
+
+def retry_current_course():
+    global player_x, player_y, player_height, player_angle, player_v
+    global COURSE_GATE_INDEX, COURSE_PERFECT, COURSE_MISSES, SCORE
+    global COURSE_START_TICK, SHOW_COURSE_RESULT, RING_MESSAGE_FRAMES
+    ring = COURSES[COURSE_INDEX][0]
+    player_x, player_y, player_height = COURSE_ENTRIES[COURSE_INDEX]
+    player_angle = math.degrees(math.atan2(ring.ny, ring.nx))
+    player_v = 0
+    SCORE = COURSE_SCORE_START
+    COURSE_GATE_INDEX, COURSE_PERFECT, COURSE_MISSES = 0, 0, 0
+    reset_guidance_coins(COURSE_INDEX)
+    COURSE_START_TICK = pygame.time.get_ticks()
+    SHOW_COURSE_RESULT = False
+    RING_MESSAGE_FRAMES = 0
+
+
+def restart_ring_run():
+    global COURSE_INDEX, COURSE_GATE_INDEX, COURSE_PERFECT, COURSE_MISSES
+    global COURSE_START_TICK, COURSE_SCORE_START, SHOW_COURSE_RESULT, SCORE
+    global player_x, player_y, player_height, player_angle, player_v
+    global RING_MESSAGE, RING_MESSAGE_FRAMES
+    COURSE_INDEX, COURSE_GATE_INDEX = 0, 0
+    COURSE_PERFECT, COURSE_MISSES = 0, 0
+    SCORE, COURSE_SCORE_START = 0, 0
+    reset_guidance_coins()
+    player_x, player_y, player_height = COURSE_ENTRIES[0]
+    player_angle, player_v = -90, 0
+    COURSE_START_TICK = pygame.time.get_ticks()
+    SHOW_COURSE_RESULT = False
+    RING_MESSAGE, RING_MESSAGE_FRAMES = '', 0
+
+
+def handle_course_result(events):
+    for event in events:
+        if event.type == pygame.KEYDOWN:
+            if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+                begin_next_course()
+            elif event.key == pygame.K_r:
+                retry_current_course()
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if course_button_rect(True).collidepoint(event.pos):
+                begin_next_course()
+            elif course_button_rect(False).collidepoint(event.pos):
+                retry_current_course()
+        elif event.type == pygame.FINGERDOWN:
+            pos = (int(event.x * SCREEN.get_width()),
+                   int(event.y * SCREEN.get_height()))
+            if course_button_rect(True).collidepoint(pos):
+                begin_next_course()
+            elif course_button_rect(False).collidepoint(pos):
+                retry_current_course()
+
+
+def draw_course_results():
+    w, h = SCREEN.get_size()
+    panel = pygame.Surface((min(550, w - 32), min(470, h - 30)), pygame.SRCALPHA)
+    pw, ph = panel.get_size()
+    panel.fill((9, 27, 39, 239))
+    pygame.draw.rect(panel, (112, 176, 183), panel.get_rect(), 3, border_radius=12)
+    center = pw // 2
+    title = 'ALL COURSES COMPLETE' if COURSE_INDEX == len(COURSES) - 1 else 'COURSE COMPLETE'
+    txt = HUD_BIG_FONT.render(title, True, (236, 246, 245))
+    panel.blit(txt, txt.get_rect(center=(center, 40)))
+    spec = COURSE_SPECS[COURSE_INDEX]
+    line = HUD_FONT.render(spec['name'], True, spec['color'])
+    panel.blit(line, line.get_rect(center=(center, 82)))
+    rank = HUD_RANK_FONT.render(course_rank(), True, (255, 225, 117))
+    panel.blit(rank, rank.get_rect(center=(center, 167)))
+    elapsed = COURSE_FINISH_TICK - COURSE_START_TICK
+    stats = (
+        'TIME   ' + format_flight_time(elapsed),
+        'GATES   %d / %d' % (COURSE_GATE_INDEX, len(COURSES[COURSE_INDEX])),
+        'PERFECT   %d     MISSES   %d' % (COURSE_PERFECT, COURSE_MISSES),
+        'COURSE SCORE   %d' % (SCORE - COURSE_SCORE_START),
+    )
+    for i, info in enumerate(stats):
+        img = HUD_FONT.render(info, True, (220, 233, 234))
+        panel.blit(img, img.get_rect(center=(center, 228 + i * 35)))
+    SCREEN.blit(panel, (w // 2 - pw // 2, h // 2 - ph // 2))
+    buttons = ((False, 'RETRY COURSE'),
+               (True, 'RESTART RUN' if COURSE_INDEX == len(COURSES) - 1 else 'NEXT COURSE'))
+    for primary, text in buttons:
+        r = course_button_rect(primary)
+        color = (112, 219, 190) if primary else (57, 94, 111)
+        pygame.draw.rect(SCREEN, color, r, border_radius=8)
+        pygame.draw.rect(SCREEN, (210, 245, 237), r, 2, border_radius=8)
+        img = HUD_SMALL_FONT.render(text, True, (8, 35, 43) if primary else (239, 247, 247))
+        SCREEN.blit(img, img.get_rect(center=r.center))
+
+
+def draw_flight_hud():
+    """Compact course guidance, leaving the original cockpit unobstructed."""
+    global RING_MESSAGE_FRAMES
+    spec = COURSE_SPECS[COURSE_INDEX]
+    total = len(COURSES[COURSE_INDEX])
+    line1 = '%s  |  COURSE %d/%d  |  GATE %d/%d' % (
+        spec['name'], COURSE_INDEX + 1, len(COURSES), COURSE_GATE_INDEX + 1, total)
+    if SHOW_COURSE_RESULT:
+        line1 = '%s  |  COURSE %d/%d FINISHED' % (
+            spec['name'], COURSE_INDEX + 1, len(COURSES))
+    notification = RING_MESSAGE_FRAMES > 0
+    title = HUD_FONT.render(RING_MESSAGE if notification else line1, True,
+                            (255, 222, 139) if notification else (251, 250, 231))
+    SCREEN.blit(title, title.get_rect(center=(SCREEN.get_width() // 2, 20)))
+    if notification:
+        RING_MESSAGE_FRAMES -= 1
+    ring = active_ring()
+    if ring:
+        distance = int(math.hypot(ring.x - player_x, ring.y - player_y))
+        height_delta = int((ring.z - player_height) / 1000)
+        climb = 'LEVEL' if abs(height_delta) < 9 else (
+            'CLIMB +%d' % height_delta if height_delta > 0
+            else 'DESCEND %d' % (-height_delta))
+        line2 = 'DIST %d  |  %s  |  SCORE %d  |  %s' % (
+            distance, climb, SCORE, COPTER_CHOICES[SELECTED_COPTER]['name'])
+    else:
+        line2 = 'SCORE %d  |  %s' % (SCORE, COPTER_CHOICES[SELECTED_COPTER]['name'])
+    secondary = HUD_SMALL_FONT.render(line2, True, (222, 241, 244))
+    SCREEN.blit(secondary, secondary.get_rect(center=(SCREEN.get_width() // 2, 49)))
+    pygame.draw.line(SCREEN, (52, 92, 111), (175, 72),
+                     (SCREEN.get_width() - 175, 72), 3)
+    usable = SCREEN.get_width() - 350
+    end = 175 + int(usable * min(1.0, COURSE_GATE_INDEX / total))
+    if end > 175:
+        pygame.draw.line(SCREEN, spec['color'], (175, 72), (end, 72), 3)
+    if ring:
+        p = project_flight_object(ring.x, ring.y, ring.z)
+        w, h = SCREEN.get_size()
+        side_of_screen = p is None or p[0] < 24 or p[0] > w - 24
+        high_or_low = p is not None and (p[1] < 90 or p[1] > h - 80)
+        if side_of_screen:
+            rad = math.radians(player_angle)
+            dx, dy = ring.x - player_x, ring.y - player_y
+            side = -dx * math.sin(rad) + dy * math.cos(rad)
+            forward = dx * math.cos(rad) + dy * math.sin(rad)
+            is_left = side >= 0
+            x = 142 if is_left else w - 142
+            y = 143
+            direction = -1 if is_left else 1
+            pygame.draw.polygon(SCREEN, (255, 209, 112),
+                                [(x + direction * 15, y - 10),
+                                 (x - direction * 15, y),
+                                 (x + direction * 15, y + 10)])
+            hint = 'TURN BACK' if forward < 0 else ('LEFT' if is_left else 'RIGHT')
+            text = HUD_SMALL_FONT.render(hint, True, (240, 234, 201))
+            SCREEN.blit(text, text.get_rect(center=(x, y + 26)))
+        elif high_or_low and abs(ring.z - player_height) > RING_RADIUS_Z:
+            # A ring above/below the camera is not a left/right turn.
+            hint = 'CLIMB' if ring.z > player_height else 'DESCEND'
+            text = HUD_SMALL_FONT.render(hint, True, (255, 209, 112))
+            SCREEN.blit(text, text.get_rect(center=(w // 2, 115)))
+
+
+def ret():
+    global RUNNING
+    RUNNING = False
+
+
+def drawSky():
+    global x_offset
+    horizon_y = 200 + int(player_v)
+    screen_w = SCREEN.get_width()
+    # Parallax offset: shift horizontally based on vertical movement
+    if abs(player_v) >= 0:
+        x_offset += 1
+    if x_offset > 800:
+        x_offset = 0
+    for line in range(0, horizon_y):
+        scalefactor = 1 + (line / 500)
+
+        # Wrap around the sky texture horizontally (parallax wrap)
+        line_x_start = x_offset % SKYIMAGE.get_width()
+        drawline = SKYIMAGE.subsurface((line_x_start, line), (min(800, SKYIMAGE.get_width() - line_x_start), 1))
+
+        # In case we wrapped, concatenate two pieces
+        if drawline.get_width() < 800:
+            remainder = 800 - drawline.get_width()
+            second_piece = SKYIMAGE.subsurface((0, line), (remainder, 1))
+            drawline = pygame.Surface((800, 1))
+            drawline.blit(SKYIMAGE, (0, 0), (line_x_start, line, 800 - remainder, 1))
+            drawline.blit(second_piece, (800 - remainder, 0))
+
+        # Scale line width for perspective effect
+        drawline_scaled = pygame.transform.scale_by(drawline, (scalefactor, 1))
+
+        # Center horizontally on screen
+        drawline_rect = drawline_scaled.get_rect(center=(screen_w // 2, line))
+        SCREEN.blit(drawline_scaled, drawline_rect)
+
+
+def draw_mode7_ground(surface, player_x, player_y, player_angle):
+    width, height = surface.get_size()
+    map_w, map_h = map_image_orig.get_size()
+    horizon_y = 200 + int(player_v)
+    drawSky()
+    angle_rad = math.radians(player_angle)
+    left_angle = angle_rad + math.pi / 4
+    right_angle = angle_rad - math.pi / 4
+
+    cos_left, sin_left = math.cos(left_angle), math.sin(left_angle)
+    cos_right, sin_right = math.cos(right_angle), math.sin(right_angle)
+
+    screen_array = pygame.surfarray.pixels3d(surface)
+
+    # Vectorize across all scanlines
+    screen_ys = np.arange(horizon_y, height, 2)
+    rel_ys = screen_ys - horizon_y + 1
+    distances = player_height / rel_ys
+
+    # Interpolated left/right world positions
+    lx = player_x + distances * cos_left
+    ly = player_y + distances * sin_left
+    rx = player_x + distances * cos_right
+    ry = player_y + distances * sin_right
+
+    # Normalized horizontal positions
+    t = np.linspace(0, 1, width).reshape((1, -1))  # Shape (1, width)
+    lx = lx.reshape((-1, 1))  # Shape (n, 1)
+    ly = ly.reshape((-1, 1))
+    rx = rx.reshape((-1, 1))
+    ry = ry.reshape((-1, 1))
+
+    # Interpolated map coords for each screen row
+    xs = ((lx + t * (rx - lx)) % map_w).astype(int)
+    ys = ((ly + t * (ry - ly)) % map_h).astype(int)
+
+    # Fill screen lines in batches
+    colors = map_array[xs, ys]
+
+    for i, screen_y in enumerate(screen_ys):
+        screen_array[:, screen_y] = colors[i]
+        if screen_y + 1 < height:
+            screen_array[:, screen_y + 1] = colors[i]
+
+    del screen_array
+
+
+
+
+# ---------------------------------------------------------------------------
+# Helicopter selection (presentation only; the original flight physics and
+# cockpit-control artwork are intentionally unchanged).
+# Optional images are loaded from assets/wastePilot/ap.jpg, bh.jpg and uh.jpg.
+# If an image is absent or unreadable, native Pygame artwork is shown instead.
+# ---------------------------------------------------------------------------
+COPTER_CHOICES = (
+    {"name": "APACHE", "image": "ap.jpg", "role": "ATTACK HELICOPTER",
+     "accent": (232, 178, 86), "hull": (116, 123, 81)},
+    {"name": "BLACK HAWK", "image": "bh.jpg", "role": "UTILITY TRANSPORT",
+     "accent": (108, 209, 185), "hull": (68, 112, 104)},
+    {"name": "HUEY", "image": "uh.jpg", "role": "CLASSIC UTILITY",
+     "accent": (145, 185, 236), "hull": (100, 124, 91)},
+)
+MENU_W, MENU_H = 800, 600
+
+
+def copter_card_rect(index):
+    return pygame.Rect(52 + 236 * index, 155, 224, 304)
+
+
+def copter_launch_rect():
+    return pygame.Rect(282, 484, 236, 61)
+
+
+def selection_local_pos(pos):
+    w, h = SCREEN.get_size()
+    return (int(pos[0] * MENU_W / max(1, w)),
+            int(pos[1] * MENU_H / max(1, h)))
+
+
+def render_native_copter(index):
+    """Three distinct side-view helicopter silhouettes, no external sprites."""
+    art = pygame.Surface((204, 143))
+    for y in range(143):
+        t = y / 143
+        art.fill((int(20 + 29*t), int(42 + 53*t), int(68 + 51*t)),
+                 (0, y, 204, 1))
+    pygame.draw.polygon(art, (50, 79, 93),
+                        [(0, 111), (26, 90), (57, 109), (89, 93),
+                         (138, 118), (170, 98), (204, 113), (204, 143), (0, 143)])
+    pygame.draw.line(art, (113, 151, 158), (0, 122), (204, 122), 2)
+    accent = COPTER_CHOICES[index]["accent"]
+    hull = COPTER_CHOICES[index]["hull"]
+    shade = tuple(max(0, c - 43) for c in hull)
+    window = (40, 75, 96)
+    edge = (190, 211, 195)
+
+    # Main rotor: shared physical layout, distinct fuselage silhouettes below.
+    pygame.draw.line(art, (30, 38, 39), (105, 55), (105, 43), 4)
+    pygame.draw.line(art, (19, 31, 40), (36, 42), (173, 42), 4)
+    pygame.draw.line(art, (156, 178, 169), (57, 41), (157, 41), 1)
+    pygame.draw.ellipse(art, (190, 198, 174), (100, 39, 10, 6))
+
+    if index == 0:  # AH-64 Apache: angular tandem canopy, stub wings, cannon
+        pygame.draw.polygon(art, shade, [(28, 84), (65, 77), (76, 89), (67, 96), (28, 90)])
+        pygame.draw.polygon(art, hull,
+                            [(60, 75), (122, 66), (147, 75), (174, 91),
+                             (170, 100), (108, 103), (79, 96), (64, 88)])
+        pygame.draw.polygon(art, window, [(94, 74), (116, 69), (128, 78), (110, 84)])
+        pygame.draw.polygon(art, window, [(131, 79), (146, 79), (157, 88), (143, 90)])
+        pygame.draw.line(art, edge, (112, 70), (114, 84), 2)
+        pygame.draw.line(art, shade, (77, 91), (136, 96), 7)
+        pygame.draw.line(art, (49, 53, 50), (89, 100), (84, 113), 4)
+        pygame.draw.line(art, (49, 53, 50), (136, 99), (141, 111), 4)
+        for x in (82, 93, 105):
+            pygame.draw.rect(art, (50, 58, 51), (x, 99, 5, 9), border_radius=1)
+        pygame.draw.line(art, (41, 44, 45), (154, 101), (164, 111), 3)
+        pygame.draw.circle(art, (25, 30, 32), (164, 112), 4)
+        pygame.draw.line(art, edge, (25, 82), (25, 98), 3)
+        pygame.draw.line(art, edge, (18, 90), (33, 90), 2)
+    elif index == 1:  # UH-60 Black Hawk: long cabin, broad windshield, wheels
+        pygame.draw.polygon(art, shade, [(21, 76), (63, 75), (70, 92), (20, 90)])
+        pygame.draw.polygon(art, hull,
+                            [(57, 67), (131, 67), (160, 82), (174, 94),
+                             (166, 106), (70, 108), (58, 93)])
+        pygame.draw.polygon(art, window, [(127, 73), (150, 81), (159, 91), (125, 91)])
+        pygame.draw.line(art, edge, (138, 76), (140, 91), 2)
+        pygame.draw.rect(art, shade, (68, 73, 53, 28), border_radius=3)
+        for x in (72, 88, 104):
+            pygame.draw.rect(art, window, (x, 77, 12, 13), border_radius=2)
+        pygame.draw.line(art, (35, 47, 47), (94, 94), (94, 105), 2)
+        pygame.draw.circle(art, (33, 42, 43), (80, 109), 7)
+        pygame.draw.circle(art, (33, 42, 43), (147, 108), 7)
+        pygame.draw.line(art, edge, (18, 74), (18, 95), 3)
+        pygame.draw.line(art, edge, (11, 85), (25, 85), 2)
+    else:  # UH-1 Huey: squared cabin, large windows, long landing skids
+        pygame.draw.polygon(art, shade, [(19, 79), (64, 76), (67, 91), (19, 90)])
+        pygame.draw.polygon(art, hull,
+                            [(63, 70), (142, 70), (160, 83), (174, 97),
+                             (167, 107), (65, 105)])
+        pygame.draw.ellipse(art, hull, (95, 60, 32, 20))
+        pygame.draw.rect(art, window, (74, 75, 26, 23), border_radius=2)
+        pygame.draw.rect(art, window, (104, 75, 28, 23), border_radius=2)
+        pygame.draw.polygon(art, window, [(138, 76), (159, 86), (163, 98), (138, 98)])
+        pygame.draw.line(art, edge, (102, 73), (102, 103), 2)
+        pygame.draw.line(art, edge, (136, 73), (136, 103), 2)
+        pygame.draw.line(art, (35, 42, 39), (79, 106), (77, 120), 3)
+        pygame.draw.line(art, (35, 42, 39), (156, 106), (157, 120), 3)
+        pygame.draw.line(art, (37, 45, 42), (63, 122), (175, 122), 4)
+        pygame.draw.line(art, edge, (17, 77), (17, 96), 3)
+        pygame.draw.line(art, edge, (9, 87), (26, 87), 2)
+
+    pygame.draw.rect(art, accent, (9, 10, 35, 3), border_radius=1)
+    return art
+
+
+def crop_copter_photo(image, target_size):
+    """Scale without distortion, then crop the edges to fill the preview."""
+    w, h = image.get_size()
+    tw, th = target_size
+    if w < 1 or h < 1:
+        return None
+    scale = max(tw / w, th / h)
+    rw, rh = max(tw, int(math.ceil(w * scale))), max(th, int(math.ceil(h * scale)))
+    enlarged = pygame.transform.smoothscale(image, (rw, rh))
+    result = pygame.Surface((tw, th))
+    result.blit(enlarged, ((tw - rw) // 2, (th - rh) // 2))
+    return result
+
+
+def build_copter_previews():
+    previews = []
+    for i, copter in enumerate(COPTER_CHOICES):
+        img = None
+        try:
+            photo = pygame.image.load('assets/wastePilot/' + copter['image']).convert()
+            img = crop_copter_photo(photo, (204, 143))
+        except (OSError, pygame.error, ValueError):
+            pass
+        previews.append(img if img is not None else render_native_copter(i))
+    return previews
+
+
+def make_copter_menu_background():
+    bg = pygame.Surface((MENU_W, MENU_H))
+    for y in range(MENU_H):
+        t = y / MENU_H
+        color = (int(12 + 8*t), int(27 + 17*t), int(43 + 19*t))
+        pygame.draw.line(bg, color, (0, y), (MENU_W, y))
+    # Muted radar/grid motif. Selection stays visually separate from flight.
+    for x in range(0, MENU_W, 40):
+        pygame.draw.line(bg, (24, 49, 65), (x, 125), (x, MENU_H), 1)
+    for y in range(140, MENU_H, 40):
+        pygame.draw.line(bg, (24, 49, 65), (0, y), (MENU_W, y), 1)
+    pygame.draw.line(bg, (79, 117, 132), (142, 118), (658, 118), 1)
+    return bg
+
+
+def draw_copter_selection():
+    """Draw 800x600 menu, scaled if GameHub supplied a different screen size."""
+    canvas = COPTER_MENU_CANVAS
+    canvas.blit(COPTER_MENU_BG, (0, 0))
+    title_font, name_font, info_font, small_font = COPTER_MENU_FONTS
+    heading = title_font.render('SELECT YOUR HELICOPTER', True, (244, 249, 247))
+    canvas.blit(heading, heading.get_rect(center=(MENU_W // 2, 48)))
+    note = info_font.render('Choose a helicopter to begin your flight', True, (160, 191, 200))
+    canvas.blit(note, note.get_rect(center=(MENU_W // 2, 91)))
+
+    for i, copter in enumerate(COPTER_CHOICES):
+        r = copter_card_rect(i)
+        picked = (i == SELECTED_COPTER)
+        accent = copter['accent']
+        pygame.draw.rect(canvas, (30, 59, 70) if picked else (23, 41, 56), r,
+                         border_radius=13)
+        pygame.draw.rect(canvas, accent if picked else (69, 92, 104), r,
+                         3 if picked else 1, border_radius=13)
+        preview_rect = pygame.Rect(r.left + 10, r.top + 11, 204, 143)
+        canvas.blit(COPTER_PREVIEWS[i], preview_rect)
+        pygame.draw.rect(canvas, accent if picked else (72, 100, 113),
+                         preview_rect, 1)
+        canvas.blit(name_font.render(copter['name'], True, (250, 250, 246)),
+                    (r.left + 14, r.top + 170))
+        canvas.blit(info_font.render(copter['role'], True, (156, 185, 197)),
+                    (r.left + 14, r.top + 207))
+        pygame.draw.line(canvas, (64, 87, 99),
+                         (r.left + 14, r.top + 240),
+                         (r.right - 14, r.top + 240), 1)
+        state_label = 'SELECTED' if picked else 'TAP TO SELECT'
+        state_color = accent if picked else (137, 161, 173)
+        state_text = small_font.render(state_label, True, state_color)
+        canvas.blit(state_text, state_text.get_rect(center=(r.centerx, r.top + 274)))
+        if picked:
+            pygame.draw.circle(canvas, accent, (r.right - 21, r.top + 25), 8)
+            pygame.draw.line(canvas, (22, 36, 43), (r.right - 25, r.top + 24),
+                             (r.right - 22, r.top + 28), 2)
+            pygame.draw.line(canvas, (22, 36, 43), (r.right - 22, r.top + 28),
+                             (r.right - 17, r.top + 20), 2)
+
+    start = copter_launch_rect()
+    active_color = COPTER_CHOICES[SELECTED_COPTER]['accent']
+    pygame.draw.rect(canvas, active_color, start, border_radius=10)
+    pygame.draw.rect(canvas, (242, 240, 216), start, 2, border_radius=10)
+    launch = name_font.render('START FLIGHT  >', True, (12, 33, 43))
+    canvas.blit(launch, launch.get_rect(center=start.center))
+    footer = info_font.render('Visual selection only  -  flight controls unchanged',
+                              True, (145, 174, 186))
+    canvas.blit(footer, footer.get_rect(center=(400, 577)))
+
+    if SCREEN.get_size() == (MENU_W, MENU_H):
+        SCREEN.blit(canvas, (0, 0))
+    else:
+        SCREEN.blit(pygame.transform.smoothscale(canvas, SCREEN.get_size()), (0, 0))
+
+
+def handle_copter_selection(events):
+    global SELECTED_COPTER, SHOW_COPTER_SELECT
+    for event in events:
+        if event.type == pygame.KEYDOWN:
+            if event.key in (pygame.K_LEFT, pygame.K_a):
+                SELECTED_COPTER = (SELECTED_COPTER - 1) % len(COPTER_CHOICES)
+            elif event.key in (pygame.K_RIGHT, pygame.K_d):
+                SELECTED_COPTER = (SELECTED_COPTER + 1) % len(COPTER_CHOICES)
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+                SHOW_COPTER_SELECT = False
+            elif event.key == pygame.K_ESCAPE:
+                ret()
+            elif event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
+                SELECTED_COPTER = event.key - pygame.K_1
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            pos = selection_local_pos(event.pos)
+            for i in range(len(COPTER_CHOICES)):
+                if copter_card_rect(i).collidepoint(pos):
+                    SELECTED_COPTER = i
+                    break
+            if copter_launch_rect().collidepoint(pos):
+                SHOW_COPTER_SELECT = False
+        elif event.type == pygame.FINGERDOWN:
+            # Pygame touch coordinates are normalized to the screen size.
+            pos = (int(event.x * MENU_W), int(event.y * MENU_H))
+            for i in range(len(COPTER_CHOICES)):
+                if copter_card_rect(i).collidepoint(pos):
+                    SELECTED_COPTER = i
+                    break
+            if copter_launch_rect().collidepoint(pos):
+                SHOW_COPTER_SELECT = False
+
+
+def setup():
+    global HOME_BUTTON, player_x, player_y, player_angle, player_v, player_a, map_image_orig, map_width, cockpit
+    global stick_L, stick_R, stick_M, player_height, frame, map_height
+    HOME_BUTTON = Button(10, 10, 100, 100, "assets/retBut.png", "assets/retBut_clicked.png", ret)
+
+    global SKYIMAGE
+    SKYIMAGE = pygame.image.load("assets/wastePilot/sky.png")
+    global x_offset
+    x_offset = 0
+    # Player starting position and angle
+    player_x = 800
+    player_y = 600
+    player_angle = -90
+    player_v = 0
+    player_a = 5
+
+    # Load map
+    map_image_orig = pygame.image.load("assets/wastePilot/map_lrg.jpg").convert()
+    map_image_orig = pygame.transform.scale_by(map_image_orig, (1, 1))
+    map_width, map_height = map_image_orig.get_size()
+
+    # Create minimap
+    global minimap
+    minimap = pygame.transform.scale(map_image_orig, (map_width // 10, map_height // 10))
+
+    global map_array
+    map_array = pygame.surfarray.array3d(map_image_orig)
+
+    # Load Cockpit
+    cockpit = pygame.image.load("assets/wastePilot/cockpit_2.png").convert_alpha()
+    stick_L = pygame.image.load("assets/wastePilot/stick.png").convert_alpha()
+    stick_R = pygame.transform.flip(stick_L, 1, 0)
+    stick_M = pygame.image.load("assets/wastePilot/stick_M.png").convert_alpha()
+
+    player_height = 200000
+    frame = 0
+
+    global SCORE, COURSES, COURSE_ENTRIES, COURSE_INDEX, COURSE_GATE_INDEX
+    global COURSE_PERFECT, COURSE_MISSES, COURSE_START_TICK, COURSE_FINISH_TICK
+    global COURSE_SCORE_START, SHOW_COURSE_RESULT, COURSE_BEST
+    global RING_MESSAGE, RING_MESSAGE_FRAMES
+    global HUD_FONT, HUD_SMALL_FONT, HUD_BIG_FONT, HUD_RANK_FONT
+    SCORE = 0
+    COURSES, COURSE_ENTRIES = build_flight_courses(player_x, player_y)
+    global GUIDE_COINS, GUIDE_COIN_FRAMES, GUIDE_COIN_SCALED
+    GUIDE_COINS = build_guidance_coins(COURSES, COURSE_ENTRIES)
+    GUIDE_COIN_FRAMES = load_guidance_coin_art()
+    GUIDE_COIN_SCALED = {}
+    COURSE_INDEX, COURSE_GATE_INDEX = 0, 0
+    COURSE_PERFECT, COURSE_MISSES = 0, 0
+    COURSE_START_TICK = pygame.time.get_ticks()
+    COURSE_FINISH_TICK = COURSE_START_TICK
+    COURSE_SCORE_START = 0
+    SHOW_COURSE_RESULT = False
+    COURSE_BEST = [None] * len(COURSES)
+    RING_MESSAGE, RING_MESSAGE_FRAMES = '', 0
+    HUD_FONT = pygame.font.SysFont(None, 26)
+    HUD_SMALL_FONT = pygame.font.SysFont(None, 22)
+    HUD_BIG_FONT = pygame.font.SysFont(None, 34, bold=True)
+    HUD_RANK_FONT = pygame.font.SysFont(None, 112, bold=True)
+
+    # Menu previews are built once. Missing JPEG artwork never blocks flight.
+    global SELECTED_COPTER, SHOW_COPTER_SELECT, COPTER_PREVIEWS, COPTER_MENU_BG
+    global COPTER_MENU_CANVAS, COPTER_MENU_FONTS
+    SELECTED_COPTER = 0
+    SHOW_COPTER_SELECT = True
+    COPTER_PREVIEWS = build_copter_previews()
+    COPTER_MENU_BG = make_copter_menu_background()
+    COPTER_MENU_CANVAS = pygame.Surface((MENU_W, MENU_H))
+    COPTER_MENU_FONTS = (pygame.font.SysFont(None, 42, bold=True),
+                         pygame.font.SysFont(None, 30, bold=True),
+                         pygame.font.SysFont(None, 20),
+                         pygame.font.SysFont(None, 18, bold=True))
+
+
+def draw_minimap():
+    if 1 == 2:
+        # Create minimap
+        minimap_scale = 20
+        global minimap
+        minimap = pygame.transform.scale(map_image_orig, (map_width // minimap_scale, map_height // minimap_scale))
+        # # Draw player dot
+        px = int(player_x // minimap_scale)
+        py = int(player_y // minimap_scale)
+        pygame.draw.circle(minimap, pygame.Color("red"), (px, py), 5)
+        # Draw viewing direction lines
+        dir_length = 15  # Length of the direction line
+        angle_rad = math.radians(player_angle)
+
+        # Forward line
+        fx = int(px + math.cos(angle_rad) * dir_length)
+        fy = int(py + math.sin(angle_rad) * dir_length)
+        pygame.draw.line(minimap, pygame.Color("yellow"), (px, py), (fx, fy), 2)
+
+        # Left "shoulder" line (FOV indicator)
+        left_angle = angle_rad + math.radians(30)
+        lx = int(px + math.cos(left_angle) * dir_length)
+        ly = int(py + math.sin(left_angle) * dir_length)
+        pygame.draw.line(minimap, pygame.Color("gray"), (px, py), (lx, ly), 1)
+
+        # Right "shoulder" line (FOV indicator)
+        right_angle = angle_rad - math.radians(30)
+        rx = int(px + math.cos(right_angle) * dir_length)
+        ry = int(py + math.sin(right_angle) * dir_length)
+        pygame.draw.line(minimap, pygame.Color("gray"), (px, py), (rx, ry), 1)
+        SCREEN.blit(minimap, (800 - minimap.get_width(), 0))
+
+
+def draw_cockpit():
+    global player_angle, player_v, player_height
+    SCREEN.blit(cockpit, (0, 0))
+
+    # Positions for each control
+    pos_L = (0, 600 - stick_L.get_height())
+    pos_LM = (200, 600 - stick_L.get_height())
+    pos_R = (800 - stick_R.get_width(), 600 - stick_R.get_height())
+    pos_RM = (600, 600 - stick_R.get_height())
+    pos_M = (SCREEN.get_rect().centerx - stick_M.get_width() // 2, 600 - stick_M.get_height())
+
+    # Get actual button rects
+    rect_L = stick_L.get_rect(topleft=pos_L)
+    rect_R = stick_R.get_rect(topleft=pos_R)
+    rect_M = stick_M.get_rect(topleft=pos_M)
+    rect_RM = stick_R.get_rect(topleft=pos_RM)
+    rect_LM = stick_L.get_rect(topleft=pos_LM)
+
+    # Input handling
+    mouse_pos = pygame.mouse.get_pos()
+    finger_down = pygame.mouse.get_pressed()[0]
+
+    # Flags to indicate pressed state
+    pressed_L = pressed_R = pressed_M = pressed_LM = pressed_RM = False
+
+    if finger_down:
+        if rect_L.collidepoint(mouse_pos):
+            player_angle += 2
+            pressed_L = True
+        elif rect_R.collidepoint(mouse_pos):
+            player_angle -= 2
+            pressed_R = True
+        elif rect_M.collidepoint(mouse_pos):
+            player_v = player_v - +player_a
+            pressed_M = True
+        elif rect_LM.collidepoint(mouse_pos):
+            player_height -= 10000
+            pressed_LM = True
+        elif rect_RM.collidepoint(mouse_pos):
+            player_height += 10000
+            pressed_RM = True
+
+    # Scaling factor when pressed
+    scale_pressed = 0.9
+
+    # Clamp Player Height
+    player_height = max(10000, player_height)
+
+    # Function to blit with optional scaling
+    def blit_button(image, pos, pressed):
+        if pressed:
+            scaled = pygame.transform.rotozoom(image, 0, scale_pressed)
+            new_rect = scaled.get_rect(center=(pos[0] + image.get_width() // 2, pos[1] + image.get_height() // 2))
+            SCREEN.blit(scaled, new_rect.topleft)
+        else:
+            SCREEN.blit(image, pos)
+
+    # Draw buttons (shrink if pressed)
+    blit_button(stick_L, pos_L, pressed_L)
+    blit_button(stick_R, pos_R, pressed_R)
+    blit_button(stick_M, pos_M, pressed_M)
+    blit_button(stick_L, pos_LM, pressed_LM)
+    blit_button(stick_R, pos_RM, pressed_RM)
 
 
 async def main(screen, clock):
-    """The original GameHub entry point; returns to the hub on Home."""
-    game = FlightGame(screen, clock)
-    await game.run()
+    global RUNNING, SCREEN, CLOCK, EVENTS
+    global HOME_BUTTON, player_x, player_y, player_angle, player_v, player_a, map_image_orig, map_width, cockpit
+    global stick_L, stick_R, stick_M, player_height, frame
+
+    SCREEN = screen
+    CLOCK = clock
+    RUNNING = True
+    setup()
+
+    while RUNNING:
+        CLOCK.tick(60 if (SHOW_COPTER_SELECT or SHOW_COURSE_RESULT) else 120)
+        EVENTS = pygame.event.get()
+
+        for event in EVENTS:
+            if event.type == pygame.QUIT:
+                RUNNING = False
+
+        if SHOW_COPTER_SELECT:
+            handle_copter_selection(EVENTS)
+            if RUNNING and SHOW_COPTER_SELECT:
+                draw_copter_selection()
+                HOME_BUTTON.update(EVENTS)
+                HOME_BUTTON.draw(screen)
+                pygame.display.flip()
+            # Never process selection taps as cockpit-control inputs.
+            await asyncio.sleep(0)
+            continue
+
+        if SHOW_COURSE_RESULT:
+            handle_course_result(EVENTS)
+            # The previous world view stays behind the result panel; no physics
+            # or cockpit input is processed until the next course is selected.
+            if RUNNING and SHOW_COURSE_RESULT:
+                draw_course_results()
+                HOME_BUTTON.update(EVENTS)
+                HOME_BUTTON.draw(screen)
+                pygame.display.flip()
+            await asyncio.sleep(0)
+            continue
+
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_w]:
+            player_v -= player_a
+        if keys[pygame.K_s]:
+            player_v += player_a
+        if keys[pygame.K_d]:
+            player_angle -= 2
+        if keys[pygame.K_a]:
+            player_angle += 2
+        if keys[pygame.K_f]:
+            player_height += 10000
+        if keys[pygame.K_r]:
+            player_height -= 10000
+
+        # Add Drag
+        player_v = player_v * 0.95
+        if abs(player_v) < 0.5:
+            player_v = 0
+
+        old_x, old_y, old_z = player_x, player_y, player_height
+        rad = math.radians(player_angle)
+        player_x -= player_v * math.cos(rad)
+        player_y -= player_v * math.sin(rad)
+
+        # Maintain continuous world coordinates across all three courses.
+        # The original Mode 7 ground already wraps via its texture lookup.
+        player_height = max(ALT_MIN, min(ALT_MAX, player_height))
+        collect_guidance_coins(old_x, old_y, old_z)
+        collect_ring_if_crossed(old_x, old_y, old_z)
+
+        # Clear screen sky
+        screen.fill((100, 120, 255))
+
+        # Draw mode7 ground
+        draw_mode7_ground(screen, player_x, player_y, player_angle)
+
+        # Draw Rotor
+        if frame % 3 == 0:
+            pygame.draw.circle(SCREEN, pygame.Color("lightgray"), (400, -850), 900)
+        if frame % 6 == 0:
+            pygame.draw.circle(SCREEN, pygame.Color("lightblue"), (400, -850), 900)
+
+        draw_minimap()
+
+        # Small coin breadcrumbs appear only on the approach to the next gate.
+        # Render behind the original cockpit, without a separate coin counter.
+        draw_guidance_coins()
+
+        # Only the active ring and two muted upcoming rings are visible.
+        # They render behind the original cockpit and its five flight controls.
+        course = COURSES[COURSE_INDEX]
+        for ring in course[COURSE_GATE_INDEX + 1:COURSE_GATE_INDEX + 3]:
+            ring.draw(active=False)
+        if COURSE_GATE_INDEX < len(course):
+            course[COURSE_GATE_INDEX].draw(active=True)
+
+        draw_cockpit()
+        draw_flight_hud()
+
+        HOME_BUTTON.update(EVENTS)
+        HOME_BUTTON.draw(screen)
+        pygame.display.flip()
+        frame += 1
+
+        # print(clock.get_fps())
+        # print(f"{player_x} _ {player_y}")
+        await asyncio.sleep(0)
+    return
