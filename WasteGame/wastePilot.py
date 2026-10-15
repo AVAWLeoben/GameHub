@@ -29,19 +29,20 @@ RING_VERTICAL_SCALE = 3.0
 RING_CAPTURE_DISTANCE = 400.0
 PASS_BANNER_DURATION = 78  # frames at the game's original 120 FPS
 
-# Two small coins between each pair of rings act as navigational breadcrumbs.
-# Depth alone does NOT visually separate objects along the same camera ray:
-# two perfectly collinear coins both project onto the same pixel. Place them
-# near opposite edges of the flight line and farther apart down the route, so
-# they read as separate 3-D markers rather than a stacked coin pile. Their
-# generous pickup radius means flying the center of the trail still collects
-# them; no slalom or deviation from the flight course is required.
-GUIDE_COIN_FRACTIONS = (0.26, 0.74)
-GUIDE_COIN_LATERAL_OFFSET = 185.0
+# A genuinely sparse breadcrumb trail: one coin shortly after each ring and
+# one shortly before the next ring. At ~9,200 units between rings, the coins
+# are over 7,000 units apart (instead of forming a cluster around mid-leg).
+# The small side offsets are a perspective aid, NOT required steering; the
+# collection radius includes the flight centerline.
+GUIDE_COIN_FRACTIONS = (0.10, 0.90)
+GUIDE_COIN_LATERAL_OFFSET = 285.0
 GUIDE_COIN_REWARD = 15
-GUIDE_COIN_PICKUP_XY = 310.0
+GUIDE_COIN_PICKUP_XY = 370.0
 GUIDE_COIN_PICKUP_Z = 29000.0
 GUIDE_COIN_MAX_DIAMETER = 23
+# World-space spacing cannot guarantee screen-space spacing with perspective.
+# Suppress a farther coin if it would appear stacked on a nearer coin.
+GUIDE_COIN_MIN_SCREEN_GAP = 50
 
 # These courses join together across the existing scrolling map. The map texture
 # wraps as before; the helicopter is never teleported between courses.
@@ -195,10 +196,12 @@ class FlightCoin:
                 <= GUIDE_COIN_PICKUP_XY ** 2
                 and abs(pz - self.z) <= GUIDE_COIN_PICKUP_Z)
 
-    def draw(self):
+    def draw(self, projection=None):
         if self.collected:
             return
-        p = project_flight_object(self.x, self.y, self.z)
+        # The caller can pass a precomputed projection after spacing checks.
+        p = projection if projection is not None else project_flight_object(
+            self.x, self.y, self.z)
         if p is None:
             return
         sx, sy, distance = p
@@ -228,13 +231,11 @@ class FlightCoin:
 
 
 def build_guidance_coins(courses, entries):
-    """Space breadcrumbs in 3-D without stacking them on the same view ray.
+    """Place two coins near the ends of each leg, not bunched at mid-leg.
 
-    On straight legs, collinear objects at the same altitude project to the
-    *same screen point* regardless of their distance. Tiny alternating lateral
-    offsets make the depth sequence legible, while the altitude still smoothly
-    interpolates toward the target ring. The offsets remain smaller than the
-    collection radius, so pilots can simply follow the centerline.
+    The first is 10% and the second is 90% of the way to the next ring. Each
+    has a mild opposite sideways offset, comfortably inside the collection
+    reach of a pilot flying straight down the intended course centerline.
     """
     result = []
     for course_index, rings in enumerate(courses):
@@ -271,11 +272,39 @@ def collect_guidance_coins(old_x, old_y, old_z):
             SCORE += GUIDE_COIN_REWARD
 
 
+def visible_guidance_coins(coins):
+    """Choose nonoverlapping projected coins, favoring the nearer breadcrumb.
+
+    Two coins hundreds/thousands of units apart can still project onto the
+    same spot if viewed along the course. Keep both in the world for genuine
+    spaced-out pickups, but never render them as an on-screen coin pile.
+    """
+    projected = []
+    w, h = SCREEN.get_size()
+    for coin in coins:
+        if coin.collected:
+            continue
+        p = project_flight_object(coin.x, coin.y, coin.z)
+        if p is None:
+            continue
+        sx, sy, distance = p
+        if -28 <= sx <= w + 28 and -28 <= sy <= h + 28:
+            projected.append((distance, coin, p))
+    projected.sort(key=lambda item: item[0])  # nearer markers take priority
+    drawn = []
+    for _, coin, p in projected:
+        if all(math.hypot(p[0] - prior[0], p[1] - prior[1])
+               >= GUIDE_COIN_MIN_SCREEN_GAP for _, prior in drawn):
+            drawn.append((coin, p))
+    return drawn
+
+
 def draw_guidance_coins():
-    """Only show the current approach; no clutter beyond the next ring."""
+    """Show only readable, well-separated coins on the active flight leg."""
     if COURSE_GATE_INDEX < len(GUIDE_COINS[COURSE_INDEX]):
-        for coin in GUIDE_COINS[COURSE_INDEX][COURSE_GATE_INDEX]:
-            coin.draw()
+        for coin, projection in visible_guidance_coins(
+                GUIDE_COINS[COURSE_INDEX][COURSE_GATE_INDEX]):
+            coin.draw(projection)
 
 
 def reset_guidance_coins(course_index=None):
