@@ -103,7 +103,9 @@ def draw_button(label, center, width=None, active=False):
         FONT_CACHE[size] = font(size)
     label_img = FONT_CACHE[size].render(label, True, (235, 251, 247))
     w = min(SCREEN.get_width() - 35, width or label_img.get_width() + 64)
-    r = pygame.Rect(0, 0, w, max(49, label_img.get_height() + 22))
+    compact = SCREEN.get_height() < 520
+    min_h = 41 if compact else 49
+    r = pygame.Rect(0, 0, w, max(min_h, label_img.get_height() + (12 if compact else 22)))
     r.center = (int(center[0]), int(center[1]))
     panel(SCREEN, r, (15, 61, 67, 239) if active else (12, 30, 43, 228), 10)
     pygame.draw.rect(SCREEN, (79, 235, 194) if active else (77, 149, 157), r, 2, border_radius=10)
@@ -273,14 +275,20 @@ def generate_boss_image(typ):
 
 
 class Carrier:
-    """Start platform and automatic extraction; follows scrolling terrain."""
+    """Ground-anchored launch platform and automatic extraction target.
+
+    On land the runway must travel with the scrolling terrain from frame one;
+    it must never remain attached to the aircraft during takeoff.
+    """
 
     def __init__(self, mission):
         self.mission = mission
         self.image = CARRIER_IMAGES["Sea" if mission == 0 else "Land"]
         self.x = SCREEN.get_width() // 2
         self.y = SCREEN.get_height() * .65
-        self.departure = False
+        # Sea carrier waits until the jet climbs away. The desert/snow runway
+        # is stationary in the world and therefore scrolls offscreen at once.
+        self.departure = mission != 0
         self.extraction = False
         self.rect = self.image.get_rect(center=(self.x, round(self.y)))
 
@@ -295,7 +303,9 @@ class Carrier:
         if self.extraction:
             self.y = min(SCREEN.get_height() * .71, self.y + 5.7)
         elif self.departure:
-            self.y += 4.3
+            # Same rate as Background.update: a land runway stays attached
+            # to the ground while the aircraft gains separation from it.
+            self.y += max(2.0, PLAYER.airspeed)
         self.rect.center = (self.x, round(self.y))
 
     def draw(self):
@@ -387,7 +397,11 @@ class EnemyBullet:
 class Player:
     def __init__(self):
         self.base_image = FIGHTER_IMAGES[SELECTED_AIRPLANE]
-        self.image = self.base_image
+        # On the naval carrier the jet starts at half size and smoothly grows
+        # to its normal flight sprite, conveying the climb away from the deck.
+        # Cached stages avoid a smoothscale allocation on every frame.
+        self.takeoff_images = self.make_takeoff_images() if nMISSION == 0 else None
+        self.image = self.takeoff_images[0] if self.takeoff_images else self.base_image
         self.x = SCREEN.get_width() / 2
         self.y = SCREEN.get_height() * .76
         self.vx = self.vy = 0.0
@@ -399,13 +413,24 @@ class Player:
         self.rect = self.image.get_rect(center=(round(self.x), round(self.y)))
         self.hitbox = self.rect.inflate(-int(self.rect.w*.38), -int(self.rect.h*.25))
 
+    def make_takeoff_images(self):
+        frames = []
+        for index in range(25):
+            scale = .5 + .5 * (index / 24.0)
+            size = (max(1, round(self.base_image.get_width() * scale)),
+                    max(1, round(self.base_image.get_height() * scale)))
+            frames.append(pygame.transform.smoothscale(self.base_image, size))
+        frames[-1] = self.base_image
+        return frames
+
     @property
     def vulnerable(self):
         return STATE == "ACTIVE" and self.invulnerable == 0
 
     def changeImage(self):
         self.base_image = FIGHTER_IMAGES[SELECTED_AIRPLANE]
-        self.image = self.base_image
+        self.takeoff_images = self.make_takeoff_images() if nMISSION == 0 else None
+        self.image = self.takeoff_images[0] if self.takeoff_images else self.base_image
         self.sync_rect()
 
     def sync_rect(self):
@@ -453,6 +478,12 @@ class Player:
                 self.shot_timer = 0
         elif STATE == "TAKEOFF":
             self.y = max(SCREEN.get_height()*.74, self.y-1)
+            if self.takeoff_images is not None:
+                progress = clamp(MISSION_FRAME / 105.0, 0.0, 1.0)
+                # Ease the ascent: stable first frames and a gentle finish.
+                progress = progress * progress * (3.0 - 2.0 * progress)
+                frame = round(progress * (len(self.takeoff_images)-1))
+                self.image = self.takeoff_images[frame]
         elif STATE == "EXTRACTION":
             target_y = SCREEN.get_height()*.70
             self.x += (SCREEN.get_width()/2-self.x)*.065
@@ -788,7 +819,7 @@ def choose_mission(mission):
 
 
 def missionSelect():
-    """Mouse, touch and keyboard-friendly level selector; all stages unlocked."""
+    """Choose a mission first, then explicitly confirm with CONTINUE."""
     global STATE, SELECTED_MISSION_SLOT, MENU_COUNTER
     MENU_COUNTER += 1
     w, h = SCREEN.get_size()
@@ -799,13 +830,14 @@ def missionSelect():
     text(SCREEN, "MISSION SELECT", max(25, min(48, w//22)),
          (228, 251, 242), center=(w/2, h*.095))
     text(SCREEN, "ALL MISSIONS UNLOCKED FOR TESTING",
-         max(13, min(20, w//47)), (130, 223, 195), center=(w/2, h*.174))
+         max(12, min(20, w//47)), (130, 223, 195), center=(w/2, h*.174))
 
     gap = max(7, round(h*.015))
     card_top = round(h*.255)
-    card_bottom = round(h*.745)
-    card_height = max(65, (card_bottom-card_top-gap*2)//3)
-    card_width = min(w-30, round(w*.82))
+    compact = h < 520
+    card_bottom = round(h*(.705 if compact else .735))
+    card_height = max(52, (card_bottom-card_top-gap*2)//3)
+    card_width = min(w-20, round(w*.86))
     left = (w-card_width)//2
     card_rects = []
     for index in range(MAX_MISSIONS):
@@ -814,40 +846,62 @@ def missionSelect():
         card_rects.append(rect)
         color = MISSION_COLORS[index]
         selected = index == SELECTED_MISSION_SLOT
-        panel(SCREEN, rect, (30, 66, 75, 240) if selected else (16, 37, 50, 235), 11)
-        pygame.draw.rect(SCREEN, color if selected else (75, 111, 120),
-                         rect, 3 if selected else 1, border_radius=11)
-        pygame.draw.rect(SCREEN, color, (rect.left+3, rect.top+9, 5, rect.h-18),
+        panel(SCREEN, rect, (37, 93, 92, 246) if selected else (16, 37, 50, 227), 11)
+        pygame.draw.rect(SCREEN, (146, 251, 195) if selected else (67, 102, 111),
+                         rect, 4 if selected else 1, border_radius=11)
+        pygame.draw.rect(SCREEN, color, (rect.left+4, rect.top+9, 5, max(3, rect.h-18)),
                          border_radius=3)
         badge_x = rect.left+max(27, min(43, round(w*.047)))
-        text(SCREEN, "%02d" % (index+1), max(24, min(33, w//31)),
+        text(SCREEN, "%02d" % (index+1), max(22, min(33, w//31)),
              color, center=(badge_x, rect.centery))
-        label_x = rect.left+max(70, min(93, round(w*.115)))
-        label_size = max(15, min(25, w//39))
+        label_x = rect.left+max(65, min(93, round(w*.115)))
+        label_size = max(14, min(25, w//39))
         detail_size = max(12, min(17, w//55))
-        text(SCREEN, MISSION_NAMES[index], label_size, (239, 246, 243),
-             topleft=(label_x, rect.top+max(6, round(card_height*.10))))
-        text(SCREEN, MISSION_LOCATIONS[index] + "  |  " + MISSION_BOSS_DESCRIPTIONS[index],
-             detail_size, color,
-             topleft=(label_x, rect.top+max(26, round(card_height*.39))))
-        if card_height >= 79:
-            text(SCREEN, MISSION_OBJECTIVES[index], detail_size,
-                 (193, 209, 213),
-                 topleft=(label_x, rect.top+max(46, round(card_height*.66))))
+        label_y = rect.top+max(5, round(card_height*.12))
+        text(SCREEN, MISSION_NAMES[index], label_size, (239, 250, 242),
+             topleft=(label_x, label_y))
+        # Keep description lines within the card on narrow mobile layouts.
+        detail = MISSION_LOCATIONS[index]
+        available = max(40, rect.right-label_x-10)
+        if available >= 370:
+            detail += "  |  " + MISSION_BOSS_DESCRIPTIONS[index]
+        text(SCREEN, detail, detail_size, color,
+             topleft=(label_x, rect.top+max(24, round(card_height*.42))))
+        if card_height >= 87 and available >= 230:
+            objective = MISSION_OBJECTIVES[index]
+            obj_size = detail_size
+            if obj_size not in FONT_CACHE:
+                FONT_CACHE[obj_size] = font(obj_size)
+            if FONT_CACHE[obj_size].size(objective)[0] > available:
+                while objective and FONT_CACHE[obj_size].size(objective + "...")[0] > available:
+                    objective = objective[:-1]
+                objective = objective.rstrip() + "..."
+            text(SCREEN, objective, obj_size, (199, 219, 218),
+                 topleft=(label_x, rect.top+max(44, round(card_height*.69))))
+        if selected:
+            # Graphic check indicator: readable even without font glyph support.
+            sx, sy = rect.right-18, rect.centery
+            pygame.draw.circle(SCREEN, (135, 248, 186), (sx, sy), 9)
+            pygame.draw.lines(SCREEN, (15, 55, 48), False,
+                              [(sx-5, sy), (sx-1, sy+4), (sx+6, sy-5)], 2)
 
-    text(SCREEN, "TAP A MISSION  /  PRESS 1, 2 OR 3",
-         max(13, min(18, w//55)), (185, 221, 225), center=(w/2, h*.81))
-    back_rect = draw_button("BACK TO MENU", (w/2, h*.90), width=min(290, w*.56))
+    text(SCREEN, "TAP TO HIGHLIGHT  /  KEYS 1, 2, 3",
+         max(12, min(18, w//55)), (185, 221, 225),
+         center=(w/2, h*(.74 if compact else .76)))
+    continue_rect = draw_button("CONTINUE", (w/2, h*(.825 if compact else .84)),
+                                width=min(320, w*.62), active=True)
+    back_rect = draw_button("BACK TO MENU", (w/2, h*(.935 if compact else .94)),
+                            width=min(290, w*.60))
 
+    # Key shortcuts and card taps only modify the highlight; confirmation
+    # comes solely from CONTINUE, Enter or Space.
     for e in EVENTS:
         if e.type == pygame.KEYDOWN:
             if pygame.K_1 <= e.key <= pygame.K_3:
-                choose_mission(e.key-pygame.K_1)
-                return
-            if pygame.K_KP1 <= e.key <= pygame.K_KP3:
-                choose_mission(e.key-pygame.K_KP1)
-                return
-            if e.key in (pygame.K_DOWN, pygame.K_RIGHT):
+                SELECTED_MISSION_SLOT = e.key-pygame.K_1
+            elif pygame.K_KP1 <= e.key <= pygame.K_KP3:
+                SELECTED_MISSION_SLOT = e.key-pygame.K_KP1
+            elif e.key in (pygame.K_DOWN, pygame.K_RIGHT):
                 SELECTED_MISSION_SLOT = (SELECTED_MISSION_SLOT + 1) % MAX_MISSIONS
             elif e.key in (pygame.K_UP, pygame.K_LEFT):
                 SELECTED_MISSION_SLOT = (SELECTED_MISSION_SLOT - 1) % MAX_MISSIONS
@@ -861,9 +915,12 @@ def missionSelect():
     if clicked(back_rect):
         STATE = "MENU"
         return
+    if clicked(continue_rect):
+        choose_mission(SELECTED_MISSION_SLOT)
+        return
     for index, rect in enumerate(card_rects):
         if clicked(rect):
-            choose_mission(index)
+            SELECTED_MISSION_SLOT = index
             return
 
 
@@ -986,6 +1043,8 @@ def update():
     CARRIER.update()
     if STATE == "TAKEOFF" and MISSION_FRAME >= 105:
         CARRIER.launch()
+        # The final cached ascent frame is exactly the normal flight image.
+        PLAYER.image = PLAYER.base_image
         STATE = "ACTIVE"
     if STATE == "ACTIVE":
         PHASE_FRAME += 1
@@ -1031,15 +1090,20 @@ def draw_hud():
     bosses = [e for e in ENEMIES if e.is_boss and e.health > 0]
     if bosses:
         boss = bosses[0]
-        bw = min(420, int(w*.48))
-        bx = (w-bw)//2
-        by = max(102, round(h*.115))
-        panel(SCREEN, pygame.Rect(bx-13, by-29, bw+26, 62), (20, 25, 32, 228), 8)
-        text(SCREEN, BOSS_NAMES[boss.typ], 17, (255, 220, 179), center=(w/2, by-13))
-        pygame.draw.rect(SCREEN, (77, 67, 66), (bx, by+7, bw, 13), border_radius=4)
+        # Small, boss-attached indicator; never cover its artwork with a
+        # giant screen-centred health panel.
+        bw = max(76, min(168, int(w*.22), boss.rect.width))
+        bx = round(clamp(boss.rect.centerx-bw/2, 8, w-bw-8))
+        by = boss.rect.bottom + 7
+        if by > h-38:
+            by = boss.rect.top-32
+        text(SCREEN, BOSS_NAMES[boss.typ], 13, (255, 222, 183),
+             center=(bx+bw/2, by+7))
+        pygame.draw.rect(SCREEN, (16, 29, 36), (bx-2, by+18, bw+4, 10), border_radius=3)
+        pygame.draw.rect(SCREEN, (86, 77, 78), (bx, by+20, bw, 6), border_radius=2)
         current = max(0, round(bw*boss.health/boss.maxHealth))
         if current:
-            pygame.draw.rect(SCREEN, (240, 94, 93), (bx, by+7, current, 13), border_radius=4)
+            pygame.draw.rect(SCREEN, (242, 102, 91), (bx, by+20, current, 6), border_radius=2)
 
 
 def draw_stage_overlay():
