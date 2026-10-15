@@ -1,0 +1,260 @@
+{
+  "canvas_px": [
+    960,
+    600
+  ],
+  "note": "All coordinates are pixels in the 960x600 track image (y points down). The background contains no logs and no moving water; draw them at runtime.",
+  "gorge": {
+    "flows_from": "north-east",
+    "flows_to": "south-west",
+    "flow_direction_unit": [
+      -0.8599,
+      0.5105
+    ],
+    "flow_angle_deg_clockwise_from_east": 149.3,
+    "centre_line": [
+      [
+        1011.6,
+        9.4
+      ],
+      [
+        922.0,
+        62.5
+      ],
+      [
+        832.5,
+        115.7
+      ],
+      [
+        742.9,
+        168.9
+      ],
+      [
+        653.3,
+        222.1
+      ],
+      [
+        563.8,
+        275.3
+      ],
+      [
+        474.2,
+        328.5
+      ],
+      [
+        384.6,
+        381.6
+      ],
+      [
+        295.0,
+        434.8
+      ],
+      [
+        205.5,
+        488.0
+      ],
+      [
+        115.9,
+        541.2
+      ],
+      [
+        26.3,
+        594.4
+      ],
+      [
+        -63.2,
+        647.5
+      ]
+    ],
+    "spawn_at_u": -60.0,
+    "despawn_at_u": 1190.0,
+    "across_unit_vector_south_east": [
+      0.5105,
+      0.8599
+    ],
+    "water_half_width_px": "33 +/- 4 (see golden_gorge_water_mask.png)",
+    "masks": {
+      "water": "golden_gorge_water_mask.png",
+      "canyon_incl_cliffs": "golden_gorge_canyon_mask.png",
+      "road": "golden_gorge_road_mask.png"
+    }
+  },
+  "crossings": {
+    "bridge": {
+      "centre": [
+        560.2,
+        277.4
+      ],
+      "note": "road on a bridge deck; logs float underneath"
+    },
+    "ford": {
+      "centre": [
+        328.0,
+        415.2
+      ],
+      "level_water_crossing": true,
+      "hit_zone_corners": [
+        [
+          350.6,
+          363.1
+        ],
+        [
+          271.4,
+          410.1
+        ],
+        [
+          305.5,
+          467.4
+        ],
+        [
+          384.6,
+          420.4
+        ]
+      ],
+      "depth_marker_posts": 4
+    },
+    "decorative_rope_bridge": {
+      "centre": [
+        796.6,
+        137.0
+      ],
+      "note": "not part of the track; logs pass underneath"
+    }
+  },
+  "log_hazard": {
+    "lanes_across_gorge_px": [
+      -18,
+      0,
+      18
+    ],
+    "speed_px_s": [
+      26,
+      34
+    ],
+    "lateral_bob_px": 3,
+    "bob_period_s": 2.4,
+    "spawn_gap_s": [
+      1.6,
+      3.2
+    ],
+    "sprites": {
+      "log_hollow_long": {
+        "file": "logs/log_hollow_long.png",
+        "flow_rotated": "logs/log_hollow_long_flow.png",
+        "shadow": "logs/log_hollow_long_shadow.png",
+        "shadow_flow_rotated": "logs/log_hollow_long_shadow_flow.png",
+        "foam_frames": [
+          "logs/log_hollow_long_foam_a.png",
+          "logs/log_hollow_long_foam_b.png"
+        ],
+        "foam_flow_rotated": [
+          "logs/log_hollow_long_foam_a_flow.png",
+          "logs/log_hollow_long_foam_b_flow.png"
+        ],
+        "hires": "logs/hires_4x/log_hollow_long@4x.png",
+        "body_length_px": 62,
+        "body_width_px": 17,
+        "canvas_px": [
+          78,
+          31
+        ],
+        "hitbox": {
+          "type": "capsule",
+          "length_px": 45,
+          "radius_px": 9.5,
+          "axis": "along the log"
+        }
+      },
+      "log_hollow_short": {
+        "file": "logs/log_hollow_short.png",
+        "flow_rotated": "logs/log_hollow_short_flow.png",
+        "shadow": "logs/log_hollow_short_shadow.png",
+        "shadow_flow_rotated": "logs/log_hollow_short_shadow_flow.png",
+        "foam_frames": [
+          "logs/log_hollow_short_foam_a.png",
+          "logs/log_hollow_short_foam_b.png"
+        ],
+        "foam_flow_rotated": [
+          "logs/log_hollow_short_foam_a_flow.png",
+          "logs/log_hollow_short_foam_b_flow.png"
+        ],
+        "hires": "logs/hires_4x/log_hollow_short@4x.png",
+        "body_length_px": 46,
+        "body_width_px": 15,
+        "canvas_px": [
+          62,
+          29
+        ],
+        "hitbox": {
+          "type": "capsule",
+          "length_px": 31,
+          "radius_px": 8.5,
+          "axis": "along the log"
+        }
+      },
+      "log_solid": {
+        "file": "logs/log_solid.png",
+        "flow_rotated": "logs/log_solid_flow.png",
+        "shadow": "logs/log_solid_shadow.png",
+        "shadow_flow_rotated": "logs/log_solid_shadow_flow.png",
+        "foam_frames": [
+          "logs/log_solid_foam_a.png",
+          "logs/log_solid_foam_b.png"
+        ],
+        "foam_flow_rotated": [
+          "logs/log_solid_foam_a_flow.png",
+          "logs/log_solid_foam_b_flow.png"
+        ],
+        "hires": "logs/hires_4x/log_solid@4x.png",
+        "body_length_px": 54,
+        "body_width_px": 14,
+        "canvas_px": [
+          70,
+          28
+        ],
+        "hitbox": {
+          "type": "capsule",
+          "length_px": 40,
+          "radius_px": 8.0,
+          "axis": "along the log"
+        }
+      }
+    },
+    "on_hit": {
+      "effect": "kart spins",
+      "spin_turns": 2,
+      "spin_time_s": 0.9,
+      "speed_multiplier_during_spin": 0.4,
+      "after": "restore control, brief 0.6 s immunity",
+      "log_reaction": "nudged sideways by 4 px, keeps drifting"
+    },
+    "only_dangerous_in": "ford.hit_zone_corners (logs elsewhere are scenery)"
+  },
+  "water_ripples": {
+    "frames": [
+      "water_ripples/ripples_0.png",
+      "water_ripples/ripples_1.png",
+      "water_ripples/ripples_2.png",
+      "water_ripples/ripples_3.png"
+    ],
+    "frame_time_s": 0.15,
+    "note": "full-canvas RGBA overlays that loop seamlessly; draw above the background, below logs"
+  },
+  "draw_order": [
+    "golden_gorge_track.png",
+    "water_ripples/ripples_N.png",
+    "logs/*_shadow",
+    "logs/*_foam_*",
+    "logs/<log> (rotate to the flow angle or use *_flow.png)",
+    "karts",
+    "golden_gorge_bridge_overlay.png (so karts and logs go under/over correctly: karts on the bridge are drawn above it only if you draw them after)"
+  ],
+  "draw_order_note": "For karts on the bridge draw them AFTER the bridge overlay; logs always BEFORE the overlay so they disappear under both bridges.",
+  "start_line": {
+    "at": [
+      591.9,
+      527.5
+    ],
+    "heading": "west (left)"
+  }
+}

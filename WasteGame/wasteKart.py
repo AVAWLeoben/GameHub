@@ -1,4 +1,4 @@
-"""WasteKart 2.1.2 - Desert cactus hazards + Dusty Drive moving train.
+"""WasteKart 2.1.3 - Golden Gorge floating log hazards + Desert track hazards.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
@@ -418,6 +418,9 @@ class Track:
             width=float(bridge.get('width',self.road_half_width*2.0))
             tolerance=math.radians(float(bridge.get('heading_tolerance_degrees',42.0)))
             self.overpasses.append({'a':a,'b':b,'width':width,'tolerance':tolerance})
+        gorge_rel=data.get('golden_gorge_manifest')
+        self.gorge_manifest_path=(os.path.join(ASSET_ROOT,*gorge_rel.split('/'))
+                                  if gorge_rel else None)
         self.pickup_positions=self.find_pickup_positions()
 
     def on_road(self,point):
@@ -769,6 +772,164 @@ class CactusLaneHazards:
         canvas.blit(image,(round(x-ax*sx),round(y-ay*sy)))
 
 
+
+class GoldenGorgeLogs:
+    """Downstream log traffic from the user's Golden Gorge manifest.
+
+    Four water-animation frames are baked into the map once at load time, so
+    rendering the river adds no full-screen alpha blend on every iPad frame.
+    The three user-drawn log types keep their actual sprites, foam and shadows.
+    Hazard collision applies ONLY inside the ford polygon, never elsewhere.
+    """
+    KART_RADIUS=10.0
+    SPIN_SECONDS=0.9
+    IMMUNITY_AFTER_SPIN=0.6
+    MAX_LOGS=24
+
+    def __init__(self,track,base_map):
+        with open(track.gorge_manifest_path,encoding='utf8') as source:
+            self.manifest=json.load(source)
+        self.base=os.path.dirname(track.gorge_manifest_path)
+        m=self.manifest
+        self.flow=tuple(float(n) for n in m['gorge']['flow_direction_unit'])
+        self.across=tuple(float(n) for n in m['gorge']['across_unit_vector_south_east'])
+        self.origin=tuple(float(n) for n in m['gorge']['centre_line'][0])
+        self.ford_polygon=[tuple(p) for p in m['crossings']['ford']['hit_zone_corners']]
+        self.speeds=[float(n) for n in m['log_hazard']['speed_px_s']]
+        self.lanes=[float(n) for n in m['log_hazard']['lanes_across_gorge_px']]
+        self.gap_min,self.gap_max=(float(n) for n in m['log_hazard']['spawn_gap_s'])
+        self.spawn_u=float(m['gorge']['spawn_at_u'])
+        self.end_u=float(m['gorge']['despawn_at_u'])
+        self.bob=float(m['log_hazard']['lateral_bob_px'])
+        self.bob_period=float(m['log_hazard']['bob_period_s'])
+        self.names=list(m['log_hazard']['sprites'])
+        sx=TRACK_RECT.width/MAP_W
+        sy=TRACK_RECT.height/MAP_H
+        self.art={}
+        for name,spec in m['log_hazard']['sprites'].items():
+            def load(relative):
+                path=os.path.join(self.base,*relative.split('/'))
+                img=pygame.image.load(path).convert_alpha()
+                size=(max(1,round(img.get_width()*sx)),max(1,round(img.get_height()*sy)))
+                return pygame.transform.smoothscale(img,size)
+            self.art[name]={
+                'body':load(spec['flow_rotated']),
+                'shadow':load(spec['shadow_flow_rotated']),
+                'foam':[load(p) for p in spec['foam_flow_rotated']],
+                'hitbox':spec['hitbox'],
+            }
+        # Precompose the four water images over the track once, removing a
+        # 740x462 transparent blend from the hot draw loop.
+        self.water_frames=[]
+        for relative in m['water_ripples']['frames']:
+            frame=base_map.copy()
+            ripples=pygame.image.load(os.path.join(self.base,*relative.split('/'))).convert_alpha()
+            ripples=pygame.transform.smoothscale(ripples,TRACK_RECT.size)
+            frame.blit(ripples,(0,0))
+            self.water_frames.append(frame)
+        self.water_frame_seconds=float(m['water_ripples']['frame_time_s'])
+        self.rng=random.Random(318731)
+        self.reset()
+
+    def reset(self):
+        self.time=0.0
+        self.spawn_left=2.2
+        self.logs=[]
+        # Place a spaced, visible initial stream throughout the gorge: a
+        # child reaching the ford soon after green meets real moving logs.
+        for index,u in enumerate((-55,52,145,245,340,445,543,639,737,830,935,1040,1134)):
+            self.spawn(float(u),index)
+
+    def spawn(self,u,index=None):
+        if index is None:
+            index=self.rng.randrange(9999)
+        name=self.names[index%len(self.names)]
+        log={
+            'name':name, 'u':u, 'lane':self.lanes[index%len(self.lanes)],
+            'speed':self.speeds[index%len(self.speeds)],
+            'phase':index*1.37, 'nudge':0.0, 'nudge_dir':1.0,
+        }
+        self.logs.append(log)
+        return log
+
+    def update(self,dt):
+        self.time+=dt
+        for log in self.logs:
+            log['u']+=log['speed']*dt
+            if log['nudge']>0:
+                log['nudge']=max(0.0,log['nudge']-8.0*dt)
+        self.logs=[l for l in self.logs if l['u']<self.end_u+40.0]
+        self.spawn_left-=dt
+        if self.spawn_left<=0.0 and len(self.logs)<self.MAX_LOGS:
+            self.spawn(self.spawn_u)
+            self.spawn_left=self.rng.uniform(self.gap_min,self.gap_max)
+
+    def position(self,log):
+        shift=(log['lane']+
+               self.bob*math.sin(math.tau*self.time/max(.1,self.bob_period)+log['phase'])+
+               log['nudge_dir']*log['nudge'])
+        return (self.origin[0]+self.flow[0]*log['u']+self.across[0]*shift,
+                self.origin[1]+self.flow[1]*log['u']+self.across[1]*shift)
+
+    @staticmethod
+    def inside_polygon(point,polygon):
+        x,y=point
+        inside=False
+        for a,b in zip(polygon,polygon[1:]+polygon[:1]):
+            if (a[1]>y)!=(b[1]>y):
+                test_x=a[0]+(y-a[1])*(b[0]-a[0])/(b[1]-a[1])
+                if x<test_x:
+                    inside=not inside
+        return inside
+
+    def hit_test(self,previous,position):
+        # Capsule collision, sampling the kart's swept movement so high-speed
+        # updates cannot skip a moving log between adjacent frames.
+        for fraction in (0.0,.25,.5,.75,1.0):
+            kart=lerp(previous,position,fraction)
+            if not self.inside_polygon(kart,self.ford_polygon):
+                continue
+            for log in self.logs:
+                x,y=self.position(log)
+                spec=self.art[log['name']]['hitbox']
+                half=float(spec['length_px'])*0.5
+                a=(x-self.flow[0]*half,y-self.flow[1]*half)
+                b=(x+self.flow[0]*half,y+self.flow[1]*half)
+                distance,_,_=point_segment_projection(a,b,kart)
+                if distance<=float(spec['radius_px'])+self.KART_RADIUS:
+                    return log
+        return None
+
+    def nudge_on_hit(self,log,kart_pos):
+        # Logs keep floating; a small 4px sideways wobble shows the impact.
+        x,y=self.position(log)
+        side=(kart_pos[0]-x)*self.across[0]+(kart_pos[1]-y)*self.across[1]
+        log['nudge_dir']=1.0 if side>=0 else -1.0
+        log['nudge']=4.0
+
+    def draw(self,canvas,to_screen):
+        original_clip=canvas.get_clip()
+        canvas.set_clip(TRACK_RECT)
+        positioned=[]
+        for log in self.logs:
+            x,y=self.position(log)
+            if not (-75<=x<=MAP_W+75 and -75<=y<=MAP_H+75):
+                continue
+            xy=to_screen((x,y))
+            positioned.append((log,(round(xy[0]),round(xy[1]))))
+        # Shadows, alternating foam, then solid logs. Overlay bridges are
+        # drawn by WasteKart AFTER this entire hazard layer.
+        for key in ('shadow','foam','body'):
+            for log,point in positioned:
+                sprites=self.art[log['name']]
+                if key=='foam':
+                    frame=int(self.time/.16+log['phase'])%len(sprites['foam'])
+                    sprite=sprites['foam'][frame]
+                else:
+                    sprite=sprites[key]
+                canvas.blit(sprite,sprite.get_rect(center=point))
+        canvas.set_clip(original_clip)
+
 class Racer:
     """One vehicle drives its entire child-drawn multi-lap spline ONCE."""
     def __init__(self,index,kart_id,route,is_ghost=False,laps=1):
@@ -794,6 +955,8 @@ class Racer:
         self.train_spin_left=0.0
         self.train_spin_duration=MovingTrain.STUN_SECONDS
         self.train_spin_heading=0.0
+        self.train_spin_turns=1.0
+        self.train_spin_motion=0.0
         self.train_immunity_left=0.0
         self.train_hits=0
         self.train_hit_events=[]
@@ -850,12 +1013,36 @@ class Racer:
                 (self.is_ghost and not replay)):
             return False
         self.train_spin_heading=self.heading
+        self.train_spin_duration=MovingTrain.STUN_SECONDS
+        self.train_spin_turns=1.0
+        self.train_spin_motion=0.0
         self.train_spin_left=self.train_spin_duration
         self.train_immunity_left=MovingTrain.HIT_IMMUNITY
         self.train_hits+=1
         if not replay and elapsed is not None:
             self.train_hit_events.append(round(elapsed,3))
         self.speed=0.0
+        self.drafting=False
+        self.interaction_factor=1.0
+        return True
+
+    def hit_by_log(self,elapsed=None,replay=False):
+        """Two full spins in 0.9s while travelling at 40% normal speed."""
+        if (self.finished or self.train_immunity_left>0 or
+                (self.is_ghost and not replay)):
+            return False
+        self.train_spin_heading=self.heading
+        self.train_spin_duration=GoldenGorgeLogs.SPIN_SECONDS
+        self.train_spin_turns=2.0
+        self.train_spin_motion=0.4
+        self.train_spin_left=self.train_spin_duration
+        self.train_immunity_left=(self.train_spin_duration+
+                                  GoldenGorgeLogs.IMMUNITY_AFTER_SPIN)
+        self.train_hits+=1
+        if not replay and elapsed is not None:
+            # Shared ghost history: old train records are plain timestamps;
+            # Golden Gorge records are [time, 'log'] for correct replay.
+            self.train_hit_events.append([round(elapsed,3),'log'])
         self.drafting=False
         self.interaction_factor=1.0
         return True
@@ -868,14 +1055,30 @@ class Racer:
         if self.finished:return
         self.train_immunity_left=max(0.0,self.train_immunity_left-dt)
         if self.is_ghost and self.ghost_train_hits_index<len(self.ghost_train_hits):
-            if elapsed>=self.ghost_train_hits[self.ghost_train_hits_index]:
-                self.hit_by_train(replay=True)
+            event=self.ghost_train_hits[self.ghost_train_hits_index]
+            trigger=event[0] if isinstance(event,(tuple,list)) else event
+            if elapsed>=trigger:
+                if isinstance(event,(tuple,list)) and len(event)>1 and event[1]=='log':
+                    self.hit_by_log(replay=True)
+                else:
+                    self.hit_by_train(replay=True)
                 self.ghost_train_hits_index+=1
         if self.train_spin_left>0.0:
             self.train_spin_left=max(0.0,self.train_spin_left-dt)
             portion=1.0-self.train_spin_left/self.train_spin_duration
-            self.heading=self.train_spin_heading+math.tau*portion
-            self.speed=0.0
+            self.heading=self.train_spin_heading+math.tau*self.train_spin_turns*portion
+            if self.train_spin_motion>0:
+                # Ford logs are a soft obstacle: the child keeps following
+                # their authored line at 40% speed during the two rotations.
+                travel=self.speed*self.train_spin_motion*dt
+                self.distance=min(self.total_length,self.distance+travel)
+                self.pos,_,_=self.route_sample(self.distance)
+                self.on_track=track.on_road(self.pos)
+                if self.distance>=self.total_length-1e-3:
+                    self.finished=True
+                    self.finish_time=round(elapsed,3)
+            else:
+                self.speed=0.0
             return
         if self.is_ghost and not self.ghost_reaction_applied and self.ghost_reaction is not None:
             if self.ghost_reaction < 0 or elapsed >= self.ghost_reaction:
@@ -991,6 +1194,7 @@ class WasteKartGame:
         self.bridge_overlay_surface=None
         self.moving_train=None
         self.cactus_hazards=None
+        self.gorge_hazards=None
         self.race_routes_layer=None  # Legacy field; used only during transition.
         self.race_trails=[]      # AheadTrail for each player (+ optional ghost).
         self.pickups=[]          # Fresh shared boxes for each race; stable during drawing.
@@ -1039,6 +1243,8 @@ class WasteKartGame:
         self.moving_train=(MovingTrain(self.track) if self.track.train_manifest_path else None)
         self.cactus_hazards=(CactusLaneHazards(self.track)
                              if self.track.cactus_manifest_path else None)
+        self.gorge_hazards=(GoldenGorgeLogs(self.track,self.map_surface)
+                            if self.track.gorge_manifest_path else None)
 
     def font(self,size):
         return self.fonts[min(self.fonts,key=lambda k:abs(k-size))]
@@ -1315,7 +1521,11 @@ class WasteKartGame:
     def map_base(self):
         self.canvas.fill((18,30,49))
         if self.map_surface is not None:
-            self.canvas.blit(self.map_surface,TRACK_RECT.topleft)
+            base=(self.gorge_hazards.water_frames[
+                  int(self.item_box_clock/self.gorge_hazards.water_frame_seconds)%
+                  len(self.gorge_hazards.water_frames)]
+                  if self.gorge_hazards is not None else self.map_surface)
+            self.canvas.blit(base,TRACK_RECT.topleft)
         pygame.draw.rect(self.canvas,(130,151,172),TRACK_RECT,2,border_radius=3)
 
     def draw_route(self,pts,color,width=4,dashed=False,end_caps=True):
@@ -1494,6 +1704,8 @@ class WasteKartGame:
             self.ensure_draw_routes_layer()
             self.canvas.blit(self.draw_routes_layer,(0,0))
             self.draw_powerup_boxes()
+            if self.gorge_hazards is not None:
+                self.gorge_hazards.draw(self.canvas,self.world_to_screen)
             if len(self.draft)>1:
                 self.draw_route_layered(self.draft,color,6,dashed=False,layer=0)
             self.draw_start()
@@ -1506,6 +1718,8 @@ class WasteKartGame:
             self.ensure_draw_routes_layer()
             self.canvas.blit(self.draw_routes_layer,(0,0))
             self.draw_powerup_boxes()
+            if self.gorge_hazards is not None:
+                self.gorge_hazards.draw(self.canvas,self.world_to_screen)
             if len(self.draft)>1:self.draw_route(self.draft,color,6)
             self.draw_start()
         pygame.draw.rect(self.canvas,INK,(0,0,LOGICAL_W,72))
@@ -1734,6 +1948,9 @@ class WasteKartGame:
                 trail.draw(self.canvas,racer.distance)
         self.draw_powerup_boxes(race=self.state=='race')
         self.draw_start()
+        # Underneath karts and both bridge overlays. Only the ford can hit.
+        if self.gorge_hazards is not None:
+            self.gorge_hazards.draw(self.canvas,self.world_to_screen)
         if self.track and self.track.has_overpasses():
             self.display_racers(layer=0)
             self.draw_bridge_overlay()
@@ -2049,6 +2266,8 @@ class WasteKartGame:
             self.moving_train.reset()
         if self.cactus_hazards is not None:
             self.cactus_hazards.reset()
+        if self.gorge_hazards is not None:
+            self.gorge_hazards.reset()
         self.countdown=0.0
         self.elapsed=0.0
         self.paused=False
@@ -2376,6 +2595,8 @@ class WasteKartGame:
             if not self.paused:
                 if self.moving_train is not None:
                     self.moving_train.update(dt)
+                if self.gorge_hazards is not None:
+                    self.gorge_hazards.update(dt)
                 self.countdown+=dt
                 if self.countdown>=GREEN_AT:
                     self.state='race'
@@ -2387,6 +2608,8 @@ class WasteKartGame:
                     self.moving_train.update(dt)
                 if self.cactus_hazards is not None:
                     self.cactus_hazards.update(dt)
+                if self.gorge_hazards is not None:
+                    self.gorge_hazards.update(dt)
                 self.update_interactions(dt)
                 for racer in self.racers:
                     before=racer.pos
@@ -2397,6 +2620,11 @@ class WasteKartGame:
                     if (self.cactus_hazards is not None and not racer.finished and
                             self.cactus_hazards.hit_test(racer.pos)):
                         racer.hit_by_cactus(self.elapsed)
+                    if self.gorge_hazards is not None and not racer.finished and \
+                            racer.train_immunity_left<=0.0:
+                        log=self.gorge_hazards.hit_test(before,racer.pos)
+                        if log is not None and racer.hit_by_log(self.elapsed):
+                            self.gorge_hazards.nudge_on_hit(log,racer.pos)
                     self.try_collect_powerups(racer,before)
                 if self.active_ghost is not None:
                     self.active_ghost.update(dt,self.elapsed,self.track)
