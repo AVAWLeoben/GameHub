@@ -23,12 +23,23 @@ RING_RADIUS_Z = 36000.0
 # Map altitude units are much larger than ground X/Y units. This scale makes
 # visible ring height agree with its 3-D collision opening.
 RING_VERTICAL_SCALE = 3.0
+# Once the helicopter is within 400 map units, the gate switches to final
+# approach. A centered, correctly levelled *forward* approach is confirmed
+# before its giant perspective sprite can run offscreen.
+RING_CAPTURE_DISTANCE = 400.0
+PASS_BANNER_DURATION = 78  # frames at the game's original 120 FPS
 
 # Two small coins between each pair of rings act as navigational breadcrumbs.
-# Collecting them is optional and provides only a modest score bonus.
-GUIDE_COIN_FRACTIONS = (0.34, 0.67)
+# Depth alone does NOT visually separate objects along the same camera ray:
+# two perfectly collinear coins both project onto the same pixel. Place them
+# near opposite edges of the flight line and farther apart down the route, so
+# they read as separate 3-D markers rather than a stacked coin pile. Their
+# generous pickup radius means flying the center of the trail still collects
+# them; no slalom or deviation from the flight course is required.
+GUIDE_COIN_FRACTIONS = (0.26, 0.74)
+GUIDE_COIN_LATERAL_OFFSET = 185.0
 GUIDE_COIN_REWARD = 15
-GUIDE_COIN_PICKUP_XY = 220.0
+GUIDE_COIN_PICKUP_XY = 310.0
 GUIDE_COIN_PICKUP_Z = 29000.0
 GUIDE_COIN_MAX_DIAMETER = 23
 
@@ -90,15 +101,52 @@ class FlightRing:
         near_miss = abs(lateral) < 1300 and abs(height_diff) < 115000
         return norm <= 1.0, norm <= .16, near_miss
 
+    def near_pass(self, old_x, old_y, old_z, new_x, new_y, new_z):
+        """Confirm a genuine final approach inside the 400-unit capture zone.
+
+        Unlike a proximity-only pickup, this needs forward progress along the
+        course's ring normal, entry from the proper side, and the same 3-D
+        elliptical opening as an exact plane crossing. In particular, a pilot
+        who flies past the ring's side or at the wrong height cannot clear it.
+        """
+        before = (old_x - self.x) * self.nx + (old_y - self.y) * self.ny
+        after = (new_x - self.x) * self.nx + (new_y - self.y) * self.ny
+        if before > 0 or after > 0 or after <= before + 0.01:
+            return False, False
+        if math.hypot(new_x - self.x, new_y - self.y) > RING_CAPTURE_DISTANCE:
+            return False, False
+        lateral = -(new_x - self.x) * self.ny + (new_y - self.y) * self.nx
+        height_diff = new_z - self.z
+        norm = (lateral / RING_RADIUS_XY) ** 2 + (height_diff / RING_RADIUS_Z) ** 2
+        return norm <= 1.0, norm <= .16
+
     def draw(self, active=True):
-        p = project_flight_object(self.x, self.y, self.z)
-        if p is None:
-            return
-        sx, sy, depth = p
         w, h = SCREEN.get_size()
-        if sx < -180 or sx > w + 180 or sy < -175 or sy > h + 175:
-            return
-        radius = min(170, max(7, int(108000 / max(350, depth))))
+        near = active and math.hypot(self.x - player_x, self.y - player_y) <= RING_CAPTURE_DISTANCE
+        if near:
+            # The old projection divides by forward distance and rapidly
+            # sends a near hoop beyond the viewport. Freeze its perspective
+            # denominator at 400 and clamp a SMALL locator to the flight view.
+            rad = math.radians(player_angle)
+            dx, dy = self.x - player_x, self.y - player_y
+            forward = dx * math.cos(rad) + dy * math.sin(rad)
+            side = -dx * math.sin(rad) + dy * math.cos(rad)
+            if forward <= 0:
+                return  # HUD displays TURN BACK instead of a false front hoop
+            depth = max(RING_CAPTURE_DISTANCE, forward)
+            sx = w / 2 - w / 2 * (side / depth)
+            sy = 200 + int(player_v) + (player_height - self.z) * RING_VERTICAL_SCALE / depth
+            sx = max(90, min(w - 90, sx))
+            sy = max(135, min(h - 155, sy))
+            radius = 70  # Small close-range locator, not a giant vanishing hoop
+        else:
+            p = project_flight_object(self.x, self.y, self.z)
+            if p is None:
+                return
+            sx, sy, depth = p
+            if sx < -180 or sx > w + 180 or sy < -175 or sy > h + 175:
+                return
+            radius = min(170, max(7, int(108000 / max(350, depth))))
         cx, cy = int(sx), int(sy)
         correct_height = abs(player_height - self.z) <= RING_RADIUS_Z
         color = ((96, 240, 162) if correct_height else (255, 184, 91)) if active else (82, 119, 147)
@@ -119,6 +167,9 @@ class FlightRing:
         if active and radius >= 15:
             number = HUD_SMALL_FONT.render(str(self.index + 1), True, (245, 252, 244))
             SCREEN.blit(number, number.get_rect(center=(cx, cy)))
+            if near:
+                label = HUD_SMALL_FONT.render('FINAL APPROACH', True, (255, 238, 175))
+                SCREEN.blit(label, label.get_rect(center=(cx, cy - radius - 17)))
 
 
 class FlightCoin:
@@ -177,17 +228,30 @@ class FlightCoin:
 
 
 def build_guidance_coins(courses, entries):
-    """Two evenly separated breadcrumb coins on each approach to a ring."""
+    """Space breadcrumbs in 3-D without stacking them on the same view ray.
+
+    On straight legs, collinear objects at the same altitude project to the
+    *same screen point* regardless of their distance. Tiny alternating lateral
+    offsets make the depth sequence legible, while the altitude still smoothly
+    interpolates toward the target ring. The offsets remain smaller than the
+    collection radius, so pilots can simply follow the centerline.
+    """
     result = []
     for course_index, rings in enumerate(courses):
         previous = entries[course_index]
         course_coins = []
         for ring in rings:
+            dx, dy = ring.x - previous[0], ring.y - previous[1]
+            length = math.hypot(dx, dy)
+            # Perpendicular to the current leg, independent of map orientation.
+            side_x, side_y = ((-dy / length, dx / length)
+                              if length > 0.001 else (0.0, 0.0))
             coins = []
-            for fraction in GUIDE_COIN_FRACTIONS:
+            for index, fraction in enumerate(GUIDE_COIN_FRACTIONS):
+                side = GUIDE_COIN_LATERAL_OFFSET * (1 if index % 2 == 0 else -1)
                 coins.append(FlightCoin(
-                    previous[0] + (ring.x - previous[0]) * fraction,
-                    previous[1] + (ring.y - previous[1]) * fraction,
+                    previous[0] + dx * fraction + side_x * side,
+                    previous[1] + dy * fraction + side_y * side,
                     previous[2] + (ring.z - previous[2]) * fraction))
             course_coins.append(coins)
             previous = ring.x, ring.y, ring.z
@@ -305,12 +369,18 @@ def course_rank():
 
 def collect_ring_if_crossed(old_x, old_y, old_z):
     global COURSE_GATE_INDEX, COURSE_PERFECT, COURSE_MISSES, SCORE
-    global RING_MESSAGE, RING_MESSAGE_FRAMES
+    global RING_MESSAGE, RING_MESSAGE_FRAMES, PASS_BANNER_FRAMES, PASS_BANNER_TEXT
     ring = active_ring()
     if ring is None:
         return
+    # Keep the original exact plane-crossing test for fast jumps and precision,
+    # but also accept a properly aligned approach within 400 units so a gate
+    # cannot visually vanish before a clear is acknowledged.
     cleared, perfect, near_miss = ring.crossing(
         old_x, old_y, old_z, player_x, player_y, player_height)
+    if not cleared:
+        cleared, perfect = ring.near_pass(
+            old_x, old_y, old_z, player_x, player_y, player_height)
     if cleared:
         COURSE_GATE_INDEX += 1
         if perfect:
@@ -319,6 +389,8 @@ def collect_ring_if_crossed(old_x, old_y, old_z):
         SCORE += reward
         RING_MESSAGE = 'PERFECT PASS  +450' if perfect else 'RING CLEARED  +250'
         RING_MESSAGE_FRAMES = 100
+        PASS_BANNER_TEXT = 'PERFECT PASS  +450' if perfect else 'RING CLEARED  +250'
+        PASS_BANNER_FRAMES = PASS_BANNER_DURATION
         if COURSE_GATE_INDEX == len(COURSES[COURSE_INDEX]):
             SCORE += 1500
             RING_MESSAGE = 'COURSE COMPLETE  +1500'
@@ -338,7 +410,7 @@ def course_button_rect(primary):
 def begin_next_course():
     global COURSE_INDEX, COURSE_GATE_INDEX, COURSE_PERFECT, COURSE_MISSES
     global SHOW_COURSE_RESULT, COURSE_START_TICK, COURSE_SCORE_START
-    global RING_MESSAGE, RING_MESSAGE_FRAMES
+    global RING_MESSAGE, RING_MESSAGE_FRAMES, PASS_BANNER_FRAMES
     if COURSE_INDEX == len(COURSES) - 1:
         restart_ring_run()
         return
@@ -348,12 +420,14 @@ def begin_next_course():
     COURSE_SCORE_START = SCORE
     SHOW_COURSE_RESULT = False
     RING_MESSAGE, RING_MESSAGE_FRAMES = '', 0
+    PASS_BANNER_FRAMES = 0
 
 
 def retry_current_course():
     global player_x, player_y, player_height, player_angle, player_v
     global COURSE_GATE_INDEX, COURSE_PERFECT, COURSE_MISSES, SCORE
     global COURSE_START_TICK, SHOW_COURSE_RESULT, RING_MESSAGE_FRAMES
+    global PASS_BANNER_FRAMES
     ring = COURSES[COURSE_INDEX][0]
     player_x, player_y, player_height = COURSE_ENTRIES[COURSE_INDEX]
     player_angle = math.degrees(math.atan2(ring.ny, ring.nx))
@@ -364,13 +438,14 @@ def retry_current_course():
     COURSE_START_TICK = pygame.time.get_ticks()
     SHOW_COURSE_RESULT = False
     RING_MESSAGE_FRAMES = 0
+    PASS_BANNER_FRAMES = 0
 
 
 def restart_ring_run():
     global COURSE_INDEX, COURSE_GATE_INDEX, COURSE_PERFECT, COURSE_MISSES
     global COURSE_START_TICK, COURSE_SCORE_START, SHOW_COURSE_RESULT, SCORE
     global player_x, player_y, player_height, player_angle, player_v
-    global RING_MESSAGE, RING_MESSAGE_FRAMES
+    global RING_MESSAGE, RING_MESSAGE_FRAMES, PASS_BANNER_FRAMES
     COURSE_INDEX, COURSE_GATE_INDEX = 0, 0
     COURSE_PERFECT, COURSE_MISSES = 0, 0
     SCORE, COURSE_SCORE_START = 0, 0
@@ -380,6 +455,7 @@ def restart_ring_run():
     COURSE_START_TICK = pygame.time.get_ticks()
     SHOW_COURSE_RESULT = False
     RING_MESSAGE, RING_MESSAGE_FRAMES = '', 0
+    PASS_BANNER_FRAMES = 0
 
 
 def handle_course_result(events):
@@ -501,6 +577,46 @@ def draw_flight_hud():
             hint = 'CLIMB' if ring.z > player_height else 'DESCEND'
             text = HUD_SMALL_FONT.render(hint, True, (255, 209, 112))
             SCREEN.blit(text, text.get_rect(center=(w // 2, 115)))
+
+        # When the gate is very close, spell out WHY it has not cleared yet.
+        # The next-ring locator stays visible even if the 3-D hoop is clipped.
+        if math.hypot(ring.x - player_x, ring.y - player_y) <= RING_CAPTURE_DISTANCE:
+            before = (player_x - ring.x) * ring.nx + (player_y - ring.y) * ring.ny
+            lateral = -(player_x - ring.x) * ring.ny + (player_y - ring.y) * ring.nx
+            delta_z = ring.z - player_height
+            if before >= 0:
+                tip = 'GATE BEHIND YOU - TURN BACK'
+            else:
+                lateral_ratio = abs(lateral) / RING_RADIUS_XY
+                height_ratio = abs(delta_z) / RING_RADIUS_Z
+                if lateral_ratio ** 2 + height_ratio ** 2 <= 1.0:
+                    tip = 'KEEP FLYING FORWARD TO CLEAR'
+                elif height_ratio >= lateral_ratio:
+                    tip = 'CLIMB FOR GATE' if delta_z > 0 else 'DESCEND FOR GATE'
+                else:
+                    tip = 'ALIGN WITH RING CENTER'
+            hint = HUD_SMALL_FONT.render(tip, True, (255, 218, 124))
+            background = hint.get_rect(center=(w // 2, 112)).inflate(22, 12)
+            pygame.draw.rect(SCREEN, (17, 43, 53), background, border_radius=6)
+            SCREEN.blit(hint, hint.get_rect(center=background.center))
+
+
+def draw_pass_confirmation():
+    """Large, short-lived confirmation so the pilot notices every successful pass."""
+    global PASS_BANNER_FRAMES
+    if PASS_BANNER_FRAMES <= 0 or SHOW_COURSE_RESULT:
+        return
+    w, h = SCREEN.get_size()
+    alpha = min(215, int(215 * PASS_BANNER_FRAMES / 20))
+    width = min(400, w - 64)
+    banner = pygame.Surface((width, 66), pygame.SRCALPHA)
+    banner.fill((15, 62, 59, alpha))
+    pygame.draw.rect(banner, (125, 248, 194, alpha), banner.get_rect(), 3,
+                     border_radius=10)
+    text = HUD_BIG_FONT.render(PASS_BANNER_TEXT, True, (244, 255, 225))
+    banner.blit(text, text.get_rect(center=(width // 2, 33)))
+    SCREEN.blit(banner, (w // 2 - width // 2, min(155, h // 3)))
+    PASS_BANNER_FRAMES -= 1
 
 
 def ret():
@@ -868,6 +984,7 @@ def setup():
     global COURSE_PERFECT, COURSE_MISSES, COURSE_START_TICK, COURSE_FINISH_TICK
     global COURSE_SCORE_START, SHOW_COURSE_RESULT, COURSE_BEST
     global RING_MESSAGE, RING_MESSAGE_FRAMES
+    global PASS_BANNER_FRAMES, PASS_BANNER_TEXT
     global HUD_FONT, HUD_SMALL_FONT, HUD_BIG_FONT, HUD_RANK_FONT
     SCORE = 0
     COURSES, COURSE_ENTRIES = build_flight_courses(player_x, player_y)
@@ -883,6 +1000,7 @@ def setup():
     SHOW_COURSE_RESULT = False
     COURSE_BEST = [None] * len(COURSES)
     RING_MESSAGE, RING_MESSAGE_FRAMES = '', 0
+    PASS_BANNER_FRAMES, PASS_BANNER_TEXT = 0, ''
     HUD_FONT = pygame.font.SysFont(None, 26)
     HUD_SMALL_FONT = pygame.font.SysFont(None, 22)
     HUD_BIG_FONT = pygame.font.SysFont(None, 34, bold=True)
@@ -1099,6 +1217,7 @@ async def main(screen, clock):
 
         draw_cockpit()
         draw_flight_hud()
+        draw_pass_confirmation()
 
         HOME_BUTTON.update(EVENTS)
         HOME_BUTTON.draw(screen)
