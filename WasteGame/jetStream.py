@@ -24,6 +24,7 @@ CLOCK = None
 EVENTS = []
 POWERUPS = []  # Reset on each launch; defined here for test harnesses as well.
 SHIELD_FRAGMENTS = []
+SHIELD_IMPACTS = []  # Short explosions where hostile shots strike the shield.
 
 ASSET = "assets/jetStream/"
 MISSION_NAMES = ("CARRIER STRIKE", "DESERT OFFENSIVE", "FROZEN FRONT")
@@ -413,6 +414,41 @@ class ShieldFragment:
                          max(1, round(strength*3)))
 
 
+class ShieldImpact:
+    """Compact cyan-white projectile detonation on the energy barrier.
+
+    These impacts are distinct from the shield-break fragments and from
+    destroyed-enemy explosions; they expire quickly and draw over the jet.
+    """
+
+    def __init__(self, x, y):
+        self.x, self.y = float(x), float(y)
+        self.age = 0
+        self.duration = 18
+        self.rotation = random.random() * math.tau
+
+    def update(self):
+        self.age += 1
+        return self.age < self.duration
+
+    def draw(self):
+        life = max(0.0, 1.0 - self.age/self.duration)
+        radius = round(5 + (1-life)*20)
+        center = (round(self.x), round(self.y))
+        pygame.draw.circle(SCREEN, (9, 38, 65), center, radius+3, 4)
+        pygame.draw.circle(SCREEN, (90, 221, 255), center, radius, 3)
+        pygame.draw.circle(SCREEN, (249, 255, 255), center, max(1, round(6*life)))
+        for index in range(8):
+            angle = self.rotation + index*math.tau/8
+            dx, dy = math.cos(angle), math.sin(angle)
+            start = (round(self.x + dx*(radius*.45)),
+                     round(self.y + dy*(radius*.45)))
+            end = (round(self.x + dx*(radius+9*life)),
+                   round(self.y + dy*(radius+9*life)))
+            pygame.draw.line(SCREEN, (204, 252, 255), start, end,
+                             max(1, round(3*life)))
+
+
 class PowerUp:
     """A moving pickup, not a static world object: catch it before it scrolls off."""
 
@@ -464,14 +500,24 @@ class EnemyBullet:
         self.rect = pygame.Rect(round(x)-size, round(y)-size, size*2, size*2)
 
     def update(self):
+        old_x, old_y = self.x, self.y
         self.x += self.vx
         self.y += self.vy
         self.rect.center = (round(self.x), round(self.y))
         if not SCREEN.get_rect().inflate(50, 100).colliderect(self.rect):
             return False
+        if STATE == "ACTIVE" and PLAYER.shield_hp > 0:
+            # Intercept at the actual shield ellipse, *not* the plane hitbox.
+            # Sweeping the old-to-new projectile path also catches fast shots
+            # which cross the ring entirely between two rendered frames.
+            contact = PLAYER.shield_intercept(old_x, old_y, self.x, self.y, self.size)
+            if contact is not None:
+                PLAYER.hit(self.damage)  # Shield absorbs damage unless in grace frames.
+                if len(SHIELD_IMPACTS) < 24:
+                    SHIELD_IMPACTS.append(ShieldImpact(*contact))
+                return False  # Always detonate/remove, even during grace frames.
         if STATE == "ACTIVE" and self.rect.colliderect(PLAYER.hitbox):
-            # Remove the projectile even during post-hit grace frames: it may
-            # not linger on top of the aircraft and hit twice later.
+            # Hull impacts keep the existing hit reaction when unshielded.
             if PLAYER.hit(self.damage):
                 EXPLOSIONS.append(Explosion((self.x, self.y), .5))
             return False
@@ -699,12 +745,55 @@ class Player:
         self.sync_rect()
         self.bullets = [b for b in self.bullets if b.update()]
 
+    def shield_outline(self):
+        """The exact ellipse used for rendering and projectile interception."""
+        wave = math.sin(MISSION_FRAME*.18)
+        return self.rect.inflate(32+round(wave*4), 36+round(wave*4))
+
+    def shield_intercept(self, x0, y0, x1, y1, projectile_radius=0):
+        """Return a point on the shield where a moving projectile hits it.
+
+        Projectile radius enlarges the collision ellipse, but the impact is
+        projected onto the *visible* ring, so explosions appear to hit it.
+        """
+        if self.shield_hp <= 0 or STATE != "ACTIVE":
+            return None
+        r = self.shield_outline()
+        cx, cy = r.center
+        visual_rx, visual_ry = r.width/2.0, r.height/2.0
+        rx = visual_rx + projectile_radius
+        ry = visual_ry + projectile_radius
+        sx, sy = (x0-cx)/rx, (y0-cy)/ry
+        dx, dy = (x1-x0)/rx, (y1-y0)/ry
+        a = dx*dx + dy*dy
+        c = sx*sx + sy*sy - 1.0
+        if c <= 0:
+            # A shot spawned inside the bubble is still consumed; place its
+            # burst on the closest plausible section of the perimeter.
+            nx, ny = sx, sy
+            if nx*nx + ny*ny < 1e-8:
+                nx, ny = -dx, -dy
+        elif a > 1e-10:
+            b = 2*(sx*dx + sy*dy)
+            discriminant = b*b - 4*a*c
+            if discriminant < 0:
+                return None
+            t = (-b-math.sqrt(discriminant))/(2*a)
+            if not 0 <= t <= 1:
+                return None
+            nx, ny = sx+dx*t, sy+dy*t
+        else:
+            return None
+        length = math.hypot(nx, ny)
+        if length < 1e-8:
+            nx, ny, length = 0.0, -1.0, 1.0
+        return (cx + visual_rx*nx/length, cy + visual_ry*ny/length)
+
     def draw_shield(self):
         """Visible cyan energy bubble, including a stronger white impact flash."""
         if self.shield_hp <= 0 or STATE != "ACTIVE":
             return
-        wave = math.sin(MISSION_FRAME*.18)
-        r = self.rect.inflate(32+round(wave*4), 36+round(wave*4))
+        r = self.shield_outline()
         flash = self.shield_flash > 0
         pygame.draw.ellipse(SCREEN, (20, 54, 100), r.inflate(12, 12), 6)
         pygame.draw.ellipse(SCREEN, (45, 129, 215), r.inflate(7, 7), 5)
@@ -942,13 +1031,14 @@ def mission_script(mission):
 def launch_mission():
     global PLAYER, CARRIER, BACKGROUND, MISSION_STARTED, MISSION_PRE_BRIEF
     global STATE, MISSION_FRAME, PHASE_FRAME, PHASE, EVENT_INDEX, SCRIPT
-    global ENEMIES, ENEMY_BULLETS, EXPLOSIONS, POWERUPS, SHIELD_FRAGMENTS, INPUT_DOWN, INPUT_POS
+    global ENEMIES, ENEMY_BULLETS, EXPLOSIONS, POWERUPS, SHIELD_FRAGMENTS, SHIELD_IMPACTS, INPUT_DOWN, INPUT_POS
     global BOSS_KILLS, LAST_BOSS_KILL_FRAME, KILLS, SCORE, EXTRACT_TIMER
     ENEMIES = []
     ENEMY_BULLETS = []
     EXPLOSIONS = []
     POWERUPS = []
     SHIELD_FRAGMENTS = []
+    SHIELD_IMPACTS = []
     PLAYER = Player()
     CARRIER = Carrier(nMISSION)
     BACKGROUND = Background(nMISSION)
@@ -990,7 +1080,7 @@ def setup():
     global CARRIER_IMAGES, SHIP_IMAGES, EXPLOSION_IMAGES, EXPLOSION_SIZE, EXPLOSION_FRAMES
     global MAIN_MENU_BG, MAIN_MENU_BG2, WINBG, WINBG2, SELECTED_AIRPLANE
     global MISSION_STARTED, MISSION_PRE_BRIEF, INPUT_DOWN, INPUT_POS
-    global ENEMIES, ENEMY_BULLETS, EXPLOSIONS, POWERUPS, SHIELD_FRAGMENTS, MENU_COUNTER, CAMPAIGN_SCORE
+    global ENEMIES, ENEMY_BULLETS, EXPLOSIONS, POWERUPS, SHIELD_FRAGMENTS, SHIELD_IMPACTS, MENU_COUNTER, CAMPAIGN_SCORE
     global SELECTED_MISSION_SLOT
     nMISSION = 0
     SELECTED_MISSION_SLOT = 0
@@ -1041,6 +1131,7 @@ def setup():
     EXPLOSIONS = []
     POWERUPS = []
     SHIELD_FRAGMENTS = []
+    SHIELD_IMPACTS = []
 
 
 def ret():
@@ -1320,6 +1411,7 @@ def update():
         ENEMY_BULLETS.clear()
     EXPLOSIONS[:] = [x for x in EXPLOSIONS[:] if x.update()]
     SHIELD_FRAGMENTS[:] = [fragment for fragment in SHIELD_FRAGMENTS[:] if fragment.update()]
+    SHIELD_IMPACTS[:] = [impact for impact in SHIELD_IMPACTS[:] if impact.update()]
     if STATE == "EXTRACTION":
         EXTRACT_TIMER += 1
         if EXTRACT_TIMER >= LANDING_FRAMES:
@@ -1417,6 +1509,8 @@ def draw_game():
     PLAYER.draw()
     for fragment in SHIELD_FRAGMENTS:
         fragment.draw()
+    for impact in SHIELD_IMPACTS:
+        impact.draw()  # Above the plane/shield so every interception is visible.
     for explosion in EXPLOSIONS:
         explosion.draw()
     draw_hud()
