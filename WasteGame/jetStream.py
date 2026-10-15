@@ -14,10 +14,17 @@ import pygame
 from GUI import Button
 
 FPS = 60
+SHIELD_DURATION = 60 * 8  # Temporary protection: eight seconds or 40 absorbed damage.
+SHIELD_STRENGTH = 40
+REPAIR_AMOUNT = 25
+LANDING_FRAMES = 205  # Automatic carrier/runway recovery (~3.4 seconds).
 RUNNING = True
 SCREEN = None
 CLOCK = None
 EVENTS = []
+POWERUPS = []  # Reset on each launch; defined here for test harnesses as well.
+SHIELD_FRAGMENTS = []
+SHIELD_IMPACTS = []  # Short explosions where hostile shots strike the shield.
 
 ASSET = "assets/jetStream/"
 MISSION_NAMES = ("CARRIER STRIKE", "DESERT OFFENSIVE", "FROZEN FRONT")
@@ -49,6 +56,13 @@ MISSION_COLORS = (
     (245, 190, 107),
     (178, 225, 242),
 )
+# Visuals are drawn in code so Pygbag needs no additional assets.
+PICKUP_STYLES = {
+    "TRIPLE": ((100, 239, 232), "III", "3 SHOT"),
+    "SPREAD": ((255, 216, 105), "V", "5 SHOT"),
+    "REPAIR": ((123, 247, 142), "+", "REPAIR"),
+    "SHIELD": ((115, 169, 255), "S", "SHIELD"),
+}
 
 
 def clamp(v, lo, hi):
@@ -340,18 +354,19 @@ class Explosion:
 
 
 class Bullet:
-    """Straight player projectile; one collision per bullet."""
+    """Friendly projectile: vertical or angled 30 degrees from straight ahead."""
 
-    def __init__(self, x, y):
+    def __init__(self, x, y, vx=0.0, vy=-13.5):
         self.x, self.y = float(x), float(y)
-        self.vy = -13.5
+        self.vx, self.vy = float(vx), float(vy)
         self.damage = 2
         self.rect = pygame.Rect(round(x)-4, round(y)-14, 8, 20)
 
     def update(self):
+        self.x += self.vx
         self.y += self.vy
         self.rect.center = (round(self.x), round(self.y))
-        if self.y < -30:
+        if self.y < -30 or self.x < -30 or self.x > SCREEN.get_width()+30:
             return False
         for enemy in ENEMIES:
             if enemy.health > 0 and enemy.rect.colliderect(self.rect):
@@ -362,10 +377,113 @@ class Bullet:
         return True
 
     def draw(self):
-        pygame.draw.line(SCREEN, (249, 163, 54), (round(self.x), round(self.y)+11),
-                         (round(self.x), round(self.y)-10), 5)
-        pygame.draw.line(SCREEN, (255, 251, 205), (round(self.x), round(self.y)+4),
-                         (round(self.x), round(self.y)-13), 2)
+        # Align the tracer with its true trajectory (also for diagonal shots).
+        length = max(.1, math.hypot(self.vx, self.vy))
+        ux, uy = self.vx/length, self.vy/length
+        rear = (round(self.x-ux*11), round(self.y-uy*11))
+        nose = (round(self.x+ux*10), round(self.y+uy*10))
+        pygame.draw.line(SCREEN, (32, 29, 31), rear, nose, 7)
+        pygame.draw.line(SCREEN, (249, 163, 54), rear, nose, 5)
+        pygame.draw.line(SCREEN, (255, 251, 205),
+                         (round(self.x-ux*4), round(self.y-uy*4)), nose, 2)
+
+
+class ShieldFragment:
+    """Brief luminous fragments when a temporary energy shield disintegrates."""
+
+    def __init__(self, x, y, angle, radius):
+        self.x = x + math.cos(angle)*radius
+        self.y = y + math.sin(angle)*radius
+        self.vx = math.cos(angle)*3.3
+        self.vy = math.sin(angle)*3.3
+        self.age = 0
+        self.duration = 16 + int((angle % 2.5)*4)
+
+    def update(self):
+        self.x += self.vx
+        self.y += self.vy
+        self.age += 1
+        return self.age < self.duration
+
+    def draw(self):
+        strength = clamp(1-self.age/self.duration, 0, 1)
+        color = (round(50+110*strength), round(90+155*strength), 255)
+        x, y = round(self.x), round(self.y)
+        pygame.draw.line(SCREEN, color, (x, y),
+                         (x+round(self.vx*2*strength), y+round(self.vy*2*strength)),
+                         max(1, round(strength*3)))
+
+
+class ShieldImpact:
+    """Compact cyan-white projectile detonation on the energy barrier.
+
+    These impacts are distinct from the shield-break fragments and from
+    destroyed-enemy explosions; they expire quickly and draw over the jet.
+    """
+
+    def __init__(self, x, y):
+        self.x, self.y = float(x), float(y)
+        self.age = 0
+        self.duration = 18
+        self.rotation = random.random() * math.tau
+
+    def update(self):
+        self.age += 1
+        return self.age < self.duration
+
+    def draw(self):
+        life = max(0.0, 1.0 - self.age/self.duration)
+        radius = round(5 + (1-life)*20)
+        center = (round(self.x), round(self.y))
+        pygame.draw.circle(SCREEN, (9, 38, 65), center, radius+3, 4)
+        pygame.draw.circle(SCREEN, (90, 221, 255), center, radius, 3)
+        pygame.draw.circle(SCREEN, (249, 255, 255), center, max(1, round(6*life)))
+        for index in range(8):
+            angle = self.rotation + index*math.tau/8
+            dx, dy = math.cos(angle), math.sin(angle)
+            start = (round(self.x + dx*(radius*.45)),
+                     round(self.y + dy*(radius*.45)))
+            end = (round(self.x + dx*(radius+9*life)),
+                   round(self.y + dy*(radius+9*life)))
+            pygame.draw.line(SCREEN, (204, 252, 255), start, end,
+                             max(1, round(3*life)))
+
+
+class PowerUp:
+    """A moving pickup, not a static world object: catch it before it scrolls off."""
+
+    def __init__(self, kind, fraction):
+        self.kind = kind
+        self.x = clamp(SCREEN.get_width()*fraction, 36, SCREEN.get_width()-36)
+        self.y = -32.0
+        self.radius = 22
+        self.rect = pygame.Rect(round(self.x)-self.radius, -54,
+                                self.radius*2, self.radius*2)
+        self.age = 0
+
+    def update(self):
+        self.age += 1
+        # Slightly faster than ground vehicles; no pausing at a target row.
+        # These are catchable only while passing the player.
+        self.y += max(4.5, PLAYER.airspeed*1.3)
+        self.rect.center = (round(self.x), round(self.y))
+        if self.rect.colliderect(PLAYER.hitbox.inflate(60, 62)):
+            PLAYER.collect(self.kind)
+            return False
+        return self.y - self.radius <= SCREEN.get_height()
+
+    def draw(self):
+        cx, cy = round(self.x), round(self.y)
+        if cy < -self.radius or cy > SCREEN.get_height()+self.radius:
+            return
+        color, symbol, label = PICKUP_STYLES[self.kind]
+        pulse = math.sin(self.age*.15)
+        pygame.draw.circle(SCREEN, (12, 25, 35), (cx, cy), 29)
+        pygame.draw.circle(SCREEN, color, (cx, cy), 26, 3)
+        pygame.draw.circle(SCREEN, (14, 43, 56), (cx, cy), 21)
+        pygame.draw.circle(SCREEN, color, (cx, cy), round(19+pulse*2), 2)
+        text(SCREEN, symbol, 22, (251, 254, 249), center=(cx, cy-1))
+        text(SCREEN, label, 12, color, center=(cx, cy+38))
 
 
 class EnemyBullet:
@@ -382,14 +500,26 @@ class EnemyBullet:
         self.rect = pygame.Rect(round(x)-size, round(y)-size, size*2, size*2)
 
     def update(self):
+        old_x, old_y = self.x, self.y
         self.x += self.vx
         self.y += self.vy
         self.rect.center = (round(self.x), round(self.y))
         if not SCREEN.get_rect().inflate(50, 100).colliderect(self.rect):
             return False
-        if PLAYER.vulnerable and self.rect.colliderect(PLAYER.hitbox):
-            PLAYER.hit(self.damage)
-            EXPLOSIONS.append(Explosion((self.x, self.y), .6))
+        if STATE == "ACTIVE" and PLAYER.shield_hp > 0:
+            # Intercept at the actual shield ellipse, *not* the plane hitbox.
+            # Sweeping the old-to-new projectile path also catches fast shots
+            # which cross the ring entirely between two rendered frames.
+            contact = PLAYER.shield_intercept(old_x, old_y, self.x, self.y, self.size)
+            if contact is not None:
+                PLAYER.hit(self.damage)  # Shield absorbs damage unless in grace frames.
+                if len(SHIELD_IMPACTS) < 24:
+                    SHIELD_IMPACTS.append(ShieldImpact(*contact))
+                return False  # Always detonate/remove, even during grace frames.
+        if STATE == "ACTIVE" and self.rect.colliderect(PLAYER.hitbox):
+            # Hull impacts keep the existing hit reaction when unshielded.
+            if PLAYER.hit(self.damage):
+                EXPLOSIONS.append(Explosion((self.x, self.y), .5))
             return False
         return True
 
@@ -422,8 +552,16 @@ class Player:
         self.airspeed = 3.7
         self.health = self.maxHealth = 100
         self.invulnerable = 0
+        self.weapon_level = 0  # 0=twin, 1=triple, 2=triple + 30-degree wings.
+        self.shield_hp = 0
+        self.shield_timer = 0
+        self.shield_flash = 0
+        self.pickup_message = ""
+        self.pickup_message_timer = 0
         self.shot_timer = 0
         self.bullets = []
+        self.landing_start_x = self.x
+        self.landing_start_y = self.y
         self.rect = self.image.get_rect(center=(round(self.x), round(self.y)))
         self.hitbox = self.rect.inflate(-int(self.rect.w*.38), -int(self.rect.h*.25))
 
@@ -451,15 +589,90 @@ class Player:
         self.rect = self.image.get_rect(center=(round(self.x), round(self.y)))
         self.hitbox = self.rect.inflate(-int(self.rect.w*.38), -int(self.rect.h*.25))
 
+    def collect(self, kind):
+        """Apply a collected upgrade; offensive power lasts for this mission."""
+        global SCORE
+        if kind == "TRIPLE":
+            if self.weapon_level >= 1:
+                SCORE += 200
+                message = "3 SHOT: BONUS +200"
+            else:
+                self.weapon_level = 1
+                message = "TRIPLE SHOT ONLINE"
+        elif kind == "SPREAD":
+            if self.weapon_level >= 2:
+                SCORE += 250
+                message = "5 SHOT: BONUS +250"
+            else:
+                # Spread includes the centre barrel, even if triple was missed.
+                self.weapon_level = 2
+                message = "FIVE-WAY SHOT ONLINE"
+        elif kind == "REPAIR":
+            before = self.health
+            self.health = min(self.maxHealth, self.health+REPAIR_AMOUNT)
+            message = "HULL REPAIRED +%d" % round(self.health-before)
+        elif kind == "SHIELD":
+            self.shield_hp = SHIELD_STRENGTH
+            self.shield_timer = SHIELD_DURATION
+            self.shield_flash = 0
+            message = "ENERGY SHIELD ACTIVE"
+        else:
+            return
+        self.pickup_message = message
+        self.pickup_message_timer = 115
+
+    def break_shield(self):
+        if self.shield_hp <= 0 and self.shield_timer <= 0:
+            return
+        radius = max(self.rect.width, self.rect.height)*.67 + 16
+        for index in range(16):
+            angle = index*math.tau/16
+            SHIELD_FRAGMENTS.append(ShieldFragment(self.x, self.y, angle, radius))
+        self.shield_hp = 0
+        self.shield_timer = 0
+        self.shield_flash = 0
+
     def hit(self, damage):
         if not self.vulnerable:
-            return
-        self.health = max(0, self.health-damage)
-        self.invulnerable = 48
+            return False
+        if self.shield_hp > 0:
+            self.shield_hp = max(0, self.shield_hp-damage)
+            self.shield_flash = 12
+            # Brief spacing between impacts. Hull takes no damage while shielded.
+            self.invulnerable = 10
+            if self.shield_hp == 0:
+                self.break_shield()
+                self.invulnerable = 40  # Prevent instant hull damage on shatter.
+        else:
+            self.health = max(0, self.health-damage)
+            self.invulnerable = 48
+        return True
+
+    def begin_landing(self):
+        """Snapshot the last player-controlled position for a smooth approach.
+
+        Both the naval carrier and the land runway are ground-fixed. Their
+        extraction animation ends at the same screen-space touchdown point.
+        """
+        self.landing_start_x = self.x
+        self.landing_start_y = self.y
+        self.vx = self.vy = 0.0
+        self.invulnerable = 0  # No blinking aircraft during landing.
+        self.shield_hp = self.shield_timer = self.shield_flash = 0
+        self.bullets.clear()
 
     def update(self):
         if self.invulnerable > 0:
             self.invulnerable -= 1
+        if self.shield_flash > 0:
+            self.shield_flash -= 1
+        if self.pickup_message_timer > 0:
+            self.pickup_message_timer -= 1
+        if STATE == "ACTIVE" and self.shield_hp > 0:
+            self.shield_timer -= 1
+            if self.shield_timer <= 0:
+                self.break_shield()
+                self.invulnerable = max(self.invulnerable, 24)
         self.shot_timer += 1
         if STATE == "ACTIVE":
             # Absolute touch/pointer tracking is deliberately responsive:
@@ -495,8 +708,19 @@ class Player:
             self.x = clamp(self.x, min_x, max_x)
             self.y = clamp(self.y, min_y, max_y)
             if self.shot_timer >= 7:
+                muzzle_y = self.y-self.rect.height*.38
                 for shift in (-self.rect.width*.21, self.rect.width*.21):
-                    self.bullets.append(Bullet(self.x+shift, self.y-self.rect.height*.38))
+                    self.bullets.append(Bullet(self.x+shift, muzzle_y))
+                if self.weapon_level >= 1:
+                    self.bullets.append(Bullet(self.x, self.y-self.rect.height*.46))
+                if self.weapon_level >= 2:
+                    # -30 and +30 degrees from the forward (north) axis.
+                    speed = 13.5
+                    vy = -speed*math.cos(math.radians(30))
+                    lateral = speed*math.sin(math.radians(30))
+                    for sign in (-1, 1):
+                        self.bullets.append(Bullet(self.x+sign*self.rect.width*.26,
+                                                   muzzle_y, sign*lateral, vy))
                 self.shot_timer = 0
         elif STATE == "TAKEOFF":
             progress = clamp(MISSION_FRAME / 105.0, 0.0, 1.0)
@@ -507,20 +731,86 @@ class Player:
             frame = round(smooth * (len(self.takeoff_images)-1))
             self.image = self.takeoff_images[frame]
         elif STATE == "EXTRACTION":
-            target_y = SCREEN.get_height()*.70
-            self.x += (SCREEN.get_width()/2-self.x)*.065
-            self.y += (target_y-self.y)*.055
+            # Reverse the takeoff animation: descend from full-size flight to
+            # half-size on the deck/strip while steering to its actual centre.
+            # Ease the entire path from the last finger-controlled position;
+            # do not repeatedly lerp towards a point (which arrives too early).
+            progress = clamp((EXTRACT_TIMER + 1) / LANDING_FRAMES, 0.0, 1.0)
+            smooth = progress * progress * (3.0 - 2.0 * progress)
+            self.x = self.landing_start_x + (CARRIER.x - self.landing_start_x) * smooth
+            target_y = SCREEN.get_height() * .71  # Carrier.recall() final centre.
+            self.y = self.landing_start_y + (target_y - self.landing_start_y) * smooth
+            frame = round((1.0 - smooth) * (len(self.takeoff_images) - 1))
+            self.image = self.takeoff_images[frame]
         self.sync_rect()
         self.bullets = [b for b in self.bullets if b.update()]
+
+    def shield_outline(self):
+        """The exact ellipse used for rendering and projectile interception."""
+        wave = math.sin(MISSION_FRAME*.18)
+        return self.rect.inflate(32+round(wave*4), 36+round(wave*4))
+
+    def shield_intercept(self, x0, y0, x1, y1, projectile_radius=0):
+        """Return a point on the shield where a moving projectile hits it.
+
+        Projectile radius enlarges the collision ellipse, but the impact is
+        projected onto the *visible* ring, so explosions appear to hit it.
+        """
+        if self.shield_hp <= 0 or STATE != "ACTIVE":
+            return None
+        r = self.shield_outline()
+        cx, cy = r.center
+        visual_rx, visual_ry = r.width/2.0, r.height/2.0
+        rx = visual_rx + projectile_radius
+        ry = visual_ry + projectile_radius
+        sx, sy = (x0-cx)/rx, (y0-cy)/ry
+        dx, dy = (x1-x0)/rx, (y1-y0)/ry
+        a = dx*dx + dy*dy
+        c = sx*sx + sy*sy - 1.0
+        if c <= 0:
+            # A shot spawned inside the bubble is still consumed; place its
+            # burst on the closest plausible section of the perimeter.
+            nx, ny = sx, sy
+            if nx*nx + ny*ny < 1e-8:
+                nx, ny = -dx, -dy
+        elif a > 1e-10:
+            b = 2*(sx*dx + sy*dy)
+            discriminant = b*b - 4*a*c
+            if discriminant < 0:
+                return None
+            t = (-b-math.sqrt(discriminant))/(2*a)
+            if not 0 <= t <= 1:
+                return None
+            nx, ny = sx+dx*t, sy+dy*t
+        else:
+            return None
+        length = math.hypot(nx, ny)
+        if length < 1e-8:
+            nx, ny, length = 0.0, -1.0, 1.0
+        return (cx + visual_rx*nx/length, cy + visual_ry*ny/length)
+
+    def draw_shield(self):
+        """Visible cyan energy bubble, including a stronger white impact flash."""
+        if self.shield_hp <= 0 or STATE != "ACTIVE":
+            return
+        r = self.shield_outline()
+        flash = self.shield_flash > 0
+        pygame.draw.ellipse(SCREEN, (20, 54, 100), r.inflate(12, 12), 6)
+        pygame.draw.ellipse(SCREEN, (45, 129, 215), r.inflate(7, 7), 5)
+        pygame.draw.ellipse(SCREEN, (245, 254, 255) if flash else (103, 235, 255), r, 3)
+        for index in range(3):
+            start = MISSION_FRAME*.05 + index*math.tau/3
+            pygame.draw.arc(SCREEN, (245, 255, 255) if flash else (160, 248, 255),
+                            r.inflate(5, 5), start, start+.55, 3)
 
     def draw(self):
         for b in self.bullets:
             b.draw()
-        if self.invulnerable > 0 and (self.invulnerable // 5) % 2:
-            return
-        # Do not draw a synthetic engine flame here; at this sprite size it
-        # appeared as an orange bar protruding from the aircraft's tail.
-        SCREEN.blit(self.image, self.rect)
+        if not (self.invulnerable > 0 and self.shield_hp == 0 and
+                (self.invulnerable // 5) % 2):
+            # The glowing shield stays visible around a fully opaque plane.
+            SCREEN.blit(self.image, self.rect)
+        self.draw_shield()
 
 
 class Enemy:
@@ -679,37 +969,61 @@ def scripted_wave(spawns):
         Enemy(x, typ, SCREEN.get_height()*(.19 if typ in BOSS_TYPES else .23))
 
 
+def scripted_pickup(info):
+    kind, fraction = info
+    POWERUPS.append(PowerUp(kind, fraction))
+
+
 def mission_script(mission):
     """Each episode starts its own frame clock; bosses must die to advance."""
     if mission == 0:
         return [
             [(60, "wave", (("Plane", .28), ("Plane", .72))),
+             (135, "pickup", ("TRIPLE", .47)),
              (230, "wave", (("UBoat", .28), ("UBoat", .72))),
+             (315, "pickup", ("REPAIR", .65)),
              (390, "wave", (("Plane", .18), ("Plane", .50), ("Plane", .82))),
+             (480, "pickup", ("SPREAD", .37)),
              (590, "wave", (("B17", .5), ("Plane", .18), ("Plane", .82))),
+             (730, "pickup", ("SHIELD", .53)),
              (810, "wave", (("Plane", .35), ("Plane", .65))),
+             (940, "pickup", ("REPAIR", .39)),
              (1050, "boss", ("Spacecraft", .5))],
         ]
     if mission == 1:
         return [
             [(60, "wave", (("Tank", .25), ("Tank", .75))),
+             (105, "pickup", ("TRIPLE", .45)),
              (190, "wave", (("Plane", .2), ("Plane", .8))),
+             (250, "pickup", ("REPAIR", .65)),
              (320, "wave", (("AA", .18), ("SAM", .5), ("AA", .82))),
+             (390, "pickup", ("SPREAD", .35)),
              (470, "wave", (("Tank", .30), ("Plane", .70))),
+             (500, "pickup", ("SHIELD", .58)),
              (590, "boss", ("DuneFortress", .5))],
             [(65, "wave", (("AA", .3), ("AA", .7))),
+             (125, "pickup", ("REPAIR", .4)),
              (210, "wave", (("Plane", .16), ("Plane", .5), ("Plane", .84))),
+             (265, "pickup", ("SHIELD", .63)),
              (370, "wave", (("SAM", .2), ("Tank", .5), ("SAM", .8))),
+             (425, "pickup", ("SPREAD", .45)),
              (550, "boss", ("DesertAce", .5))],
         ]
     return [
         [(60, "wave", (("Tank", .24), ("Tank", .76))),
+         (125, "pickup", ("TRIPLE", .54)),
          (220, "wave", (("Plane", .20), ("Plane", .80))),
+         (275, "pickup", ("REPAIR", .38)),
          (380, "wave", (("SAM", .2), ("SAM", .8))),
-         (540, "wave", (("AA", .15), ("B17", .5), ("AA", .85)))],
+         (435, "pickup", ("SPREAD", .67)),
+         (540, "wave", (("AA", .15), ("B17", .5), ("AA", .85))),
+         (620, "pickup", ("SHIELD", .43))],
         [(65, "wave", (("Plane", .25), ("Plane", .75))),
+         (140, "pickup", ("REPAIR", .57)),
          (230, "wave", (("SAM", .15), ("SAM", .85))),
+         (310, "pickup", ("SHIELD", .38)),
          (370, "wave", (("Plane", .12), ("Plane", .5), ("Plane", .88))),
+         (440, "pickup", ("SPREAD", .64)),
          (530, "boss", ("FrostGunship", .5))],
     ]
 
@@ -717,11 +1031,14 @@ def mission_script(mission):
 def launch_mission():
     global PLAYER, CARRIER, BACKGROUND, MISSION_STARTED, MISSION_PRE_BRIEF
     global STATE, MISSION_FRAME, PHASE_FRAME, PHASE, EVENT_INDEX, SCRIPT
-    global ENEMIES, ENEMY_BULLETS, EXPLOSIONS, INPUT_DOWN, INPUT_POS
+    global ENEMIES, ENEMY_BULLETS, EXPLOSIONS, POWERUPS, SHIELD_FRAGMENTS, SHIELD_IMPACTS, INPUT_DOWN, INPUT_POS
     global BOSS_KILLS, LAST_BOSS_KILL_FRAME, KILLS, SCORE, EXTRACT_TIMER
     ENEMIES = []
     ENEMY_BULLETS = []
     EXPLOSIONS = []
+    POWERUPS = []
+    SHIELD_FRAGMENTS = []
+    SHIELD_IMPACTS = []
     PLAYER = Player()
     CARRIER = Carrier(nMISSION)
     BACKGROUND = Background(nMISSION)
@@ -763,7 +1080,7 @@ def setup():
     global CARRIER_IMAGES, SHIP_IMAGES, EXPLOSION_IMAGES, EXPLOSION_SIZE, EXPLOSION_FRAMES
     global MAIN_MENU_BG, MAIN_MENU_BG2, WINBG, WINBG2, SELECTED_AIRPLANE
     global MISSION_STARTED, MISSION_PRE_BRIEF, INPUT_DOWN, INPUT_POS
-    global ENEMIES, ENEMY_BULLETS, EXPLOSIONS, MENU_COUNTER, CAMPAIGN_SCORE
+    global ENEMIES, ENEMY_BULLETS, EXPLOSIONS, POWERUPS, SHIELD_FRAGMENTS, SHIELD_IMPACTS, MENU_COUNTER, CAMPAIGN_SCORE
     global SELECTED_MISSION_SLOT
     nMISSION = 0
     SELECTED_MISSION_SLOT = 0
@@ -812,6 +1129,9 @@ def setup():
     ENEMIES = []
     ENEMY_BULLETS = []
     EXPLOSIONS = []
+    POWERUPS = []
+    SHIELD_FRAGMENTS = []
+    SHIELD_IMPACTS = []
 
 
 def ret():
@@ -1007,7 +1327,10 @@ def update_script():
     if EVENT_INDEX < len(events):
         trigger_time, kind, payload = events[EVENT_INDEX]
         if PHASE_FRAME >= trigger_time:
-            scripted_wave((payload,) if kind == "boss" else payload)
+            if kind == "pickup":
+                scripted_pickup(payload)
+            else:
+                scripted_wave((payload,) if kind == "boss" else payload)
             EVENT_INDEX += 1
     # Boss episodes end only AFTER defeating their boss, not on a timer.
     if EVENT_INDEX >= len(events):
@@ -1024,8 +1347,13 @@ def update_script():
             EVENT_INDEX = 0
             if PHASE >= len(SCRIPT):
                 STATE = "EXTRACTION"
-                CARRIER.recall()
                 EXTRACT_TIMER = 0
+                PLAYER.begin_landing()
+                CARRIER.recall()
+                # Remaining stragglers cannot affect a completed mission.
+                ENEMIES.clear()
+                ENEMY_BULLETS.clear()
+                POWERUPS.clear()
 
 
 def update_input():
@@ -1074,6 +1402,7 @@ def update():
         # Work on snapshots: deaths and explosions may change the collections.
         ENEMIES[:] = [e for e in ENEMIES[:] if e.update()]
         ENEMY_BULLETS[:] = [b for b in ENEMY_BULLETS[:] if b.update()]
+        POWERUPS[:] = [pickup for pickup in POWERUPS[:] if pickup.update()]
         if PLAYER.health <= 0:
             STATE = "FAILED"
             ENEMY_BULLETS.clear()
@@ -1081,9 +1410,11 @@ def update():
         # No hostile fire during launch or extraction.
         ENEMY_BULLETS.clear()
     EXPLOSIONS[:] = [x for x in EXPLOSIONS[:] if x.update()]
+    SHIELD_FRAGMENTS[:] = [fragment for fragment in SHIELD_FRAGMENTS[:] if fragment.update()]
+    SHIELD_IMPACTS[:] = [impact for impact in SHIELD_IMPACTS[:] if impact.update()]
     if STATE == "EXTRACTION":
         EXTRACT_TIMER += 1
-        if EXTRACT_TIMER >= 205:
+        if EXTRACT_TIMER >= LANDING_FRAMES:
             STATE = "CAMPAIGN_COMPLETE" if nMISSION == MAX_MISSIONS-1 else "COMPLETE"
 
 
@@ -1091,7 +1422,7 @@ def draw_hud():
     w, h = SCREEN.get_size()
     hud_x = min(115, max(94, int(w*.1)))
     bar_w = max(110, min(205, int(w*.18)))
-    panel(SCREEN, pygame.Rect(hud_x, 10, bar_w+36, 83), (10, 28, 38, 221), 8)
+    panel(SCREEN, pygame.Rect(hud_x, 10, bar_w+36, 108), (10, 28, 38, 221), 8)
     text(SCREEN, "HULL", 16, (201, 229, 223), topleft=(hud_x+12, 18))
     pygame.draw.rect(SCREEN, (71, 70, 68), (hud_x+12, 49, bar_w, 16), border_radius=4)
     amount = max(0, int(bar_w*PLAYER.health/PLAYER.maxHealth))
@@ -1100,6 +1431,15 @@ def draw_hud():
         pygame.draw.rect(SCREEN, color, (hud_x+12, 49, amount, 16), border_radius=4)
     text(SCREEN, "%d%%" % PLAYER.health, 14, (245, 246, 229),
          topleft=(hud_x+17, 47), shadow=False)
+    weapon_name = ("TWIN", "TRIPLE", "FIVE-WAY")[PLAYER.weapon_level]
+    text(SCREEN, "GUN  " + weapon_name, 13, (255, 225, 148),
+         topleft=(hud_x+12, 73))
+    if PLAYER.shield_hp > 0:
+        amount = round((bar_w-32)*PLAYER.shield_hp/SHIELD_STRENGTH)
+        pygame.draw.rect(SCREEN, (29, 68, 112), (hud_x+12, 96, bar_w-32, 5))
+        pygame.draw.rect(SCREEN, (106, 229, 255), (hud_x+12, 96, amount, 5))
+        text(SCREEN, "SHIELD", 12, (151, 239, 255),
+             topleft=(hud_x+bar_w-12, 87))
     right_w = min(244, int(w*.27))
     panel(SCREEN, pygame.Rect(w-right_w-9, 10, right_w, 83), (10, 28, 38, 221), 8)
     text(SCREEN, "SCORE  %06d" % SCORE, max(13, min(20, w//57)),
@@ -1108,6 +1448,9 @@ def draw_hud():
          max(12, min(17, w//68)), (122, 227, 202),
          topleft=(w-right_w+3, 51))
     bosses = [e for e in ENEMIES if e.is_boss and e.health > 0]
+    if PLAYER.pickup_message_timer > 0:
+        text(SCREEN, PLAYER.pickup_message, max(14, min(22, w//45)),
+             (195, 255, 207), center=(w/2, min(h-65, 149)))
     if bosses:
         boss = bosses[0]
         # Small, boss-attached indicator; never cover its artwork with a
@@ -1145,9 +1488,13 @@ def draw_stage_overlay():
                     text(SCREEN, "WARNING - " + BOSS_NAMES[payload[0]],
                          max(16, min(32, w//31)), (255, 229, 159), center=(w/2, h*.39))
     if STATE == "EXTRACTION":
-        text(SCREEN, "OBJECTIVE COMPLETE", max(20, min(38, w//28)),
+        # The ship/runway scrolls in from the north, then the shrinking jet
+        # touches down exactly in its centre before the result screen appears.
+        title = "TOUCHDOWN" if EXTRACT_TIMER > LANDING_FRAMES - 28 else "LANDING APPROACH"
+        destination = "CARRIER" if nMISSION == 0 else "RUNWAY"
+        text(SCREEN, title, max(20, min(38, w//28)),
              (155, 249, 194), center=(w/2, h*.33))
-        text(SCREEN, "RETURNING TO BASE", 19, (234, 239, 221), center=(w/2, h*.4))
+        text(SCREEN, destination, 19, (234, 239, 221), center=(w/2, h*.4))
 
 
 def draw_game():
@@ -1157,7 +1504,13 @@ def draw_game():
         enemy.draw()
     for bullet in ENEMY_BULLETS:
         bullet.draw()
+    for pickup in POWERUPS:
+        pickup.draw()
     PLAYER.draw()
+    for fragment in SHIELD_FRAGMENTS:
+        fragment.draw()
+    for impact in SHIELD_IMPACTS:
+        impact.draw()  # Above the plane/shield so every interception is visible.
     for explosion in EXPLOSIONS:
         explosion.draw()
     draw_hud()
