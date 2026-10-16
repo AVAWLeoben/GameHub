@@ -1,4 +1,4 @@
-"""WasteKart 2.2.0 - Comet Canyon bridges, jump, rescue and comets.
+"""WasteKart 2.2.1 - Comet Canyon forward-only safe canyon rescue.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
@@ -1191,6 +1191,16 @@ class CometCanyon:
                 self.blit_center(canvas,self.smokes[frame],(at[0]+9,at[1]-8-age*12))
         canvas.set_clip(clip)
 
+    def rescue_positions(self,to_screen,racer):
+        """Carry the rescued kart from the fall site to its safe forward landing."""
+        at=to_screen(racer.fall_at)
+        target=(to_screen(racer.rescue_target[1]) if racer.rescue_target else at)
+        t=clamp(racer.fall_age/self.RESCUE_SECONDS,0.0,1.0)
+        smooth=t*t*(3.0-2.0*t)
+        cart=lerp((at[0],at[1]-4),(target[0],target[1]-4),smooth)
+        cloud=(cart[0]+(1.0-smooth)*95,cart[1]-45-(1.0-smooth)*66)
+        return cloud,cart
+
     def draw_rescue(self,canvas,to_screen,racer):
         if not racer.fall_phase or racer.fall_phase=='penalty':return
         at=to_screen(racer.fall_at)
@@ -1203,11 +1213,8 @@ class CometCanyon:
             index=min(4,int(racer.fall_age/.08))
             self.blit_center(canvas,self.dust[index],at)
         elif phase=='rescue':
-            progress=clamp(racer.fall_age/self.RESCUE_SECONDS,0,1)
-            cloud_point=(at[0]+(1-progress)*95,at[1]-45-(1-progress)*66)
-            # Rope trails from the cloud into the gorge; no new art needed.
-            end=(at[0]+(cloud_point[0]-at[0])*.18,at[1]-4)
-            pygame.draw.line(canvas,(255,241,196),cloud_point,end,2)
+            cloud_point,cart=self.rescue_positions(to_screen,racer)
+            pygame.draw.line(canvas,(255,241,196),cloud_point,cart,2)
             self.blit_center(canvas,self.cloud[int(self.time*8)%2],cloud_point)
 
     def draw_sparkles(self,canvas,to_screen,racer):
@@ -1273,6 +1280,7 @@ class Racer:
         self.fall_phase=None
         self.fall_age=0.0
         self.fall_at=None
+        self.rescue_target=None
         self.fall_heading=0.0
         self.fall_count=0
         self.respawn_fx_left=0.0
@@ -1380,6 +1388,7 @@ class Racer:
             return False
         self.flight_left=0.0
         self.fall_at=tuple(self.pos)
+        self.rescue_target=None
         self.fall_heading=self.heading
         self.fall_phase='fall'
         self.fall_age=0.0
@@ -1398,40 +1407,103 @@ class Racer:
             self.last_checkpoint=self.canyon_checkpoints[self.next_checkpoint]
             self.next_checkpoint+=1
 
-    def update_fall(self,dt,track):
+    def find_forward_rescue(self,track):
+        """Find a stable section AHEAD of the fall on the player's own spline.
+
+        Rewinding to the previous checkpoint causes the kart to drive back into
+        the same abyss. Sample the remaining authored line instead: first try
+        the NEXT checkpoint, then the earliest long safe road stretch. The
+        look-ahead ensures a landing just on the canyon lip is not accepted.
+        """
+        start=min(self.total_length,max(0.0,self.distance+9.0))
+        if start>=self.total_length:
+            position,angle,_=self.route.sample(self.total_length)
+            return (self.total_length,position,angle)
+
+        def safe_run(distance,span,road_only):
+            stop=min(self.total_length,distance+span)
+            if stop-distance<30.0 and stop<self.total_length-.1:
+                return False
+            steps=max(1,math.ceil((stop-distance)/5.0))
+            for j in range(steps+1):
+                sample=self.route.sample(distance+(stop-distance)*j/steps)[0]
+                if track.canyon_fall(sample):
+                    return False
+                if road_only and not track.on_road(sample):
+                    return False
+            return True
+
+        # Named respawn points are beyond the canyon mouths. A slow crater is
+        # still safe ground, so require a canyon-free run rather than excluding
+        # a checkpoint simply because a crater temporarily slows the kart.
+        # Project onto the player's drawing instead of using the manifest xy.
+        for checkpoint in self.canyon_checkpoints:
+            distance=checkpoint[0]
+            if distance>=start and safe_run(distance,90.0,False):
+                position,heading,_=self.route.sample(distance)
+                return (distance,position,heading)
+
+        # Deviating hand-drawn routes may miss all manifest checkpoints.
+        # Find the next long, canyon-free segment, preferring actual road.
+        # If the child drew on grass, a safe grass position is still better
+        # than placing them in the canyon or starting an endless rescue loop.
+        for road_only in (True,False):
+            for clearance in (90.0,48.0,20.0):
+                distance=start
+                while distance<=self.total_length+.001:
+                    if safe_run(distance,clearance,road_only):
+                        # Land inside this clear stretch, not on its edge.
+                        place=min(self.total_length,distance+min(20.0,clearance*.25))
+                        position,heading,_=self.route.sample(place)
+                        if not track.canyon_fall(position):
+                            return (place,position,heading)
+                    distance+=6.0
+        # The route ends at the start/finish flag. Finishing beats an infinite
+        # fall loop for a drawing that remains over the canyon all the way out.
+        position,heading,_=self.route.sample(self.total_length)
+        return (self.total_length,position,heading)
+
+    def update_fall(self,dt,track,elapsed=None):
         self.fall_age+=dt
         durations={'fall':.90,'dust':.40,'wait':.60,'rescue':.80,'penalty':1.20}
         if self.fall_age<durations[self.fall_phase]:return
         self.fall_age=0.0
         if self.fall_phase=='fall':self.fall_phase='dust'
         elif self.fall_phase=='dust':self.fall_phase='wait'
-        elif self.fall_phase=='wait':self.fall_phase='rescue'
+        elif self.fall_phase=='wait':
+            self.rescue_target=self.find_forward_rescue(track)
+            self.fall_phase='rescue'
         elif self.fall_phase=='rescue':
-            checkpoint_distance,position,heading,_=self.last_checkpoint
-            # Avoid inescapable loops when a child draws directly through the
-            # abyss: after repeated identical falls, rescue to the NEXT safe
-            # section rather than leaving a player trapped forever.
-            if self.fall_count>=3 and self.distance-checkpoint_distance<180:
-                for i in range(bisect.bisect_left(self.route.accumulated,self.distance),
-                               len(self.route.points)-3):
-                    sample=self.route.points[i]
-                    if track.on_road(sample) and not track.canyon_fall(sample) and \
-                       all(not track.canyon_fall(p) for p in self.route.points[i:i+4]):
-                        checkpoint_distance=self.route.accumulated[i]
-                        position,heading,_=self.route.sample(checkpoint_distance)
-                        self.fall_count=0
-                        break
-            self.distance=checkpoint_distance
-            self.pos=tuple(position)
-            self.heading=heading
+            # Always teleport FORWARD, beyond the hazard, on the original
+            # player-drawn route. Never go back to the pre-fall checkpoint.
+            if self.rescue_target is None:
+                self.rescue_target=self.find_forward_rescue(track)
+            old_distance=self.distance
+            self.distance,self.pos,self.heading=self.rescue_target
+            self.on_track=track.on_road(self.pos)
             self.speed=0.0
-            self.next_checkpoint=bisect.bisect_right(
-                [p[0] for p in self.canyon_checkpoints],self.distance+1.0)
+            # Crossing a start/finish line during rescue must still advance
+            # the lap counter in a three-lap race. The tow counts as time,
+            # not as a free instant lap or a missed boundary.
+            if elapsed is not None and self.distance>old_distance:
+                while self.completed_laps<self.laps and \
+                      self.distance>=self.lap_boundaries[self.completed_laps]-1e-4:
+                    previous_end=(self.lap_crossing_times[-1]
+                                  if self.lap_crossing_times else 0.0)
+                    crossing=round(max(elapsed,previous_end),3)
+                    self.lap_times.append(round(crossing-previous_end,3))
+                    self.lap_crossing_times.append(crossing)
+                    self.completed_laps+=1
+            checkpoint_distances=[p[0] for p in self.canyon_checkpoints]
+            self.next_checkpoint=bisect.bisect_right(checkpoint_distances,self.distance+1.0)
+            if self.next_checkpoint>0:
+                self.last_checkpoint=self.canyon_checkpoints[self.next_checkpoint-1]
             self.fall_phase='penalty'
             self.respawn_fx_left=.60
         elif self.fall_phase=='penalty':
             self.fall_phase=None
             self.fall_age=0.0
+            self.rescue_target=None
             self.train_immunity_left=1.50
             self.respawn_fx_left=.60
 
@@ -1439,7 +1511,7 @@ class Racer:
         if self.finished:return
         self.respawn_fx_left=max(0.0,self.respawn_fx_left-dt)
         if self.fall_phase:
-            self.update_fall(dt,track)
+            self.update_fall(dt,track,elapsed)
             return
         if self.flight_left>0:
             step=min(dt,self.flight_left)
@@ -2351,10 +2423,8 @@ class WasteKartGame:
                 self.canyon_hazards.draw_rescue(self.canvas,self.world_to_screen,r)
                 if r.fall_phase=='rescue':
                     # A small kart visibly rises on the cloud's tow rope.
-                    progress=clamp(r.fall_age/.80,0,1)
-                    at=self.world_to_screen(r.fall_at)
-                    cloud=(at[0]+(1-progress)*95,at[1]-45-(1-progress)*66)
-                    cart=(at[0]+(cloud[0]-at[0])*.18,at[1]-4)
+                    _,cart=self.canyon_hazards.rescue_positions(
+                        self.world_to_screen,r)
                     rescued=self.racer_image(r.kart_id,r.fall_heading)
                     rescued=pygame.transform.smoothscale(rescued,(
                         max(1,int(rescued.get_width()*.54)),
