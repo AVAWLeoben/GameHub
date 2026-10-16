@@ -1,4 +1,4 @@
-"""WasteKart 2.2.1 - Comet Canyon forward-only safe canyon rescue.
+"""WasteKart 2.3.0 - Phantom Boardwalk / Star Cup 1/4 ghost hazards.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
@@ -444,6 +444,21 @@ class Track:
                     x1,y1,x2,y2=deck['deck_bbox_px']
                     self.canyon_bridges.append(pygame.Rect(
                         int(x1),int(y1),math.ceil(x2-x1),math.ceil(y2-y1)))
+        # Star Cup 1: independent haunted boardwalk masks and animations.
+        phantom_rel=data.get('phantom_manifest')
+        self.phantom_manifest_path=(os.path.join(ASSET_ROOT,*phantom_rel.split('/'))
+                                    if phantom_rel else None)
+        self.phantom_data=None
+        self.phantom_masks={}
+        self.phantom_hazards=None
+        if self.phantom_manifest_path:
+            with open(self.phantom_manifest_path,encoding='utf8') as source:
+                self.phantom_data=json.load(source)
+            base=os.path.dirname(self.phantom_manifest_path)
+            for key,relative in self.phantom_data['files'].items():
+                if key in ('fall_zone_mask','ground_slow_mask','rail_wall_mask'):
+                    self.phantom_masks[key]=pygame.image.load(
+                        os.path.join(base,*relative.split('/'))).convert()
         self.pickup_positions=self.find_pickup_positions()
 
     def on_road(self,point):
@@ -471,7 +486,17 @@ class Track:
                self.mask.get_at((int(clamp(point[0],0,MAP_W-1)),
                                  int(clamp(point[1],0,MAP_H-1))))[0]>127
 
+    def phantom_mask(self,key,point):
+        surface=self.phantom_masks.get(key)
+        if surface is None:return False
+        x,y=int(point[0]),int(point[1])
+        return (0<=x<MAP_W and 0<=y<MAP_H and
+                surface.get_at((x,y))[0]>127)
+
     def canyon_fall(self,point):
+        # Shared fall/rescue interface; Comet Canyon keeps its bridge protection.
+        if self.phantom_data is not None:
+            return self.phantom_mask('fall_zone_mask',point)
         return self.canyon_mask('fall_zone',point) and not self.canyon_bridge(point)
 
     def has_overpasses(self):
@@ -1226,6 +1251,247 @@ class CometCanyon:
             self.blit_center(canvas,self.sparkle[index],(x,y))
         pygame.draw.circle(canvas,(145,255,241),(round(x),round(y)),19,2)
 
+class PhantomBoardwalk:
+    """Original authored Star Cup ghosts and swamp rescue sprites.
+
+    All actor movement and collision use 960x600 world coordinates. The track
+    overlay (mansion glass/rafters) is composited after karts and ghosts.
+    """
+    FALL_SECONDS=.90
+    DUST_SECONDS=.40
+    WAIT_SECONDS=.60
+    RESCUE_SECONDS=.80
+    PENALTY_SECONDS=1.20
+    IMMUNITY_SECONDS=1.50
+    KART_RADIUS=10.0
+
+    def __init__(self,track):
+        self.track=track
+        self.manifest=track.phantom_data
+        self.base=os.path.dirname(track.phantom_manifest_path)
+        self.sx=TRACK_RECT.width/MAP_W
+        self.sy=TRACK_RECT.height/MAP_H
+        self.phase=self.manifest['ghost_phase']
+        self.hit_only_solid=bool(self.phase.get('hit_only_when_solid',True))
+        self.ghost_specs=self.manifest['ghost_sprites']
+        self.art={}
+        for kind,spec in self.ghost_specs.items():
+            frames=spec['frames']
+            self.art[kind]={
+                'idle':[self.load(x) for x in frames['idle']],
+                'chase':[self.load(x) for x in frames['chase']],
+                'poof':[self.load(x) for x in frames['poof']],
+                'glow':self.load(spec['glow']),
+                'shadow':self.load(spec['shadow']),
+                'radius':float(spec['hitbox_radius_px']),
+                'bob':float(spec.get('bob_px',0)),
+                'fps':float(spec.get('anim_hz',3))}
+        self.dust=[self.load('fall/splash_%s.png'%i) for i in range(5)]
+        self.cloud=[self.load('fall/rescue_cloud_a.png'),
+                    self.load('fall/rescue_cloud_b.png')]
+        self.sparkle=[self.load('fall/respawn_sparkle_%s.png'%i) for i in range(4)]
+        self.fall_shadow=self.load('fall/kart_shadow.png')
+        self.actors=[]
+        for i,record in enumerate(self.manifest['ghosts']):
+            actor=dict(record)
+            actor['index']=i
+            actor['route']=(Route([tuple(p) for p in record['loop_points']]+
+                                  [tuple(record['loop_points'][0])])
+                            if record['motion']=='loop_reverse' else
+                            Route([tuple(p) for p in record['points']])
+                            if record['motion']=='pingpong' else None)
+            actor['pos']=(0.0,0.0)
+            actor['previous']=(0.0,0.0)
+            actor['poof_at']=-999.0
+            self.actors.append(actor)
+        self.reset()
+
+    def load(self,rel):
+        img=pygame.image.load(os.path.join(self.base,*rel.split('/'))).convert_alpha()
+        return pygame.transform.smoothscale(img,(
+            max(1,round(img.get_width()*self.sx)),
+            max(1,round(img.get_height()*self.sy))))
+
+    def reset(self):
+        self.time=0.0
+        for actor in self.actors:
+            actor['poof_at']=-999.0
+            actor['pos']=self.position(actor,0.0,())
+            actor['previous']=actor['pos']
+
+    def position(self,actor,at,players):
+        motion=actor['motion']
+        if motion=='sweep':
+            period=max(.1,float(actor['period_s']))
+            phase=(at+float(actor.get('phase_s',0)))/period
+            u=.5-.5*math.cos(math.tau*phase)
+            return lerp(actor['a'],actor['b'],u)
+        if motion=='loop_reverse':
+            route=actor['route']
+            travelled=(max(0.0,at+float(actor.get('start_offset_s',0))) *
+                       float(actor['speed_px_s']))%max(1.0,route.length)
+            return route.sample(travelled)[0]
+        if motion=='pingpong':
+            route=actor['route']
+            period=route.length*2
+            d=(at*float(actor['speed_px_s']))%max(1.0,period)
+            d=d if d<=route.length else 2*route.length-d
+            pos=route.sample(d)[0]
+            # A modest visible lunge when a kart approaches the mansion hall;
+            # never let the banshee leave its authored patrol altogether.
+            threshold=float(actor.get('lunge_when_kart_within_px',0))
+            if threshold>0:
+                for racer in players:
+                    if racer.finished or racer.fall_phase or racer.flight_left>0:
+                        continue
+                    distance=length(pos,racer.pos)
+                    if 1e-3<distance<threshold:
+                        reach=min(9.0,(threshold-distance)*.23)
+                        pos=lerp(pos,racer.pos,reach/distance)
+                        break
+            return pos
+        return (0.0,0.0)
+
+    def update(self,dt,players=()):
+        self.time+=dt
+        for actor in self.actors:
+            actor['previous']=actor['pos']
+            actor['pos']=self.position(actor,self.time,players)
+
+    def phase_alpha(self,actor):
+        cycle=float(self.phase.get('cycle_s',7.0))
+        # Offset the actors so all eight do not simultaneously disappear.
+        t=(self.time+actor['index']*.73)%max(.1,cycle)
+        solid=float(self.phase.get('solid_s',4.6))
+        fade_out=float(self.phase.get('fade_out_s',.5))
+        intangible=float(self.phase.get('intangible_s',1.4))
+        fade_in=float(self.phase.get('fade_in_s',.5))
+        floor=float(self.phase.get('intangible_alpha',.28))
+        if t<solid:return 1.0,True
+        t-=solid
+        if t<fade_out:
+            return 1-(1-floor)*t/max(.001,fade_out),False
+        t-=fade_out
+        if t<intangible:return floor,False
+        t-=intangible
+        if t<fade_in:
+            return floor+(1-floor)*t/max(.001,fade_in),False
+        return 1.0,True
+
+    def hit_test(self,previous,position):
+        # Relative swept segments prevent fast karts or wisps from tunnelling
+        # through each other between Pygbag frames.
+        for actor in self.actors:
+            if self.time-actor['poof_at']<1.0:
+                continue
+            alpha,solid=self.phase_alpha(actor)
+            if self.hit_only_solid and not solid:
+                continue
+            relative0=(previous[0]-actor['previous'][0],
+                       previous[1]-actor['previous'][1])
+            relative1=(position[0]-actor['pos'][0],
+                       position[1]-actor['pos'][1])
+            if segment_near_point(relative0,relative1,(0,0)) <= \
+                    self.art[actor['type']]['radius']+self.KART_RADIUS:
+                return actor
+        return None
+
+    def ghost_hit(self,actor):
+        actor['poof_at']=self.time
+
+    def checkpoint_route(self,route):
+        """Project fourteen authored checkpoints onto each drawn lap."""
+        records=[]
+        lap_starts=[0.0]+list(route.lap_boundaries[:-1])
+        for lap_start,lap_end in zip(lap_starts,route.lap_boundaries):
+            lo=max(0,bisect.bisect_left(route.accumulated,lap_start)-1)
+            hi=min(len(route.points)-1,bisect.bisect_right(route.accumulated,lap_end))
+            for cp in self.manifest['fall']['respawn_points']:
+                point=(float(cp['x']),float(cp['y']))
+                angle=math.radians(float(cp['heading_deg_clockwise_from_east']))
+                best=None
+                for j in range(lo,hi):
+                    a,b=route.points[j:j+2]
+                    actual=math.atan2(b[1]-a[1],b[0]-a[0])
+                    if abs(angle_delta(actual,angle))>math.radians(55):continue
+                    gap,t,_=point_segment_projection(a,b,point)
+                    d=route.accumulated[j]+t*length(a,b)
+                    if not (lap_start-1<=d<=lap_end+1):continue
+                    if best is None or gap<best[0]:best=(gap,d)
+                if best and best[0]<35.0:
+                    pos,heading,_=route.sample(best[1])
+                    if not self.track.canyon_fall(pos):
+                        records.append((best[1],pos,heading,cp['id']))
+        records.sort(key=lambda p:p[0])
+        return records
+
+    def rescue_positions(self,to_screen,racer):
+        at=to_screen(racer.fall_at)
+        target=(to_screen(racer.rescue_target[1]) if racer.rescue_target else at)
+        t=clamp(racer.fall_age/self.RESCUE_SECONDS,0.0,1.0)
+        smooth=t*t*(3.0-2.0*t)
+        cart=lerp((at[0],at[1]-3),(target[0],target[1]-3),smooth)
+        cloud=(cart[0]+(1-smooth)*62,cart[1]-39-(1-smooth)*58)
+        return cloud,cart
+
+    def draw_rescue(self,canvas,to_screen,racer):
+        if not racer.fall_phase or racer.fall_phase=='penalty':return
+        at=to_screen(racer.fall_at)
+        if racer.fall_phase=='fall':
+            shade=self.fall_shadow.copy()
+            shade.set_alpha(round(200*(1-racer.fall_age/self.FALL_SECONDS)))
+            canvas.blit(shade,shade.get_rect(center=(round(at[0]),round(at[1]))))
+        elif racer.fall_phase=='dust':
+            frame=min(4,int(racer.fall_age/.08))
+            splash=self.dust[frame]
+            canvas.blit(splash,splash.get_rect(center=(round(at[0]),round(at[1]))))
+        elif racer.fall_phase=='rescue':
+            cloud,cart=self.rescue_positions(to_screen,racer)
+            pygame.draw.line(canvas,(189,243,231),cloud,cart,2)
+            sprite=self.cloud[int(self.time*8)%2]
+            canvas.blit(sprite,sprite.get_rect(center=(round(cloud[0]),round(cloud[1]))))
+
+    def draw_sparkles(self,canvas,to_screen,racer):
+        xy=to_screen(racer.pos)
+        if racer.respawn_fx_left>0:
+            index=min(3,int(max(0,.60-racer.respawn_fx_left)/.15))
+            sprite=self.sparkle[index]
+            canvas.blit(sprite,sprite.get_rect(center=(round(xy[0]),round(xy[1]))))
+        pygame.draw.circle(canvas,(135,247,230),(round(xy[0]),round(xy[1])),19,2)
+
+    def draw(self,canvas,to_screen):
+        clip=canvas.get_clip()
+        canvas.set_clip(TRACK_RECT)
+        for actor in self.actors:
+            at=to_screen(actor['pos'])
+            art=self.art[actor['type']]
+            poof_age=self.time-actor['poof_at']
+            if 0<=poof_age<1.0:
+                if poof_age<.28:
+                    index=min(3,int(poof_age/.07))
+                    sprite=art['poof'][index]
+                    canvas.blit(sprite,sprite.get_rect(center=(round(at[0]),round(at[1]))))
+                continue
+            alpha,solid=self.phase_alpha(actor)
+            t=self.time*art['fps']+actor['index']*.61
+            frame=int(t)%2
+            bob=math.sin(self.time*4+actor['index'])*art['bob']*self.sy
+            point=(round(at[0]),round(at[1]+bob))
+            # Shadows are present on the boardwalk even for transparent ghosts.
+            shadow=art['shadow']
+            canvas.blit(shadow,shadow.get_rect(center=(point[0],point[1]+7)))
+            glow=art['glow']
+            image=(art['chase'] if actor['type']=='banshee' or not solid
+                   else art['idle'])[frame]
+            if alpha<.995:
+                # Copies only during the fade portion; original art stays cached.
+                image=image.copy();image.set_alpha(round(alpha*255))
+                glow=glow.copy();glow.set_alpha(round(alpha*190))
+            canvas.blit(glow,glow.get_rect(center=point))
+            canvas.blit(image,image.get_rect(center=point))
+        canvas.set_clip(clip)
+
+
 class Racer:
     """One vehicle drives its entire child-drawn multi-lap spline ONCE."""
     def __init__(self,index,kart_id,route,is_ghost=False,laps=1):
@@ -1364,6 +1630,13 @@ class Racer:
         if self.train_hit_events:
             event=self.train_hit_events[-1]
             if isinstance(event,list) and event[1]=='log':event[1]='comet'
+        return True
+
+    def hit_by_phantom(self,elapsed=None):
+        if not self.hit_by_log(elapsed):return False
+        if self.train_hit_events:
+            event=self.train_hit_events[-1]
+            if isinstance(event,list) and event[1]=='log':event[1]='phantom'
         return True
 
     def hit_by_cactus(self,elapsed=None):
@@ -1539,7 +1812,7 @@ class Racer:
             event=self.ghost_train_hits[self.ghost_train_hits_index]
             trigger=event[0] if isinstance(event,(tuple,list)) else event
             if elapsed>=trigger:
-                if isinstance(event,(tuple,list)) and len(event)>1 and event[1] in ('log','comet'):
+                if isinstance(event,(tuple,list)) and len(event)>1 and event[1] in ('log','comet','phantom'):
                     self.hit_by_log(replay=True)
                 elif isinstance(event,(tuple,list)) and len(event)>1 and event[1]=='fall':
                     self.begin_fall(replay=True)
@@ -1589,6 +1862,9 @@ class Racer:
                   *min(1.95,temporary)*self.interaction_factor)
         if track.canyon_hazards is not None:
             desired*=track.canyon_hazards.speed_factor(pos)
+        if track.phantom_data and track.phantom_mask('rail_wall_mask',pos):
+            # A softer fence collision respects the child's already-drawn path.
+            desired*=.42
         for modifier in self.modifiers:
             desired*=modifier
         response=3.1 if desired>self.speed else 5.2
@@ -1598,7 +1874,7 @@ class Racer:
         self.distance=min(self.total_length,self.distance+advance)
         self.pos,self.heading,_=self.route_sample(self.distance)
         self.on_track=track.on_road(self.pos)
-        if track.canyon_data:
+        if track.canyon_data or track.phantom_data:
             self.update_checkpoint()
         if self.route.length>1e-5 and advance>1e-7:
             while self.completed_laps<self.laps:
@@ -1683,6 +1959,8 @@ class WasteKartGame:
         self.cactus_hazards=None
         self.gorge_hazards=None
         self.canyon_hazards=None
+        self.phantom_hazards=None
+        self.fall_hazards=None
         self.draw_warning=None
         self.race_routes_layer=None  # Legacy field; used only during transition.
         self.race_trails=[]      # AheadTrail for each player (+ optional ghost).
@@ -1715,6 +1993,13 @@ class WasteKartGame:
                 'image':'comet_canyon/comet_canyon_track.png',
                 'road_mask':'comet_canyon/comet_canyon_road_mask.png',
                 'geometry':'comet_canyon/comet_canyon_geometry.json'}
+        # Star Cup, track 1/4. Drop-in asset directory, no catalog edit needed.
+        if len(catalog.get('tracks',[]))>=13:
+            catalog['tracks'][12]={
+                'name':'Phantom Boardwalk',
+                'image':'phantom_boardwalk/phantom_boardwalk_track.png',
+                'road_mask':'phantom_boardwalk/phantom_boardwalk_road_mask.png',
+                'geometry':'phantom_boardwalk/phantom_boardwalk_geometry.json'}
         return catalog
 
     def load_karts(self):
@@ -1746,6 +2031,10 @@ class WasteKartGame:
         self.canyon_hazards=(CometCanyon(self.track)
                               if self.track.canyon_manifest_path else None)
         self.track.canyon_hazards=self.canyon_hazards
+        self.phantom_hazards=(PhantomBoardwalk(self.track)
+                              if self.track.phantom_manifest_path else None)
+        self.track.phantom_hazards=self.phantom_hazards
+        self.fall_hazards=self.canyon_hazards or self.phantom_hazards
 
     def font(self,size):
         return self.fonts[min(self.fonts,key=lambda k:abs(k-size))]
@@ -1975,7 +2264,7 @@ class WasteKartGame:
             pygame.draw.rect(self.canvas,(253,238,193) if selected else (117,145,162), (x+5,219,166,107),2,border_radius=5)
             name=self.catalog['tracks'][self.cup*4+j]['name']
             # fit long names to 2 lines by using smaller type
-            self.text(name,(x+88,359),22,WHITE)
+            self.text(name,(x+88,359),19 if len(name)>15 else 22,WHITE)
             if selected:self.text('SELECTED',(x+88,384),19,YELLOW)
             elif self.race_mode=='cup':self.text(f'RACE {j+1}',(x+88,384),19,YELLOW)
             if self.race_mode=='single':self.action_buttons.append((area,('track',j)))
@@ -2157,8 +2446,10 @@ class WasteKartGame:
 
     def ready_page(self):
         self.draw_bg()
-        self.title('YOUR TURN!',(f'{self.catalog["cups"][self.cup]} - TRACK {self.track_index+1}/4'
-                         if self.race_mode=='cup' else f'{self.track.name} - Pass the screen'))
+        self.title('YOUR TURN!',('PHANTOM BOARDWALK - STAR CUP 1/4'
+                          if self.track.phantom_data else
+                          f'{self.catalog["cups"][self.cup]} - TRACK {self.track_index+1}/4'
+                          if self.race_mode=='cup' else f'{self.track.name} - Pass the screen'))
         p=self.draw_player
         self.text(f'PLAYER {p+1}',(400,165),72,PALETTE[self.kart_ids[p]])
         self.kart_preview(self.kart_ids[p],(400,296),2.3)
@@ -2227,10 +2518,13 @@ class WasteKartGame:
                 self.canyon_hazards.draw(self.canvas,self.world_to_screen)
             if len(self.draft)>1:self.draw_route(self.draft,color,6)
             self.draw_start()
+            if self.phantom_hazards is not None:
+                self.phantom_hazards.draw(self.canvas,self.world_to_screen)
+                self.draw_bridge_overlay()
         pygame.draw.rect(self.canvas,INK,(0,0,LOGICAL_W,72))
         self.text(f'P{self.draw_player+1} - DRAW LAP {len(self.drawn_laps)+1}/{self.laps}',(306,31),34,color)
         self.text(('\u221e' if self.time_left is None else f'{max(0,math.ceil(self.time_left))}s'),(713,30),44,YELLOW)
-        warning=self.draw_warning if self.track.canyon_data else None
+        warning=self.draw_warning if (self.track.canyon_data or self.track.phantom_data) else None
         if warning:
             ink=(255,169,91) if warning.startswith('RAMP') else (255,117,108)
             self.text(warning,(380,59),22,ink)
@@ -2419,11 +2713,11 @@ class WasteKartGame:
                 racer_layer = 1 if self.track.point_on_overpass(r.pos, r.heading) else 0
                 if racer_layer != layer:
                     continue
-            if self.canyon_hazards is not None and r.fall_phase in ('dust','wait','rescue'):
-                self.canyon_hazards.draw_rescue(self.canvas,self.world_to_screen,r)
+            if self.fall_hazards is not None and r.fall_phase in ('dust','wait','rescue'):
+                self.fall_hazards.draw_rescue(self.canvas,self.world_to_screen,r)
                 if r.fall_phase=='rescue':
                     # A small kart visibly rises on the cloud's tow rope.
-                    _,cart=self.canyon_hazards.rescue_positions(
+                    _,cart=self.fall_hazards.rescue_positions(
                         self.world_to_screen,r)
                     rescued=self.racer_image(r.kart_id,r.fall_heading)
                     rescued=pygame.transform.smoothscale(rescued,(
@@ -2436,7 +2730,7 @@ class WasteKartGame:
             if not r.is_ghost:
                 pygame.draw.ellipse(self.canvas,(21,28,38),(xy[0]-17,xy[1]+6,34,11))
             img=self.racer_image(r.kart_id,r.heading)
-            if self.canyon_hazards is not None:
+            if self.fall_hazards is not None:
                 if r.flight_left>0:
                     # Shadow stays at road/canyon floor while the kart lifts.
                     shadow=self.canyon_hazards.fall_shadow
@@ -2454,7 +2748,7 @@ class WasteKartGame:
                         max(1,round(img.get_height()*size))))
                     img=pygame.transform.rotate(img,-540*fraction)
                     img.set_alpha(round(255*(1.0-.5*fraction)))
-                    self.canyon_hazards.draw_rescue(self.canvas,self.world_to_screen,r)
+                    self.fall_hazards.draw_rescue(self.canvas,self.world_to_screen,r)
             if r.is_ghost:
                 key=('ghost',r.kart_id,int(round(math.degrees(r.heading)/6))*6%360)
                 if key not in self.kart_rotation_cache:
@@ -2474,13 +2768,13 @@ class WasteKartGame:
                     pygame.draw.circle(self.canvas,(255,224,86),star,4)
                     pygame.draw.circle(self.canvas,(255,255,235),star,2)
             # The kart blinks during the 1.5 seconds of tow immunity.
-            visible=not (self.canyon_hazards is not None and r.train_immunity_left>0
+            visible=not (self.fall_hazards is not None and r.train_immunity_left>0
                          and r.fall_phase is None and int(self.elapsed*16)%2==0)
             if visible:
                 self.canvas.blit(img,img.get_rect(center=center))
-            if self.canyon_hazards is not None and (r.respawn_fx_left>0 or
+            if self.fall_hazards is not None and (r.respawn_fx_left>0 or
                     (r.train_immunity_left>0 and r.fall_count>0)):
-                self.canyon_hazards.draw_sparkles(self.canvas,self.world_to_screen,r)
+                self.fall_hazards.draw_sparkles(self.canvas,self.world_to_screen,r)
             if r.is_ghost:continue
             dot=(center[0],center[1]-18)
             pygame.draw.circle(self.canvas,(20,31,52),dot,9)
@@ -2507,6 +2801,10 @@ class WasteKartGame:
             self.display_racers(layer=1)
         else:
             self.display_racers()
+            if self.phantom_hazards is not None:
+                self.phantom_hazards.draw(self.canvas,self.world_to_screen)
+                # Mansion glass roof is ABOVE both karts and ghost actors.
+                self.draw_bridge_overlay()
         if self.moving_train is not None:
             self.moving_train.draw(self.canvas,self.world_to_screen)
         if self.cactus_hazards is not None:
@@ -2785,6 +3083,18 @@ class WasteKartGame:
                         self.draw_warning='RAMP JUMP: stay above 160 speed!'
                 elif not self.track.on_road(p) and self.draw_warning is None:
                     self.draw_warning='OFF ROAD: your kart will slow down!'
+        if self.track.phantom_data:
+            steps=max(1,math.ceil(length(previous,xy)/6))
+            for i in range(1,steps+1):
+                p=lerp(previous,xy,i/steps)
+                if self.track.canyon_fall(p):
+                    self.draw_warning='SWAMP GAP! Stay on the boards or an island.'
+                    break
+                if self.track.phantom_mask('rail_wall_mask',p):
+                    if self.draw_warning is None:
+                        self.draw_warning='RAIL: this line will slow the kart.'
+                elif not self.track.on_road(p) and self.draw_warning is None:
+                    self.draw_warning='OFF ROAD: grass islands slow your kart.'
         self.draw_lap_distance+=length(previous,xy)
         circumference=self.track.centerline_route.length
         if (self.draw_lap_distance>=circumference*.65 and
@@ -2838,6 +3148,8 @@ class WasteKartGame:
             self.gorge_hazards.reset()
         if self.canyon_hazards is not None:
             self.canyon_hazards.reset()
+        if self.phantom_hazards is not None:
+            self.phantom_hazards.reset()
         self.countdown=0.0
         self.elapsed=0.0
         self.paused=False
@@ -2846,9 +3158,9 @@ class WasteKartGame:
         self.racers=[Racer(i,self.kart_ids[i],self.routes[i],laps=self.laps)
                      for i in range(self.players)]
         self.bump_cooldowns={}
-        if self.canyon_hazards is not None:
+        if self.fall_hazards is not None:
             for racer in self.racers:
-                racer.canyon_checkpoints=self.canyon_hazards.checkpoint_route(racer.route)
+                racer.canyon_checkpoints=self.fall_hazards.checkpoint_route(racer.route)
         # Respawn each box for each new race; all players share each box.
         for box in self.pickups:
             box.hidden_until=0.0
@@ -2864,8 +3176,8 @@ class WasteKartGame:
                 self.active_ghost.ghost_reaction=record.get('reaction')
                 self.active_ghost.ghost_powerups=list(record.get('powerup_uses',[]))
                 self.active_ghost.ghost_train_hits=list(record.get('hazard_hits',[]))
-                if self.canyon_hazards is not None:
-                    self.active_ghost.canyon_checkpoints=self.canyon_hazards.checkpoint_route(
+                if self.fall_hazards is not None:
+                    self.active_ghost.canyon_checkpoints=self.fall_hazards.checkpoint_route(
                         self.active_ghost.route)
         # Cached cropped route spans: only the current span is dynamically
         # drawn each frame, and traveled geometry is never displayed again.
@@ -3189,6 +3501,8 @@ class WasteKartGame:
                     self.gorge_hazards.update(dt)
                 if self.canyon_hazards is not None:
                     self.canyon_hazards.update(dt)
+                if self.phantom_hazards is not None:
+                    self.phantom_hazards.update(dt,self.racers)
                 self.update_interactions(dt)
                 for racer in self.racers:
                     before=racer.pos
@@ -3221,6 +3535,15 @@ class WasteKartGame:
                                     racer.pos=at
                                     racer.begin_fall(self.elapsed)
                                     break
+                    if (self.phantom_hazards is not None and not racer.finished and
+                            not racer.fall_phase and not was_flying and
+                            racer.train_immunity_left<=0.0):
+                        for j in range(1,7):
+                            at=lerp(before,racer.pos,j/6)
+                            if self.track.canyon_fall(at):
+                                racer.pos=at
+                                racer.begin_fall(self.elapsed)
+                                break
                     if (self.moving_train is not None and not racer.finished and
                             self.moving_train.hit_test(racer.pos)):
                         racer.hit_by_train(self.elapsed)
@@ -3237,6 +3560,13 @@ class WasteKartGame:
                             racer.train_immunity_left<=0):
                         if self.canyon_hazards.hit_test(before,racer.pos):
                             racer.hit_by_comet(self.elapsed)
+                    if (self.phantom_hazards is not None and not racer.finished
+                            and not racer.fall_phase and not racer.flight_left
+                            and racer.train_immunity_left<=0.0 and
+                            not racer.train_spin_left):
+                        actor=self.phantom_hazards.hit_test(before,racer.pos)
+                        if actor is not None and racer.hit_by_phantom(self.elapsed):
+                            self.phantom_hazards.ghost_hit(actor)
                     if not racer.fall_phase and not racer.flight_left:
                         self.try_collect_powerups(racer,before)
                 if self.active_ghost is not None:
