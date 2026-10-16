@@ -1,0 +1,28 @@
+WasteKart 2.2.0 — Comet Canyon Upgrade
+=======================================
+
+Extract this ZIP into the ROOT of your existing GameHub repository,
+merging the WasteGame directory. It supplies:
+
+  WasteGame/wasteKart.py
+  WasteGame/assets/WasteKart/comet_canyon/... (109 supplied files and new geometry)
+
+Keep all of the existing WasteGame/assets/WasteKart artwork and the original
+catalog.json. The modified wasteKart.py automatically loads Comet Canyon as
+Desert Cup course 4/4 (catalog track index 11) without editing catalog.json.
+
+Play:
+  - Draw a line across the short northern jump route (needs about 160 px/s)
+    or draw the longer west-bridge safe route.
+  - The drawing editor warns about canyon crossings and leaving the road.
+  - The kart jumps for 0.6 seconds at a fixed heading and speed.
+  - Falling anywhere inside the canyon launches the rescue animation,
+    returns the kart to the last checkpoint, adds a 1.2s pause and gives
+    1.5s of immunity after recovery.
+  - Comets/craters occur only on the jump-route approaches.
+
+Uses unchanged async GameHub entry point: await wasteKart.main(screen, clock)
+Other 15 courses are unchanged.
+
+Testing: Python compilation and simulated movement/collision/lap progression
+were checked. A full graphical Pygame/Pygbag run was not available here.

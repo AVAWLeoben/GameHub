@@ -1,4 +1,4 @@
-"""WasteKart 2.1.3 - Golden Gorge floating log hazards + Desert track hazards.
+"""WasteKart 2.2.0 - Comet Canyon bridges, jump, rescue and comets.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
@@ -420,19 +420,66 @@ class Track:
             self.overpasses.append({'a':a,'b':b,'width':width,'tolerance':tolerance})
         gorge_rel=data.get('golden_gorge_manifest')
         self.gorge_manifest_path=(os.path.join(ASSET_ROOT,*gorge_rel.split('/'))
-                                  if gorge_rel else None)
+                                   if gorge_rel else None)
+        canyon_rel=data.get('canyon_manifest')
+        self.canyon_manifest_path=(os.path.join(ASSET_ROOT,*canyon_rel.split('/'))
+                                   if canyon_rel else None)
+        self.canyon_data=None
+        self.canyon_masks={}
+        self.canyon_bridges=[]
+        self.canyon_hazards=None
+        if self.canyon_manifest_path:
+            with open(self.canyon_manifest_path,encoding='utf8') as source:
+                self.canyon_data=json.load(source)
+            base=os.path.dirname(self.canyon_manifest_path)
+            for key,relative in self.canyon_data['masks'].items():
+                self.canyon_masks[key]=pygame.image.load(
+                    os.path.join(base,*relative.split('/'))).convert()
+            for key,relative in (('ramp',self.canyon_data['jump']['ramp_mask']),
+                                  ('landing',self.canyon_data['jump']['landing_mask'])):
+                self.canyon_masks[key]=pygame.image.load(
+                    os.path.join(base,*relative.split('/'))).convert()
+            for deck in self.canyon_data['bridges'].values():
+                if isinstance(deck,dict) and 'deck_bbox_px' in deck:
+                    x1,y1,x2,y2=deck['deck_bbox_px']
+                    self.canyon_bridges.append(pygame.Rect(
+                        int(x1),int(y1),math.ceil(x2-x1),math.ceil(y2-y1)))
         self.pickup_positions=self.find_pickup_positions()
 
     def on_road(self,point):
         x,y=int(point[0]),int(point[1])
         if not (0<=x<MAP_W and 0<=y<MAP_H):return False
         # A single O(1) lookup, even with four karts on iPad.
-        return self.mask.get_at((x,y))[0] > 127
+        if self.mask.get_at((x,y))[0] <= 127:
+            return False
+        # Comet Canyon's existing craters are slow like sand, not fast asphalt.
+        if self.canyon_mask('permanent_crater_slow',point):
+            return False
+        return True
+
+    def canyon_mask(self,key,point):
+        surface=self.canyon_masks.get(key)
+        if surface is None:return False
+        x,y=int(point[0]),int(point[1])
+        return (0<=x<MAP_W and 0<=y<MAP_H and
+                surface.get_at((x,y))[0]>127)
+
+    def canyon_bridge(self,point):
+        # The supplied fall-zone mask already excludes the deck surfaces.
+        # Keep an explicit deck check for safety at anti-aliased edges.
+        return any(r.collidepoint((int(point[0]),int(point[1]))) for r in self.canyon_bridges) and \
+               self.mask.get_at((int(clamp(point[0],0,MAP_W-1)),
+                                 int(clamp(point[1],0,MAP_H-1))))[0]>127
+
+    def canyon_fall(self,point):
+        return self.canyon_mask('fall_zone',point) and not self.canyon_bridge(point)
 
     def has_overpasses(self):
-        return bool(self.overpasses)
+        return bool(self.overpasses or self.canyon_bridges)
 
     def point_on_overpass(self, point, heading=None):
+        if self.canyon_bridges and self.canyon_bridge(point):
+            return True
         for bridge in self.overpasses:
             dist,t,_=point_segment_projection(bridge['a'],bridge['b'],point)
             if not (0.0 <= t <= 1.0):
@@ -447,7 +494,7 @@ class Track:
         return False
 
     def segment_layer(self, a, b):
-        if not self.overpasses:
+        if not self.has_overpasses():
             return 0
         heading=math.atan2(b[1]-a[1], b[0]-a[0])
         mid=((a[0]+b[0])*0.5, (a[1]+b[1])*0.5)
@@ -479,7 +526,9 @@ class Track:
                             for bridge in self.overpasses)
                         if (28<candidate[0]<MAP_W-28 and
                                 28<candidate[1]<MAP_H-28 and
-                                not crossing_conflict and self.on_road(candidate) and
+                                not crossing_conflict and
+                                (not self.canyon_data or not (190<candidate[0]<355)) and
+                                self.on_road(candidate) and
                                 all(length(candidate,other)>70 for other in spots)):
                             found=candidate
                             break
@@ -930,6 +979,246 @@ class GoldenGorgeLogs:
                 canvas.blit(sprite,sprite.get_rect(center=point))
         canvas.set_clip(original_clip)
 
+
+class CometCanyon:
+    """Comet Canyon masks, deterministic falling meteors and rescue sprites.
+
+    960x600 world pixels throughout. Art is scaled once to the 740x462 viewport.
+    Meteor timing is a repeating authored 28-second cycle, rather than random
+    strikes over the bridge, jump pad, or the safe western alternative.
+    """
+    FALL_SECONDS=.9
+    DUST_SECONDS=.40
+    WAIT_SECONDS=.60
+    RESCUE_SECONDS=.80
+    PENALTY_SECONDS=1.20
+    IMMUNITY_SECONDS=1.50
+
+    def __init__(self,track):
+        self.track=track
+        self.manifest=track.canyon_data
+        self.base=os.path.dirname(track.canyon_manifest_path)
+        self.sx=TRACK_RECT.width/MAP_W
+        self.sy=TRACK_RECT.height/MAP_H
+        self.types={}
+        for kind,spec in self.manifest['comet_hazard']['types'].items():
+            self.types[kind]={'spec':spec,
+                'comet':self.load(spec['sprite_fall_rotated']),
+                'shadow':self.load(spec['shadow']),
+                'impacts':[self.load(name) for name in spec['impact_frames']],
+                'fresh':self.load(spec['crater_fresh']),
+                'scorched':self.load(spec['crater_scorched'])}
+        self.smokes=[self.load('comets/smoke/smoke_%s.png'%i) for i in range(4)]
+        self.dust=[self.load('fall/dust_puff_%s.png'%i) for i in range(5)]
+        self.cloud=[self.load('fall/rescue_cloud_a.png'),self.load('fall/rescue_cloud_b.png')]
+        self.sparkle=[self.load('fall/respawn_sparkle_%s.png'%i) for i in range(4)]
+        self.fall_shadow=self.load('fall/kart_shadow.png')
+        self.events=[]
+        for original in self.manifest['comet_hazard']['sample_schedule']['events']:
+            event=dict(original)
+            point=(event['x'],event['y'])
+            if not track.canyon_mask('comet_strike_zone',point):
+                # The authored fifth event is 1px outside the white mask due
+                # to fractional-coordinate rounding. Keep it in its intended
+                # south approach, but move that impact onto the safe white pixel.
+                for radius in range(1,10):
+                    candidates=((0,-radius),(-radius,0),(radius,0),(0,radius))
+                    allowed=[(point[0]+dx,point[1]+dy) for dx,dy in candidates
+                             if track.canyon_mask('comet_strike_zone',
+                                                  (point[0]+dx,point[1]+dy))]
+                    if allowed:
+                        event['x'],event['y']=allowed[0]
+                        break
+            self.events.append(event)
+        self.cycle=float(self.manifest['comet_hazard']['sample_schedule']['cycle_length_s'])
+        self.warning=float(self.manifest['comet_hazard']['timeline_s']['warning_shadow_grow'])
+        self.crater_cap=int(self.manifest['comet_hazard']['timeline_s']['max_active_craters'])
+        self.jump_time=float(self.manifest['jump']['flight_time_s'])
+        self.jump_lip=float(self.manifest['jump']['launch_lip_y'])
+        self.reset()
+
+    def load(self,rel):
+        img=pygame.image.load(os.path.join(self.base,*rel.split('/'))).convert_alpha()
+        return pygame.transform.smoothscale(img,(max(1,round(img.get_width()*self.sx)),
+                                                 max(1,round(img.get_height()*self.sy))))
+
+    def reset(self):
+        self.time=0.0
+        self.previous_time=0.0
+
+    def update(self,dt):
+        self.previous_time=self.time
+        self.time+=dt
+
+    def active_events(self):
+        # A fixed-size list (<= 9*2), not an ever-growing array of meteor objects.
+        cycle=int(self.time//self.cycle)
+        for index in (cycle-1,cycle,cycle+1):
+            if index<0:continue
+            for slot,event in enumerate(self.events):
+                hit=index*self.cycle+float(event['t_impact_s'])
+                age=self.time-hit
+                if -self.warning<=age<=7.4:
+                    yield index,slot,event,age,hit
+
+    def crater_events(self):
+        # Include the preceding cycle, but retain only the last six active
+        # impact points. They expire in arrival order, not all at cycle reset.
+        all_events=[]
+        cycle=int(self.time//self.cycle)
+        for index in range(max(0,cycle-2),cycle+1):
+            for slot,event in enumerate(self.events):
+                hit=index*self.cycle+float(event['t_impact_s'])
+                if hit<=self.time:
+                    all_events.append((hit,event))
+        return all_events[-self.crater_cap:]
+
+    def speed_factor(self,pos):
+        for hit,event in self.crater_events():
+            radius=self.types[event['type']]['spec']['impact_radius_px']
+            if length(pos,(event['x'],event['y']))<=radius:
+                return .55
+        for _,_,event,age,_ in self.active_events():
+            if -self.warning<=age<0:
+                radius=self.types[event['type']]['spec']['impact_radius_px']
+                if length(pos,(event['x'],event['y']))<=radius:
+                    return .70
+        return 1.0
+
+    def meteor_head(self,event,age):
+        # Approaches along the original NW-to-SE falling vector.
+        remaining=clamp(-age/.38,0.0,1.0)
+        dx,dy=self.manifest['comet_hazard']['timeline_s']['fall_from_offset_px']
+        return (event['x']+dx*remaining,event['y']+dy*remaining)
+
+    def hit_test(self,previous,position):
+        for _,_,event,age,_ in self.active_events():
+            if age<-.15 or age>.10:continue
+            spec=self.types[event['type']]['spec']
+            radius=float(spec['impact_radius_px'])+10.0
+            target=(event['x'],event['y']) if age>=0 else self.meteor_head(event,age)
+            if segment_near_point(previous,position,target)<=radius:
+                return event
+        return None
+
+    def checkpoint_route(self,route):
+        """Match both manifest branches to the actual player's drawn spline.
+
+        Checkpoints are repeated per lap only where the authored line passes
+        near the checkpoint and faces approximately the same direction.
+        Each match stores both the route distance and original map heading.
+        """
+        records=[]
+        sets=self.manifest['fall']['respawn_points']
+        lap_starts=[0.0]+list(route.lap_boundaries[:-1])
+        for lap_start,lap_end in zip(lap_starts,route.lap_boundaries):
+            lo=max(0,bisect.bisect_left(route.accumulated,lap_start)-1)
+            hi=min(len(route.points)-1,bisect.bisect_right(route.accumulated,lap_end))
+            for branch in ('short_route','long_route'):
+                for cp in sets[branch]:
+                    point=(float(cp['x']),float(cp['y']))
+                    cp_angle=math.radians(float(cp['heading_deg_clockwise_from_east']))
+                    best=None
+                    for j in range(lo,hi):
+                        a,b=route.points[j:j+2]
+                        segment_angle=math.atan2(b[1]-a[1],b[0]-a[0])
+                        if abs(angle_delta(segment_angle,cp_angle))>math.radians(55):
+                            continue
+                        separation,t,_=point_segment_projection(a,b,point)
+                        distance=route.accumulated[j]+t*length(a,b)
+                        if not (lap_start-1<=distance<=lap_end+1):continue
+                        if best is None or separation<best[0]:
+                            best=(separation,distance)
+                    if best is not None and best[0]<28.0:
+                        records.append((best[1],point,cp_angle,cp['id']))
+        records.sort(key=lambda entry:entry[0])
+        # On shared straights, S and L checkpoints are only 18 px apart.
+        # Keep the more precisely aligned one to avoid duplicate triggers.
+        matched=[]
+        for candidate in records:
+            if matched and abs(matched[-1][0]-candidate[0])<14.0:
+                prev=matched[-1]
+                dist_a=length(route.sample(prev[0])[0],prev[1])
+                dist_b=length(route.sample(candidate[0])[0],candidate[1])
+                if dist_b<dist_a:matched[-1]=candidate
+            else:
+                matched.append(candidate)
+        return matched
+
+    def closest_forward_distance(self,route,origin,destination,span=180):
+        start=max(0,bisect.bisect_left(route.accumulated,origin)-1)
+        stop=min(len(route.points)-1,bisect.bisect_right(route.accumulated,origin+span))
+        best=(1e30,origin)
+        for j in range(start,stop):
+            a,b=route.points[j:j+2]
+            gap,t,_=point_segment_projection(a,b,destination)
+            projected=route.accumulated[j]+t*length(a,b)
+            if projected>=origin-5 and gap<best[0]:best=(gap,projected)
+        return best
+
+    @staticmethod
+    def blit_center(canvas,img,point):
+        canvas.blit(img,img.get_rect(center=(round(point[0]),round(point[1]))))
+
+    def draw(self,canvas,to_screen):
+        clip=canvas.get_clip()
+        canvas.set_clip(TRACK_RECT)
+        for hit,event in self.crater_events():
+            spec=self.types[event['type']]
+            age=self.time-hit
+            image=spec['fresh'] if age<6.0 else spec['scorched']
+            self.blit_center(canvas,image,to_screen((event['x'],event['y'])))
+        # Pre-impact shadow -> falling comet -> impact flash/smoke.
+        for _,slot,event,age,_ in self.active_events():
+            spec=self.types[event['type']]
+            at=to_screen((event['x'],event['y']))
+            if age<0:
+                p=clamp((self.warning+age)/self.warning,0,1)
+                scale=.25+.75*p*p
+                shadow=spec['shadow']
+                size=(max(1,round(shadow.get_width()*scale)),
+                      max(1,round(shadow.get_height()*scale)))
+                image=pygame.transform.smoothscale(shadow,size)
+                image.set_alpha(round(102+153*p))
+                self.blit_center(canvas,image,at)
+                if age>-.38:
+                    self.blit_center(canvas,spec['comet'],to_screen(self.meteor_head(event,age)))
+            elif age<.36:
+                index=min(5,int(age/.06))
+                self.blit_center(canvas,spec['impacts'][index],at)
+            if 0<=age<1.4:
+                frame=min(3,int(age/1.4*4))
+                self.blit_center(canvas,self.smokes[frame],(at[0]+9,at[1]-8-age*12))
+        canvas.set_clip(clip)
+
+    def draw_rescue(self,canvas,to_screen,racer):
+        if not racer.fall_phase or racer.fall_phase=='penalty':return
+        at=to_screen(racer.fall_at)
+        phase=racer.fall_phase
+        if phase=='fall':
+            shade=self.fall_shadow.copy()
+            shade.set_alpha(round(200*(1-racer.fall_age/self.FALL_SECONDS)))
+            self.blit_center(canvas,shade,at)
+        elif phase=='dust':
+            index=min(4,int(racer.fall_age/.08))
+            self.blit_center(canvas,self.dust[index],at)
+        elif phase=='rescue':
+            progress=clamp(racer.fall_age/self.RESCUE_SECONDS,0,1)
+            cloud_point=(at[0]+(1-progress)*95,at[1]-45-(1-progress)*66)
+            # Rope trails from the cloud into the gorge; no new art needed.
+            end=(at[0]+(cloud_point[0]-at[0])*.18,at[1]-4)
+            pygame.draw.line(canvas,(255,241,196),cloud_point,end,2)
+            self.blit_center(canvas,self.cloud[int(self.time*8)%2],cloud_point)
+
+    def draw_sparkles(self,canvas,to_screen,racer):
+        if racer.train_immunity_left<=0 and racer.fall_phase!='penalty' and racer.respawn_fx_left<=0:return
+        x,y=to_screen(racer.pos)
+        if racer.fall_phase=='penalty' or racer.respawn_fx_left>0:
+            elapsed=max(0,.60-racer.respawn_fx_left)
+            index=min(3,int(elapsed/.15))
+            self.blit_center(canvas,self.sparkle[index],(x,y))
+        pygame.draw.circle(canvas,(145,255,241),(round(x),round(y)),19,2)
+
 class Racer:
     """One vehicle drives its entire child-drawn multi-lap spline ONCE."""
     def __init__(self,index,kart_id,route,is_ghost=False,laps=1):
@@ -975,6 +1264,21 @@ class Racer:
         # Ghost uses the recorded reaction, including an early-press penalty.
         self.ghost_reaction=None
         self.ghost_reaction_applied=False
+        self.flight_left=0.0
+        self.flight_elapsed=0.0
+        self.flight_origin=None
+        self.flight_heading=0.0
+        self.flight_speed=0.0
+        self.flight_distance=0.0
+        self.fall_phase=None
+        self.fall_age=0.0
+        self.fall_at=None
+        self.fall_heading=0.0
+        self.fall_count=0
+        self.respawn_fx_left=0.0
+        self.canyon_checkpoints=[]
+        self.next_checkpoint=0
+        self.last_checkpoint=(0.0,self.pos,self.heading,'START')
 
     def apply_start_reaction(self, reaction):
         """Negative reaction means false start; None means no manual boost."""
@@ -1047,19 +1351,126 @@ class Racer:
         self.interaction_factor=1.0
         return True
 
+    def hit_by_comet(self,elapsed=None):
+        if not self.hit_by_log(elapsed):return False
+        if self.train_hit_events:
+            event=self.train_hit_events[-1]
+            if isinstance(event,list) and event[1]=='log':event[1]='comet'
+        return True
+
     def hit_by_cactus(self,elapsed=None):
         # Same gentle 360-degree stop/spin as the Dusty Drive train.
         return self.hit_by_train(elapsed)
 
+    def start_flight(self,origin,launch_distance,speed,heading,flight_time):
+        self.flight_origin=tuple(origin)
+        self.flight_distance=float(launch_distance)
+        self.flight_speed=float(speed)
+        self.flight_heading=float(heading)
+        self.flight_elapsed=0.0
+        self.flight_left=flight_time
+        self.pos=tuple(origin)
+        self.heading=heading
+        self.distance=launch_distance
+        self.drafting=False
+        self.interaction_factor=1.0
+
+    def begin_fall(self,elapsed=None,replay=False):
+        if self.finished or self.fall_phase or self.train_immunity_left>0:
+            return False
+        self.flight_left=0.0
+        self.fall_at=tuple(self.pos)
+        self.fall_heading=self.heading
+        self.fall_phase='fall'
+        self.fall_age=0.0
+        self.fall_count+=1
+        self.drafting=False
+        self.interaction_factor=1.0
+        self.speed=0.0
+        self.train_spin_left=0.0
+        if not replay and elapsed is not None:
+            self.train_hit_events.append([round(elapsed,3),'fall'])
+        return True
+
+    def update_checkpoint(self):
+        while self.next_checkpoint<len(self.canyon_checkpoints) and \
+              self.canyon_checkpoints[self.next_checkpoint][0]<=self.distance+1.0:
+            self.last_checkpoint=self.canyon_checkpoints[self.next_checkpoint]
+            self.next_checkpoint+=1
+
+    def update_fall(self,dt,track):
+        self.fall_age+=dt
+        durations={'fall':.90,'dust':.40,'wait':.60,'rescue':.80,'penalty':1.20}
+        if self.fall_age<durations[self.fall_phase]:return
+        self.fall_age=0.0
+        if self.fall_phase=='fall':self.fall_phase='dust'
+        elif self.fall_phase=='dust':self.fall_phase='wait'
+        elif self.fall_phase=='wait':self.fall_phase='rescue'
+        elif self.fall_phase=='rescue':
+            checkpoint_distance,position,heading,_=self.last_checkpoint
+            # Avoid inescapable loops when a child draws directly through the
+            # abyss: after repeated identical falls, rescue to the NEXT safe
+            # section rather than leaving a player trapped forever.
+            if self.fall_count>=3 and self.distance-checkpoint_distance<180:
+                for i in range(bisect.bisect_left(self.route.accumulated,self.distance),
+                               len(self.route.points)-3):
+                    sample=self.route.points[i]
+                    if track.on_road(sample) and not track.canyon_fall(sample) and \
+                       all(not track.canyon_fall(p) for p in self.route.points[i:i+4]):
+                        checkpoint_distance=self.route.accumulated[i]
+                        position,heading,_=self.route.sample(checkpoint_distance)
+                        self.fall_count=0
+                        break
+            self.distance=checkpoint_distance
+            self.pos=tuple(position)
+            self.heading=heading
+            self.speed=0.0
+            self.next_checkpoint=bisect.bisect_right(
+                [p[0] for p in self.canyon_checkpoints],self.distance+1.0)
+            self.fall_phase='penalty'
+            self.respawn_fx_left=.60
+        elif self.fall_phase=='penalty':
+            self.fall_phase=None
+            self.fall_age=0.0
+            self.train_immunity_left=1.50
+            self.respawn_fx_left=.60
+
     def update(self,dt,elapsed,track):
         if self.finished:return
+        self.respawn_fx_left=max(0.0,self.respawn_fx_left-dt)
+        if self.fall_phase:
+            self.update_fall(dt,track)
+            return
+        if self.flight_left>0:
+            step=min(dt,self.flight_left)
+            self.flight_elapsed+=step
+            self.flight_left=max(0.0,self.flight_left-step)
+            flight=self.flight_speed*self.flight_elapsed
+            self.pos=(self.flight_origin[0]+math.cos(self.flight_heading)*flight,
+                      self.flight_origin[1]+math.sin(self.flight_heading)*flight)
+            self.heading=self.flight_heading
+            self.distance=min(self.total_length,self.flight_distance+flight)
+            self.update_checkpoint()
+            if self.flight_left<=0 and track.canyon_fall(self.pos):
+                self.begin_fall(elapsed)
+            elif self.flight_left<=0:
+                # A jump uses locked heading, then rejoins the child's line
+                # at the nearest forward segment, never rewinding midair.
+                gap,projected=track.canyon_hazards.closest_forward_distance(
+                    self.route,self.flight_distance,self.pos,
+                    max(160.0,flight+95))
+                if gap<42:self.distance=max(self.flight_distance,projected)
+                self.update_checkpoint()
+            return
         self.train_immunity_left=max(0.0,self.train_immunity_left-dt)
         if self.is_ghost and self.ghost_train_hits_index<len(self.ghost_train_hits):
             event=self.ghost_train_hits[self.ghost_train_hits_index]
             trigger=event[0] if isinstance(event,(tuple,list)) else event
             if elapsed>=trigger:
-                if isinstance(event,(tuple,list)) and len(event)>1 and event[1]=='log':
+                if isinstance(event,(tuple,list)) and len(event)>1 and event[1] in ('log','comet'):
                     self.hit_by_log(replay=True)
+                elif isinstance(event,(tuple,list)) and len(event)>1 and event[1]=='fall':
+                    self.begin_fall(replay=True)
                 else:
                     self.hit_by_train(replay=True)
                 self.ghost_train_hits_index+=1
@@ -1103,7 +1514,9 @@ class Racer:
             temporary*=POWERUP_MULTIPLIER[self.powerup_kind]
             self.powerup_left=max(0.0,self.powerup_left-dt)
         desired=(track.max_speed*bend*(ROAD_FACTOR if road else GRASS_FACTOR)
-                 *min(1.95,temporary)*self.interaction_factor)
+                  *min(1.95,temporary)*self.interaction_factor)
+        if track.canyon_hazards is not None:
+            desired*=track.canyon_hazards.speed_factor(pos)
         for modifier in self.modifiers:
             desired*=modifier
         response=3.1 if desired>self.speed else 5.2
@@ -1113,6 +1526,8 @@ class Racer:
         self.distance=min(self.total_length,self.distance+advance)
         self.pos,self.heading,_=self.route_sample(self.distance)
         self.on_track=track.on_road(self.pos)
+        if track.canyon_data:
+            self.update_checkpoint()
         if self.route.length>1e-5 and advance>1e-7:
             while self.completed_laps<self.laps:
                 boundary=self.lap_boundaries[self.completed_laps]
@@ -1195,6 +1610,8 @@ class WasteKartGame:
         self.moving_train=None
         self.cactus_hazards=None
         self.gorge_hazards=None
+        self.canyon_hazards=None
+        self.draw_warning=None
         self.race_routes_layer=None  # Legacy field; used only during transition.
         self.race_trails=[]      # AheadTrail for each player (+ optional ghost).
         self.pickups=[]          # Fresh shared boxes for each race; stable during drawing.
@@ -1217,7 +1634,16 @@ class WasteKartGame:
 
     def load_catalog(self):
         with open(os.path.join(ASSET_ROOT,'catalog.json'),encoding='utf8') as stream:
-            return json.load(stream)
+            catalog=json.load(stream)
+        # Desert Cup race 4/4. The new art is an additive asset folder, so the
+        # GameHub catalog on GitHub does NOT need a separate manual edit.
+        if len(catalog.get('tracks',[]))>=12:
+            catalog['tracks'][11]={
+                'name':'Comet Canyon',
+                'image':'comet_canyon/comet_canyon_track.png',
+                'road_mask':'comet_canyon/comet_canyon_road_mask.png',
+                'geometry':'comet_canyon/comet_canyon_geometry.json'}
+        return catalog
 
     def load_karts(self):
         for entry in self.catalog['karts']:
@@ -1244,7 +1670,10 @@ class WasteKartGame:
         self.cactus_hazards=(CactusLaneHazards(self.track)
                              if self.track.cactus_manifest_path else None)
         self.gorge_hazards=(GoldenGorgeLogs(self.track,self.map_surface)
-                            if self.track.gorge_manifest_path else None)
+                             if self.track.gorge_manifest_path else None)
+        self.canyon_hazards=(CometCanyon(self.track)
+                              if self.track.canyon_manifest_path else None)
+        self.track.canyon_hazards=self.canyon_hazards
 
     def font(self,size):
         return self.fonts[min(self.fonts,key=lambda k:abs(k-size))]
@@ -1706,6 +2135,8 @@ class WasteKartGame:
             self.draw_powerup_boxes()
             if self.gorge_hazards is not None:
                 self.gorge_hazards.draw(self.canvas,self.world_to_screen)
+            if self.canyon_hazards is not None:
+                self.canyon_hazards.draw(self.canvas,self.world_to_screen)
             if len(self.draft)>1:
                 self.draw_route_layered(self.draft,color,6,dashed=False,layer=0)
             self.draw_start()
@@ -1720,12 +2151,19 @@ class WasteKartGame:
             self.draw_powerup_boxes()
             if self.gorge_hazards is not None:
                 self.gorge_hazards.draw(self.canvas,self.world_to_screen)
+            if self.canyon_hazards is not None:
+                self.canyon_hazards.draw(self.canvas,self.world_to_screen)
             if len(self.draft)>1:self.draw_route(self.draft,color,6)
             self.draw_start()
         pygame.draw.rect(self.canvas,INK,(0,0,LOGICAL_W,72))
         self.text(f'P{self.draw_player+1} - DRAW LAP {len(self.drawn_laps)+1}/{self.laps}',(306,31),34,color)
         self.text(('\u221e' if self.time_left is None else f'{max(0,math.ceil(self.time_left))}s'),(713,30),44,YELLOW)
-        self.text('Draw to the green dot. Every lap gets its OWN line!',(380,59),22,MUTED)
+        warning=self.draw_warning if self.track.canyon_data else None
+        if warning:
+            ink=(255,169,91) if warning.startswith('RAMP') else (255,117,108)
+            self.text(warning,(380,59),22,ink)
+        else:
+            self.text('Draw to the green dot. Every lap gets its OWN line!',(380,59),22,MUTED)
         pygame.draw.rect(self.canvas,INK,(0,545,LOGICAL_W,55))
         self.button((25,550,160,43),'CLEAR',('clear',None),size=25)
         self.text(f'LAPS DONE: {len(self.drawn_laps)}/{self.laps}   -   Lift to pause. CLEAR to retry.',(397,571),21,MUTED)
@@ -1909,11 +2347,44 @@ class WasteKartGame:
                 racer_layer = 1 if self.track.point_on_overpass(r.pos, r.heading) else 0
                 if racer_layer != layer:
                     continue
+            if self.canyon_hazards is not None and r.fall_phase in ('dust','wait','rescue'):
+                self.canyon_hazards.draw_rescue(self.canvas,self.world_to_screen,r)
+                if r.fall_phase=='rescue':
+                    # A small kart visibly rises on the cloud's tow rope.
+                    progress=clamp(r.fall_age/.80,0,1)
+                    at=self.world_to_screen(r.fall_at)
+                    cloud=(at[0]+(1-progress)*95,at[1]-45-(1-progress)*66)
+                    cart=(at[0]+(cloud[0]-at[0])*.18,at[1]-4)
+                    rescued=self.racer_image(r.kart_id,r.fall_heading)
+                    rescued=pygame.transform.smoothscale(rescued,(
+                        max(1,int(rescued.get_width()*.54)),
+                        max(1,int(rescued.get_height()*.54))))
+                    self.canvas.blit(rescued,rescued.get_rect(center=(int(cart[0]),int(cart[1]))))
+                continue
             xy=self.world_to_screen(r.pos)
             # Shadows, outlined friendly cartoon karts and a player number.
             if not r.is_ghost:
                 pygame.draw.ellipse(self.canvas,(21,28,38),(xy[0]-17,xy[1]+6,34,11))
             img=self.racer_image(r.kart_id,r.heading)
+            if self.canyon_hazards is not None:
+                if r.flight_left>0:
+                    # Shadow stays at road/canyon floor while the kart lifts.
+                    shadow=self.canyon_hazards.fall_shadow
+                    self.canvas.blit(shadow,shadow.get_rect(center=(int(xy[0]),int(xy[1]+6))))
+                    fraction=r.flight_elapsed/max(.01,self.canyon_hazards.jump_time)
+                    rise=1.0+.35*math.sin(math.pi*fraction)
+                    img=pygame.transform.smoothscale(img,(
+                        max(1,round(img.get_width()*rise)),
+                        max(1,round(img.get_height()*rise))))
+                elif r.fall_phase=='fall':
+                    fraction=clamp(r.fall_age/.9,0,1)
+                    size=1.0-.85*fraction
+                    img=pygame.transform.smoothscale(img,(
+                        max(1,round(img.get_width()*size)),
+                        max(1,round(img.get_height()*size))))
+                    img=pygame.transform.rotate(img,-540*fraction)
+                    img.set_alpha(round(255*(1.0-.5*fraction)))
+                    self.canyon_hazards.draw_rescue(self.canvas,self.world_to_screen,r)
             if r.is_ghost:
                 key=('ghost',r.kart_id,int(round(math.degrees(r.heading)/6))*6%360)
                 if key not in self.kart_rotation_cache:
@@ -1932,7 +2403,14 @@ class WasteKartGame:
                           round(center[1]+math.sin(a)*19))
                     pygame.draw.circle(self.canvas,(255,224,86),star,4)
                     pygame.draw.circle(self.canvas,(255,255,235),star,2)
-            self.canvas.blit(img,img.get_rect(center=center))
+            # The kart blinks during the 1.5 seconds of tow immunity.
+            visible=not (self.canyon_hazards is not None and r.train_immunity_left>0
+                         and r.fall_phase is None and int(self.elapsed*16)%2==0)
+            if visible:
+                self.canvas.blit(img,img.get_rect(center=center))
+            if self.canyon_hazards is not None and (r.respawn_fx_left>0 or
+                    (r.train_immunity_left>0 and r.fall_count>0)):
+                self.canyon_hazards.draw_sparkles(self.canvas,self.world_to_screen,r)
             if r.is_ghost:continue
             dot=(center[0],center[1]-18)
             pygame.draw.circle(self.canvas,(20,31,52),dot,9)
@@ -1951,6 +2429,8 @@ class WasteKartGame:
         # Underneath karts and both bridge overlays. Only the ford can hit.
         if self.gorge_hazards is not None:
             self.gorge_hazards.draw(self.canvas,self.world_to_screen)
+        if self.canyon_hazards is not None:
+            self.canyon_hazards.draw(self.canvas,self.world_to_screen)
         if self.track and self.track.has_overpasses():
             self.display_racers(layer=0)
             self.draw_bridge_overlay()
@@ -2208,6 +2688,7 @@ class WasteKartGame:
         self.draw_lap_distance=0.0
         self.new_lap_timer()
         self.draft=[tuple(self.track.centerline[0])]
+        self.draw_warning=None
         self.draw_pointer=None
 
     def append_draft(self,xy):
@@ -2218,6 +2699,22 @@ class WasteKartGame:
             return
         previous=self.draft[-1]
         self.draft.append(xy)
+        if self.track.canyon_data:
+            # Sample the full pencil stroke, including fast iPad finger swipes.
+            # The intended northbound ramp gap is explicitly allowed.
+            for i in range(1,max(2,math.ceil(length(previous,xy)/6)+1)):
+                p=lerp(previous,xy,i/max(1,math.ceil(length(previous,xy)/6)))
+                if self.track.canyon_fall(p):
+                    jumping=(245<p[0]<298 and 245<p[1]<350 and
+                             xy[1]<previous[1] and
+                             any(self.track.canyon_mask('ramp',q)
+                                 for q in self.draft[-35:]))
+                    if not jumping:
+                        self.draw_warning='CANYON AHEAD! Use a bridge or the jump ramp.'
+                    elif self.draw_warning is None:
+                        self.draw_warning='RAMP JUMP: stay above 160 speed!'
+                elif not self.track.on_road(p) and self.draw_warning is None:
+                    self.draw_warning='OFF ROAD: your kart will slow down!'
         self.draw_lap_distance+=length(previous,xy)
         circumference=self.track.centerline_route.length
         if (self.draw_lap_distance>=circumference*.65 and
@@ -2239,6 +2736,7 @@ class WasteKartGame:
                 raw[-1]=tuple(self.track.centerline[0])
         self.drawn_laps.append(raw)
         self.draw_lap_distance=0.0
+        self.draw_warning=None
         if len(self.drawn_laps)<self.laps:
             # Keep the finger active across the start line for a truly
             # uninterrupted three-lap drawing; a lift is also allowed.
@@ -2268,6 +2766,8 @@ class WasteKartGame:
             self.cactus_hazards.reset()
         if self.gorge_hazards is not None:
             self.gorge_hazards.reset()
+        if self.canyon_hazards is not None:
+            self.canyon_hazards.reset()
         self.countdown=0.0
         self.elapsed=0.0
         self.paused=False
@@ -2276,6 +2776,9 @@ class WasteKartGame:
         self.racers=[Racer(i,self.kart_ids[i],self.routes[i],laps=self.laps)
                      for i in range(self.players)]
         self.bump_cooldowns={}
+        if self.canyon_hazards is not None:
+            for racer in self.racers:
+                racer.canyon_checkpoints=self.canyon_hazards.checkpoint_route(racer.route)
         # Respawn each box for each new race; all players share each box.
         for box in self.pickups:
             box.hidden_until=0.0
@@ -2291,6 +2794,9 @@ class WasteKartGame:
                 self.active_ghost.ghost_reaction=record.get('reaction')
                 self.active_ghost.ghost_powerups=list(record.get('powerup_uses',[]))
                 self.active_ghost.ghost_train_hits=list(record.get('hazard_hits',[]))
+                if self.canyon_hazards is not None:
+                    self.active_ghost.canyon_checkpoints=self.canyon_hazards.checkpoint_route(
+                        self.active_ghost.route)
         # Cached cropped route spans: only the current span is dynamically
         # drawn each frame, and traveled geometry is never displayed again.
         self.race_routes_layer=None
@@ -2336,10 +2842,10 @@ class WasteKartGame:
         if not self.interactions_enabled or self.players<2:
             return
         for i,a in enumerate(self.racers):
-            if a.finished or a.train_spin_left>0:
+            if a.finished or a.train_spin_left>0 or a.flight_left>0 or a.fall_phase:
                 continue
             for b in self.racers[i+1:]:
-                if b.finished or b.train_spin_left>0:
+                if b.finished or b.train_spin_left>0 or b.flight_left>0 or b.fall_phase:
                     continue
                 dx=b.pos[0]-a.pos[0]
                 dy=b.pos[1]-a.pos[1]
@@ -2516,6 +3022,7 @@ class WasteKartGame:
         elif name=='start_draw':self.begin_draw()
         elif name=='clear':
             self.draft=[self.track.centerline[0]]
+            self.draw_warning=None
             self.draw_lap_distance=0.0
             self.draw_pointer=None
         elif name=='draw_done':self.finish_draw()
@@ -2610,10 +3117,40 @@ class WasteKartGame:
                     self.cactus_hazards.update(dt)
                 if self.gorge_hazards is not None:
                     self.gorge_hazards.update(dt)
+                if self.canyon_hazards is not None:
+                    self.canyon_hazards.update(dt)
                 self.update_interactions(dt)
                 for racer in self.racers:
                     before=racer.pos
+                    before_distance=racer.distance
+                    was_flying=racer.flight_left>0
                     racer.update(dt,self.elapsed,self.track)
+                    if self.canyon_hazards is not None and not racer.finished and \
+                       not racer.fall_phase and not was_flying:
+                        # Ramp launch is strictly northbound and requires a
+                        # previous contact with the painted ramp's actual mask.
+                        if (self.track.canyon_mask('ramp',before) and
+                            not self.track.canyon_mask('ramp',racer.pos) and
+                            racer.pos[1]<before[1] and
+                            abs(angle_delta(racer.heading,-math.pi/2))<.54):
+                            dy=racer.pos[1]-before[1]
+                            t=clamp((self.canyon_hazards.jump_lip-before[1])/dy,
+                                    0,1) if abs(dy)>1e-5 else 1.0
+                            lip=lerp(before,racer.pos,t)
+                            launch_dist=before_distance+(racer.distance-before_distance)*t
+                            racer.start_flight(lip,launch_dist,racer.speed,racer.heading,
+                                               self.canyon_hazards.jump_time)
+                        elif self.track.canyon_fall(racer.pos):
+                            # Swept collision catches narrow side-canyons even
+                            # when the kart crosses the mask in a fast frame.
+                            racer.begin_fall(self.elapsed)
+                        else:
+                            for j in range(1,5):
+                                at=lerp(before,racer.pos,j/5)
+                                if self.track.canyon_fall(at):
+                                    racer.pos=at
+                                    racer.begin_fall(self.elapsed)
+                                    break
                     if (self.moving_train is not None and not racer.finished and
                             self.moving_train.hit_test(racer.pos)):
                         racer.hit_by_train(self.elapsed)
@@ -2625,9 +3162,31 @@ class WasteKartGame:
                         log=self.gorge_hazards.hit_test(before,racer.pos)
                         if log is not None and racer.hit_by_log(self.elapsed):
                             self.gorge_hazards.nudge_on_hit(log,racer.pos)
-                    self.try_collect_powerups(racer,before)
+                    if (self.canyon_hazards is not None and not racer.finished and
+                            not racer.fall_phase and not racer.flight_left and
+                            racer.train_immunity_left<=0):
+                        if self.canyon_hazards.hit_test(before,racer.pos):
+                            racer.hit_by_comet(self.elapsed)
+                    if not racer.fall_phase and not racer.flight_left:
+                        self.try_collect_powerups(racer,before)
                 if self.active_ghost is not None:
-                    self.active_ghost.update(dt,self.elapsed,self.track)
+                    ghost=self.active_ghost
+                    previous=ghost.pos
+                    old_distance=ghost.distance
+                    flying=ghost.flight_left>0
+                    ghost.update(dt,self.elapsed,self.track)
+                    if self.canyon_hazards is not None and not ghost.finished and \
+                       not ghost.fall_phase and not flying and \
+                       self.track.canyon_mask('ramp',previous) and \
+                       not self.track.canyon_mask('ramp',ghost.pos) and \
+                       ghost.pos[1]<previous[1] and \
+                       abs(angle_delta(ghost.heading,-math.pi/2))<.54:
+                        dy=ghost.pos[1]-previous[1]
+                        t=clamp((self.canyon_hazards.jump_lip-previous[1])/dy,
+                                0,1) if abs(dy)>1e-5 else 1.0
+                        ghost.start_flight(lerp(previous,ghost.pos,t),
+                            old_distance+(ghost.distance-old_distance)*t,
+                            ghost.speed,ghost.heading,self.canyon_hazards.jump_time)
                 if self.racers and all(r.finished for r in self.racers):
                     self.finish_race()
         elif self.state=='results':

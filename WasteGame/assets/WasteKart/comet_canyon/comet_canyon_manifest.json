@@ -1,0 +1,591 @@
+{
+  "canvas_px": [
+    960,
+    600
+  ],
+  "note": "All coordinates are pixels in the 960x600 track image (y down). The background shows only the permanent craters; comets, shadows, impacts and new craters are drawn at runtime.",
+  "routes": {
+    "file": "comet_canyon_routes.json",
+    "short": {
+      "id": "comet_route",
+      "over": "east bridge, then a ramp jump over the narrow neck of the canyon at x=270 (comets + craters on its approaches)",
+      "hazards": "comets + permanent craters",
+      "length_px": 1883,
+      "road_width_px": 86
+    },
+    "long": {
+      "id": "safe_route",
+      "around": "west bridge at x~100 (no jump), east bridge too; no comets, no craters",
+      "hazards": "none (no comets, no craters)",
+      "length_px": 2203,
+      "road_width_px": 86
+    },
+    "extra_length_of_safe_route_px": 320,
+    "fork": [
+      420.0,
+      508.7
+    ],
+    "merge": [
+      420.0,
+      105.5
+    ],
+    "lap_rule": "a lap may use either route; the drawn driving line decides. Both are valid for lap counting (fork -> merge)."
+  },
+  "masks": {
+    "fall_zone": "comet_canyon_fall_zone_mask.png",
+    "road": "comet_canyon_road_mask.png",
+    "canyon_incl_walls": "comet_canyon_canyon_mask.png",
+    "permanent_crater_slow": "comet_canyon_crater_slow_mask.png",
+    "comet_strike_zone": "comet_canyon_strike_zone_mask.png"
+  },
+  "surfaces": {
+    "road": 1.0,
+    "off_road": 0.55,
+    "crater_slow_factor": 0.55,
+    "canyon": "fall",
+    "note": "craters count as off-road: use the same surface factor as grass/sand; the canyon is NOT a slow surface, it makes karts fall"
+  },
+  "permanent_craters": [
+    {
+      "x": 282,
+      "y": 214,
+      "visual_radius_px": 13,
+      "slow_radius_px": 14.6
+    },
+    {
+      "x": 252,
+      "y": 188,
+      "visual_radius_px": 11,
+      "slow_radius_px": 12.3
+    },
+    {
+      "x": 273,
+      "y": 158,
+      "visual_radius_px": 12,
+      "slow_radius_px": 13.4
+    },
+    {
+      "x": 256,
+      "y": 436,
+      "visual_radius_px": 12,
+      "slow_radius_px": 13.4
+    },
+    {
+      "x": 293,
+      "y": 448,
+      "visual_radius_px": 10,
+      "slow_radius_px": 11.2
+    }
+  ],
+  "bridges": {
+    "east": {
+      "where": "east straight of the track, used by BOTH routes",
+      "deck_bbox_px": [
+        829.8,
+        204.5,
+        920.2,
+        388.0
+      ]
+    },
+    "west": {
+      "where": "west straight of the track, used only by the long safe route",
+      "deck_bbox_px": [
+        55.5,
+        224.5,
+        150.2,
+        389.5
+      ]
+    },
+    "overlay": "comet_canyon_bridge_overlay.png (both decks)",
+    "note": "safe surface: karts on the deck cannot fall; comets never land on the deck; draw karts on the bridge after the overlay if you want them above the parapets"
+  },
+  "jump": {
+    "where": "narrow neck of the canyon at x=270, short route only (the chord between the south and north straights)",
+    "direction": "north (heading up the screen)",
+    "road_x": 270.0,
+    "launch_lip_y": 345.2,
+    "landing_lip_y": 249.5,
+    "gap_px": 95.8,
+    "ramp_mask": "comet_canyon_jump_ramp_mask.png",
+    "landing_mask": "comet_canyon_jump_landing_mask.png",
+    "flight_time_s": 0.6,
+    "min_speed_px_s_to_clear": 159.6,
+    "rule": "when a kart's centre leaves the ramp mask at speed v it flies for flight_time_s along its heading and lands v*flight_time_s ahead (heading is locked while airborne); if the landing point is inside fall_zone it falls, otherwise it lands on the road/landing pad and drives on",
+    "air_visuals": {
+      "kart_scale": "1 + 0.35*sin(pi*t/T)",
+      "shadow": "fall/kart_shadow.png stays on the ground (canyon floor) and does not scale",
+      "can_be_hit_by_comets": false
+    },
+    "tip": "slow karts land short and drop into the canyon, so reaching the ramp at speed is the price of the short route"
+  },
+  "fall": {
+    "fall_zone_mask": "comet_canyon_fall_zone_mask.png",
+    "applies_to": "the whole canyon (white) except the bridge deck and while a kart is airborne from the ramp",
+    "check": "kart centre inside the mask and not airborne and not on the bridge deck",
+    "animation": {
+      "duration_s": 0.9,
+      "scale": [
+        1.0,
+        0.15
+      ],
+      "rotation_deg": 540,
+      "alpha": [
+        1.0,
+        0.5
+      ],
+      "drop_shadow": "fall/kart_shadow.png fades out",
+      "at_end": "fall/dust_puff_0..4 (0.08 s per frame) at the fall position"
+    },
+    "recovery": {
+      "wait_s": 0.6,
+      "rescue_cloud": [
+        "fall/rescue_cloud_a.png",
+        "fall/rescue_cloud_b.png"
+      ],
+      "cloud_flies_in_s": 0.8,
+      "time_penalty_s": 1.2,
+      "respawn_speed": 0.0,
+      "invulnerable_s": 1.5,
+      "blink_hz": 8,
+      "respawn_effect": [
+        "fall/respawn_sparkle_0.png",
+        "fall/respawn_sparkle_1.png",
+        "fall/respawn_sparkle_2.png",
+        "fall/respawn_sparkle_3.png"
+      ]
+    },
+    "respawn_rule": "place the kart at the last respawn point it passed on its own route (short: S.., long: L..), facing along the heading; a respawn point that lies before a fork/merge is valid for both routes",
+    "respawn_points": {
+      "short_route": [
+        {
+          "id": "S00",
+          "x": 530.3,
+          "y": 102.6,
+          "heading_deg_clockwise_from_east": -1.7
+        },
+        {
+          "id": "S01",
+          "x": 640.2,
+          "y": 99.8,
+          "heading_deg_clockwise_from_east": -3.6
+        },
+        {
+          "id": "S02",
+          "x": 750.1,
+          "y": 95.8,
+          "heading_deg_clockwise_from_east": 2.5
+        },
+        {
+          "id": "S03",
+          "x": 851.2,
+          "y": 128.9,
+          "heading_deg_clockwise_from_east": 48.4
+        },
+        {
+          "id": "S04",
+          "x": 869.7,
+          "y": 452.7,
+          "heading_deg_clockwise_from_east": 112.0
+        },
+        {
+          "id": "S05",
+          "x": 782.8,
+          "y": 509.2,
+          "heading_deg_clockwise_from_east": 177.4
+        },
+        {
+          "id": "S06",
+          "x": 672.8,
+          "y": 508.7,
+          "heading_deg_clockwise_from_east": -178.5
+        },
+        {
+          "id": "S07",
+          "x": 562.9,
+          "y": 511.7,
+          "heading_deg_clockwise_from_east": 178.8
+        },
+        {
+          "id": "S08",
+          "x": 452.9,
+          "y": 508.9,
+          "heading_deg_clockwise_from_east": -178.7
+        },
+        {
+          "id": "S09",
+          "x": 342.9,
+          "y": 506.3,
+          "heading_deg_clockwise_from_east": -177.1
+        },
+        {
+          "id": "S10",
+          "x": 270.2,
+          "y": 436.8,
+          "heading_deg_clockwise_from_east": -94.2
+        },
+        {
+          "id": "S11",
+          "x": 270.0,
+          "y": 216.4,
+          "heading_deg_clockwise_from_east": -90.0
+        },
+        {
+          "id": "S12",
+          "x": 301.7,
+          "y": 116.6,
+          "heading_deg_clockwise_from_east": -35.3
+        },
+        {
+          "id": "S13",
+          "x": 409.0,
+          "y": 105.1,
+          "heading_deg_clockwise_from_east": 2.1
+        }
+      ],
+      "long_route": [
+        {
+          "id": "L00",
+          "x": 548.3,
+          "y": 102.2,
+          "heading_deg_clockwise_from_east": -1.0
+        },
+        {
+          "id": "L01",
+          "x": 658.2,
+          "y": 98.5,
+          "heading_deg_clockwise_from_east": -4.3
+        },
+        {
+          "id": "L02",
+          "x": 768.1,
+          "y": 96.8,
+          "heading_deg_clockwise_from_east": 3.5
+        },
+        {
+          "id": "L03",
+          "x": 861.7,
+          "y": 143.5,
+          "heading_deg_clockwise_from_east": 60.2
+        },
+        {
+          "id": "L04",
+          "x": 861.2,
+          "y": 468.6,
+          "heading_deg_clockwise_from_east": 123.8
+        },
+        {
+          "id": "L05",
+          "x": 764.8,
+          "y": 509.7,
+          "heading_deg_clockwise_from_east": 178.7
+        },
+        {
+          "id": "L06",
+          "x": 654.8,
+          "y": 508.5,
+          "heading_deg_clockwise_from_east": -180.0
+        },
+        {
+          "id": "L07",
+          "x": 544.9,
+          "y": 511.8,
+          "heading_deg_clockwise_from_east": -179.9
+        },
+        {
+          "id": "L08",
+          "x": 434.9,
+          "y": 508.7,
+          "heading_deg_clockwise_from_east": -179.8
+        },
+        {
+          "id": "L09",
+          "x": 324.9,
+          "y": 506.9,
+          "heading_deg_clockwise_from_east": -176.7
+        },
+        {
+          "id": "L10",
+          "x": 215.0,
+          "y": 504.6,
+          "heading_deg_clockwise_from_east": 177.5
+        },
+        {
+          "id": "L11",
+          "x": 118.5,
+          "y": 467.3,
+          "heading_deg_clockwise_from_east": -121.6
+        },
+        {
+          "id": "L12",
+          "x": 120.4,
+          "y": 142.2,
+          "heading_deg_clockwise_from_east": -60.8
+        },
+        {
+          "id": "L13",
+          "x": 215.5,
+          "y": 101.1,
+          "heading_deg_clockwise_from_east": -0.0
+        },
+        {
+          "id": "L14",
+          "x": 325.5,
+          "y": 99.5,
+          "heading_deg_clockwise_from_east": 1.5
+        },
+        {
+          "id": "L15",
+          "x": 435.3,
+          "y": 106.1,
+          "heading_deg_clockwise_from_east": 1.4
+        }
+      ]
+    },
+    "player_line_note": "the player's drawn line is re-started from the respawn point (the first drawn segment after it is used); no line is drawn into the canyon in the planning phase, the editor should warn if a line leaves the road"
+  },
+  "comet_hazard": {
+    "strike_zones_px": [
+      {
+        "id": "south_approach",
+        "rect": [
+          236,
+          379,
+          304,
+          445
+        ]
+      },
+      {
+        "id": "north_approach",
+        "rect": [
+          236,
+          118,
+          304,
+          225
+        ]
+      }
+    ],
+    "strike_zone_mask": "comet_canyon_strike_zone_mask.png (impact points must be white)",
+    "types": {
+      "small": {
+        "head_radius_px": 6,
+        "impact_radius_px": 14,
+        "sprite": "comets/comet_small.png",
+        "sprite_fall_rotated": "comets/comet_small_fall.png",
+        "hires": "comets/hires_4x/comet_small@4x.png",
+        "shadow": "comets/shadow/shadow_small.png",
+        "impact_frames": [
+          "comets/impact/impact_small_0.png",
+          "comets/impact/impact_small_1.png",
+          "comets/impact/impact_small_2.png",
+          "comets/impact/impact_small_3.png",
+          "comets/impact/impact_small_4.png",
+          "comets/impact/impact_small_5.png"
+        ],
+        "crater_fresh": "comets/craters/crater_fresh_small.png",
+        "crater_scorched": "comets/craters/crater_scorched_small.png",
+        "hitbox_capsule": {
+          "type": "capsule",
+          "axis_start_px": [
+            28.8,
+            19.0
+          ],
+          "axis_end_px": [
+            39.6,
+            19.0
+          ],
+          "radius_px": 6.3,
+          "coordinates": "sprite pixels of comets/comet_<type>.png (east-facing); rotate with the sprite for the _fall version"
+        },
+        "impact_hit_circle_radius_px": 14,
+        "anchor": "all sprites are centred on their canvas; the shadow, impact frames and craters are centred on the impact point"
+      },
+      "medium": {
+        "head_radius_px": 9,
+        "impact_radius_px": 20,
+        "sprite": "comets/comet_medium.png",
+        "sprite_fall_rotated": "comets/comet_medium_fall.png",
+        "hires": "comets/hires_4x/comet_medium@4x.png",
+        "shadow": "comets/shadow/shadow_medium.png",
+        "impact_frames": [
+          "comets/impact/impact_medium_0.png",
+          "comets/impact/impact_medium_1.png",
+          "comets/impact/impact_medium_2.png",
+          "comets/impact/impact_medium_3.png",
+          "comets/impact/impact_medium_4.png",
+          "comets/impact/impact_medium_5.png"
+        ],
+        "crater_fresh": "comets/craters/crater_fresh_medium.png",
+        "crater_scorched": "comets/craters/crater_scorched_medium.png",
+        "hitbox_capsule": {
+          "type": "capsule",
+          "axis_start_px": [
+            40.7,
+            26.5
+          ],
+          "axis_end_px": [
+            56.9,
+            26.5
+          ],
+          "radius_px": 9.5,
+          "coordinates": "sprite pixels of comets/comet_<type>.png (east-facing); rotate with the sprite for the _fall version"
+        },
+        "impact_hit_circle_radius_px": 20,
+        "anchor": "all sprites are centred on their canvas; the shadow, impact frames and craters are centred on the impact point"
+      },
+      "large": {
+        "head_radius_px": 13,
+        "impact_radius_px": 28,
+        "sprite": "comets/comet_large.png",
+        "sprite_fall_rotated": "comets/comet_large_fall.png",
+        "hires": "comets/hires_4x/comet_large@4x.png",
+        "shadow": "comets/shadow/shadow_large.png",
+        "impact_frames": [
+          "comets/impact/impact_large_0.png",
+          "comets/impact/impact_large_1.png",
+          "comets/impact/impact_large_2.png",
+          "comets/impact/impact_large_3.png",
+          "comets/impact/impact_large_4.png",
+          "comets/impact/impact_large_5.png"
+        ],
+        "crater_fresh": "comets/craters/crater_fresh_large.png",
+        "crater_scorched": "comets/craters/crater_scorched_large.png",
+        "hitbox_capsule": {
+          "type": "capsule",
+          "axis_start_px": [
+            55.9,
+            36.5
+          ],
+          "axis_end_px": [
+            79.3,
+            36.5
+          ],
+          "radius_px": 13.7,
+          "coordinates": "sprite pixels of comets/comet_<type>.png (east-facing); rotate with the sprite for the _fall version"
+        },
+        "impact_hit_circle_radius_px": 28,
+        "anchor": "all sprites are centred on their canvas; the shadow, impact frames and craters are centred on the impact point"
+      }
+    },
+    "timeline_s": {
+      "warning_shadow_grow": 1.6,
+      "fall_from_offset_px": [
+        115,
+        -199
+      ],
+      "fall_direction_unit": [
+        -0.5,
+        0.866
+      ],
+      "fall_angle_deg_clockwise_from_east": 120.0,
+      "impact_flash_frames": 6,
+      "impact_frame_time_s": 0.06,
+      "smoke_frames": 4,
+      "smoke_duration_s": 1.4,
+      "fresh_crater_glow_s": 6.0,
+      "then": "swap to crater_scorched (permanent until the race ends or until max_active_craters is exceeded: oldest fades out)",
+      "max_active_craters": 6
+    },
+    "shadow": {
+      "scale_from": 0.25,
+      "scale_to": 1.0,
+      "alpha_from": 0.4,
+      "alpha_to": 1.0,
+      "easing": "ease-in",
+      "slow_factor_for_karts_inside": 0.7,
+      "note": "the shadow already slows karts a little (tune slow_factor_for_karts_inside); it is the player's warning"
+    },
+    "on_hit": {
+      "effect": "kart spins",
+      "spin_turns": 2,
+      "spin_time_s": 0.9,
+      "speed_multiplier_during_spin": 0.4,
+      "after": "control returns, 0.6 s immunity",
+      "hit_when": "kart centre is inside the falling comet's capsule during the last 0.15 s of the fall, or inside the impact circle at the moment of impact"
+    },
+    "spacing": {
+      "min_gap_s": 2.0,
+      "max_gap_s": 3.6,
+      "max_simultaneous": 2,
+      "never_same_spot_within_s": 12,
+      "alternate_zones": true
+    },
+    "sample_schedule": {
+      "cycle_length_s": 28.0,
+      "loops": true,
+      "events": [
+        {
+          "t_impact_s": 1.5,
+          "x": 268.3,
+          "y": 422.4,
+          "type": "small"
+        },
+        {
+          "t_impact_s": 4.57,
+          "x": 245.7,
+          "y": 119.2,
+          "type": "medium"
+        },
+        {
+          "t_impact_s": 7.17,
+          "x": 283.4,
+          "y": 382.4,
+          "type": "small"
+        },
+        {
+          "t_impact_s": 9.44,
+          "x": 291.5,
+          "y": 160.9,
+          "type": "large"
+        },
+        {
+          "t_impact_s": 12.11,
+          "x": 302.9,
+          "y": 444.9,
+          "type": "medium"
+        },
+        {
+          "t_impact_s": 14.92,
+          "x": 289.5,
+          "y": 207.0,
+          "type": "small"
+        },
+        {
+          "t_impact_s": 17.94,
+          "x": 301.7,
+          "y": 414.2,
+          "type": "medium"
+        },
+        {
+          "t_impact_s": 20.22,
+          "x": 255.2,
+          "y": 178.9,
+          "type": "small"
+        },
+        {
+          "t_impact_s": 23.34,
+          "x": 257.4,
+          "y": 434.9,
+          "type": "large"
+        }
+      ]
+    }
+  },
+  "draw_order": [
+    "comet_canyon_track.png",
+    "permanent craters are baked in",
+    "crater_fresh / crater_scorched decals",
+    "shadows",
+    "falling comets",
+    "impact frames + smoke",
+    "karts (karts on the bridge after) ",
+    "comet_canyon_bridge_overlay.png only if karts must pass under it (not needed here: comets and karts are above the canyon)"
+  ],
+  "start_line": {
+    "at": [
+      651.8,
+      508.5
+    ],
+    "heading": "west (left), on the shared south straight before the fork"
+  },
+  "lap_flow": "clockwise: north straight east -> east bridge (south) -> south straight west -> fork at x=270 -> [short: jump north over the canyon | long: continue west, west bridge (north), east] -> merge on the north straight"
+}
