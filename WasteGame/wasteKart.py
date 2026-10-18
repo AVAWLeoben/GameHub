@@ -1,10 +1,10 @@
-"""WasteKart 2.3.0 - Phantom Boardwalk / Star Cup 1/4 ghost hazards.
+"""WasteKart 2.4.0 - Glow Garden and Starlight Spiral, Star Cup 2/4 and 3/4.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
 
 Original four-cup, sixteen-course art resides in assets/WasteKart.
-Races use 16 original tracks. Interactions add gentle drafting and bumping.
+Races retain all original courses. Stars 1-3 have custom sprite hazards.
 """
 import asyncio
 import bisect
@@ -459,6 +459,24 @@ class Track:
                 if key in ('fall_zone_mask','ground_slow_mask','rail_wall_mask'):
                     self.phantom_masks[key]=pygame.image.load(
                         os.path.join(base,*relative.split('/'))).convert()
+        # Star Cup 2/4: illuminated garden, animated fairies and tunnel roof.
+        glow_rel=data.get('glow_manifest')
+        self.glow_manifest_path=(os.path.join(ASSET_ROOT,*glow_rel.split('/'))
+                                  if glow_rel else None)
+        self.glow_data=None
+        self.glow_hazards=None
+        if self.glow_manifest_path:
+            with open(self.glow_manifest_path,encoding='utf8') as source:
+                self.glow_data=json.load(source)
+        # Star Cup 3/4: at-grade star crossing, ribbon-tailed cats.
+        spiral_rel=data.get('spiral_manifest')
+        self.spiral_manifest_path=(os.path.join(ASSET_ROOT,*spiral_rel.split('/'))
+                                    if spiral_rel else None)
+        self.spiral_data=None
+        self.spiral_hazards=None
+        if self.spiral_manifest_path:
+            with open(self.spiral_manifest_path,encoding='utf8') as source:
+                self.spiral_data=json.load(source)
         self.pickup_positions=self.find_pickup_positions()
 
     def on_road(self,point):
@@ -1492,6 +1510,401 @@ class PhantomBoardwalk:
         canvas.set_clip(clip)
 
 
+class GlowGardenFairies:
+    """Eleven authored fairy hazards: six glimmers, three petals, two moths.
+
+    A fairy animates on a deterministic home path, with a separately integrated
+    curiosity offset. All movement and hit testing uses 960x600 world pixels.
+    """
+    KART_RADIUS=10.0
+    SPIN_SECONDS=.90
+    IMMUNITY_AFTER_SPIN=.60
+
+    def __init__(self,track):
+        self.track=track
+        self.manifest=track.glow_data
+        self.base=os.path.dirname(track.glow_manifest_path)
+        self.sx=TRACK_RECT.width/MAP_W
+        self.sy=TRACK_RECT.height/MAP_H
+        self.curiosity=self.manifest['fairy_curiosity']
+        self.sense=float(self.curiosity['sense_radius_px'])
+        self.drift_speed=float(self.curiosity['drift_speed_px_s'])
+        self.leash=float(self.curiosity['max_leash_px'])
+        self.art={}
+        for kind,spec in self.manifest['fairy_sprites'].items():
+            self.art[kind]={
+                'idle':[self.load(s) for s in spec['idle']],
+                'poof':[self.load(s) for s in spec['poof']],
+                'glow':self.load(spec['glow']),
+                'shadow':self.load(spec['shadow']),
+                'radius':float(spec['hitbox_radius_px']),
+                'fps':float(spec.get('anim_hz',6)),
+                'bob':float(spec.get('bob_px',1))}
+        self.dust=[self.load(s) for s in self.manifest.get('dust_trail',[])]
+        self.actors=[]
+        for record in self.manifest['fairies']:
+            a=dict(record)
+            if a['motion']=='loop_forward':
+                a['route']=Route([tuple(p) for p in a['loop_points']]+
+                                 [tuple(a['loop_points'][0])])
+            a['offset']=(0.0,0.0)
+            a['pos']=(0.0,0.0)
+            a['previous']=(0.0,0.0)
+            a['poof_at']=-100.0
+            a['dust_history']=[]
+            self.actors.append(a)
+        self.reset()
+
+    def load(self,relative):
+        im=pygame.image.load(os.path.join(self.base,*relative.split('/'))).convert_alpha()
+        return pygame.transform.smoothscale(im,(
+            max(1,round(im.get_width()*self.sx)),
+            max(1,round(im.get_height()*self.sy))))
+
+    def reset(self):
+        self.time=0.0
+        self.dust_clock=0.0
+        for a in self.actors:
+            a['offset']=(0.0,0.0)
+            a['poof_at']=-100.0
+            a['dust_history']=[]
+            a['pos']=self.home(a,0.0)
+            a['previous']=a['pos']
+
+    def home(self,a,t):
+        motion=a['motion']
+        if motion=='lissajous':
+            phase=math.tau*float(a['freq_hz'])*t+float(a['phase'])
+            along=float(a['along_amp_px'])*math.sin(phase)
+            lateral=float(a['lateral_amp_px'])*math.sin(2*phase+.55)
+            return (a['center'][0]+a['tangent'][0]*along+a['normal'][0]*lateral,
+                    a['center'][1]+a['tangent'][1]*along+a['normal'][1]*lateral)
+        if motion=='orbit':
+            angle=math.tau*t/max(.1,float(a['period_s']))*int(a['direction'])+float(a['phase'])
+            return (a['center'][0]+float(a['radius_px'])*math.cos(angle),
+                    a['center'][1]+float(a['radius_px'])*math.sin(angle))
+        if motion=='loop_forward':
+            route=a['route']
+            d=t*float(a['speed_px_s'])%max(.1,route.length)
+            return route.sample(d)[0]
+        return tuple(a.get('center',(0,0)))
+
+    def update(self,dt,players=()):
+        self.time+=dt
+        self.dust_clock+=dt
+        emit=self.dust_clock>=.08
+        if emit:self.dust_clock%=.08
+        for a in self.actors:
+            a['previous']=a['pos']
+            home=self.home(a,self.time)
+            ox,oy=a['offset']
+            goal=(0.0,0.0)
+            if a.get('curious',False):
+                closest=None
+                for r in players:
+                    if r.finished or r.fall_phase or r.flight_left>0:continue
+                    delta=(r.pos[0]-home[0],r.pos[1]-home[1])
+                    dist=math.hypot(*delta)
+                    if dist<self.sense and (closest is None or dist<closest[0]):
+                        closest=(dist,delta)
+                if closest is not None and closest[0]>1e-4:
+                    dist,delta=closest
+                    reach=min(self.leash,max(0.0,dist-8.0))
+                    goal=(delta[0]*reach/dist,delta[1]*reach/dist)
+            diff=(goal[0]-ox,goal[1]-oy)
+            dist=math.hypot(*diff)
+            # Approach curiosity offset at bounded world speed; return smoothly.
+            step=min(dist,self.drift_speed*dt)
+            if dist>1e-5:
+                ox+=diff[0]*step/dist
+                oy+=diff[1]*step/dist
+            leash=math.hypot(ox,oy)
+            if leash>self.leash:
+                ox*=self.leash/leash;oy*=self.leash/leash
+            a['offset']=(ox,oy)
+            a['pos']=(home[0]+ox,home[1]+oy)
+            a['dust_history']=[(p,t) for p,t in a['dust_history'] if self.time-t<.30]
+            if emit and self.time-a['poof_at']>=1.2:
+                a['dust_history'].append((a['pos'],self.time))
+
+    def hit_test(self,previous,position):
+        for a in self.actors:
+            if self.time-a['poof_at']<1.2:continue
+            rel0=(previous[0]-a['previous'][0],previous[1]-a['previous'][1])
+            rel1=(position[0]-a['pos'][0],position[1]-a['pos'][1])
+            if segment_near_point(rel0,rel1,(0,0))<=self.KART_RADIUS+self.art[a['type']]['radius']:
+                return a
+        return None
+
+    def on_hit(self,a):
+        a['poof_at']=self.time
+        a['offset']=(0.0,0.0)
+        a['dust_history']=[]
+
+    def draw(self,canvas,to_screen):
+        clip=canvas.get_clip();canvas.set_clip(TRACK_RECT)
+        if self.dust:
+            for a in self.actors:
+                for pos,born in a['dust_history']:
+                    age=self.time-born
+                    if age>=.3:continue
+                    img=self.dust[min(len(self.dust)-1,int(age/.1))]
+                    xy=to_screen(pos)
+                    canvas.blit(img,img.get_rect(center=(round(xy[0]),round(xy[1]))))
+        for i,a in enumerate(self.actors):
+            xy=to_screen(a['pos']);at=(round(xy[0]),round(xy[1]))
+            art=self.art[a['type']]
+            age=self.time-a['poof_at']
+            if 0<=age<1.2:
+                if age<.28:
+                    img=art['poof'][min(3,int(age/.07))]
+                    canvas.blit(img,img.get_rect(center=at))
+                continue
+            frame=int(self.time*art['fps']+i*.63)%len(art['idle'])
+            bob=round(math.sin(self.time*5+i)*art['bob']*self.sy)
+            p=(at[0],at[1]+bob)
+            shadow=art['shadow']
+            canvas.blit(shadow,shadow.get_rect(center=(p[0],p[1]+7)))
+            for name in ('glow',):
+                img=art[name]
+                canvas.blit(img,img.get_rect(center=p))
+            img=art['idle'][frame]
+            canvas.blit(img,img.get_rect(center=p))
+        canvas.set_clip(clip)
+
+
+class StarlightSpiralCats:
+    """Authored kitten rosettes, telegraphed dashers and ribbon-tailed giants."""
+    KART_RADIUS=10.0
+    SPIN_SECONDS=.90
+    IMMUNITY_AFTER_SPIN=.60
+
+    def __init__(self,track):
+        self.track=track
+        self.manifest=track.spiral_data
+        self.base=os.path.dirname(track.spiral_manifest_path)
+        self.sx=TRACK_RECT.width/MAP_W
+        self.sy=TRACK_RECT.height/MAP_H
+        self.art={}
+        for kind,spec in self.manifest['cat_sprites'].items():
+            self.art[kind]={
+                'idle':[self.load(s) for s in spec['idle']],
+                'poof':[self.load(s) for s in spec['poof']],
+                'glow':self.load(spec['glow']),
+                'shadow':self.load(spec['shadow']),
+                'radius':float(spec['hitbox_radius_px']),
+                'fps':float(spec.get('anim_hz',5)),
+                'trail_height':float(spec['trail_height_px'])}
+        self.swirl=[self.load(s) for s in self.manifest['fx']['swirl']]
+        self.sparks=[self.load(s) for s in self.manifest['fx']['spark']]
+        self.warning_img=self.load(self.manifest['fx']['warning_tile'])
+        self.warning_rotated={}  # One cached strip orientation per authored lane.
+        # The 16x18 rainbow segments are loaded and scaled per cat type once.
+        self.tiles={}
+        for kind,art in self.art.items():
+            h=max(3,round(art['trail_height']*self.sy))
+            self.tiles[kind]=[self.load(s,(max(4,round(16*self.sx)),h))
+                              for s in self.manifest['trail']['tiles']]
+        self.tail_end=self.load(self.manifest['trail']['end'])
+        self.trail_rotation_cache={}  # (kind, wave, 12-degree heading), lazy
+        self.actors=[]
+        for a in self.manifest['cats']:
+            actor=dict(a)
+            if a['motion']=='loop_weave':
+                pts=[tuple(p) for p in a['loop_points']]
+                actor['route']=Route(pts+[pts[0]])
+            actor['pos']=(0.0,0.0)
+            actor['previous']=(0.0,0.0)
+            actor['heading']=0.0
+            actor['poof_at']=-100.0
+            actor['trail']=[]
+            self.actors.append(actor)
+        self.reset()
+
+    def load(self,relative,override_size=None):
+        im=pygame.image.load(os.path.join(self.base,*relative.split('/'))).convert_alpha()
+        size=(max(1,round(im.get_width()*self.sx)),max(1,round(im.get_height()*self.sy)))
+        return pygame.transform.smoothscale(im,override_size or size)
+
+    def reset(self):
+        self.time=0.0
+        for a in self.actors:
+            a['poof_at']=-100.0
+            a['trail']=[]
+            p,heading,visible=self.position(a,0.0)
+            a['pos']=p
+            a['previous']=p
+            a['heading']=heading
+            a['visible']=visible
+
+    def dash_phase(self,a,t):
+        return ((t+float(a.get('phase_s',0)))%max(.1,float(a['cycle_s'])))
+
+    def position(self,a,t):
+        motion=a['motion']
+        if motion=='spiral_orbit':
+            u=((t/float(a['cycle_s']))+float(a['phase']))%1.0
+            r=float(a['r_min_px'])+(float(a['r_max_px'])-float(a['r_min_px']))*(.5-.5*math.cos(math.tau*u))
+            angle=math.tau*float(a['turns_per_cycle'])*u
+            xy=(a['center'][0]+r*math.cos(angle),a['center'][1]+r*math.sin(angle))
+            # Analytic tangent of the rosette determines readable orientation.
+            du=math.tau/max(.1,float(a['cycle_s']))
+            dr=.5*(float(a['r_max_px'])-float(a['r_min_px']))*math.tau*math.sin(math.tau*u)/max(.1,float(a['cycle_s']))
+            da=math.tau*float(a['turns_per_cycle'])/max(.1,float(a['cycle_s']))
+            dx=dr*math.cos(angle)-r*math.sin(angle)*da
+            dy=dr*math.sin(angle)+r*math.cos(angle)*da
+            return xy,math.atan2(dy,dx),True
+        if motion=='strike':
+            phase=self.dash_phase(a,t)
+            start=float(a['warning_s']);duration=float(a['dash_s'])
+            if start<=phase<start+duration:
+                u=(phase-start)/duration
+                xy=lerp(a['a'],a['b'],u)
+                return xy,math.atan2(a['b'][1]-a['a'][1],a['b'][0]-a['a'][0]),True
+            return tuple(a['a']),math.atan2(a['b'][1]-a['a'][1],a['b'][0]-a['a'][0]),False
+        if motion=='loop_weave':
+            route=a['route']
+            # Supplied loop_points already encode forward vs counter-lap.
+            # In particular G1's tangent is opposite the course's tangent;
+            # reversing it here would accidentally turn G1 into a chaser.
+            travelled=(t*float(a['speed_px_s']))%max(.1,route.length)
+            p,heading,_=route.sample(travelled)
+            angle=math.tau*float(a['pirouette_hz'])*t
+            radius=float(a['pirouette_radius_px'])
+            return (p[0]+radius*math.cos(angle),p[1]+radius*math.sin(angle)),heading,True
+        return (0.0,0.0),0.0,False
+
+    def update(self,dt,players=()):
+        self.time+=dt
+        for a in self.actors:
+            a['previous']=a['pos']
+            was=a.get('visible',False)
+            a['pos'],a['heading'],a['visible']=self.position(a,self.time)
+            if self.time-a['poof_at']<1.2 or not a['visible']:
+                a['trail']=[]
+                continue
+            # Dash only exists for its 0.6-second active interval; don't stitch
+            # a ribbon across a hidden/teleported phase boundary.
+            if not was or not a['trail'] or length(a['trail'][-1],a['pos'])>32:
+                a['trail']=[a['pos']]
+            elif length(a['trail'][-1],a['pos'])>=4.0:
+                a['trail'].append(a['pos'])
+            cap=float(a.get('trail_length_px',105 if a['type']=='giant' else 55))
+            # Bound history for Pygbag and trim by geometric distance.
+            while len(a['trail'])>2 and sum(length(x,y) for x,y in zip(a['trail'],a['trail'][1:]))>cap:
+                a['trail'].pop(0)
+            if len(a['trail'])>45:a['trail']=a['trail'][-45:]
+
+    def hit_test(self,previous,position):
+        for a in self.actors:
+            if not a['visible'] or self.time-a['poof_at']<1.2:continue
+            # A dasher is dangerous ONLY during its strike, never warning/hidden.
+            if a['motion']=='strike':
+                phase=self.dash_phase(a,self.time)
+                if not (float(a['warning_s'])<=phase<float(a['warning_s'])+float(a['dash_s'])):
+                    continue
+            rel0=(previous[0]-a['previous'][0],previous[1]-a['previous'][1])
+            rel1=(position[0]-a['pos'][0],position[1]-a['pos'][1])
+            if segment_near_point(rel0,rel1,(0,0))<=self.KART_RADIUS+self.art[a['type']]['radius']:
+                return a
+        return None
+
+    def on_hit(self,a):
+        a['poof_at']=self.time
+        a['trail']=[]
+
+    @staticmethod
+    def blit_center(canvas,img,xy):
+        canvas.blit(img,img.get_rect(center=(round(xy[0]),round(xy[1]))))
+
+    def draw_underlay(self,canvas,to_screen):
+        """Warning strips and harmless rainbow ribbons go under the karts."""
+        clip=canvas.get_clip();canvas.set_clip(TRACK_RECT)
+        for a in self.actors:
+            if a['motion']=='strike' and self.dash_phase(a,self.time)<float(a['warning_s']):
+                from_xy,to_xy=to_screen(a['a']),to_screen(a['b'])
+                progress=self.dash_phase(a,self.time)/max(.01,float(a['warning_s']))
+                warning_color=(248,116,228) if int(self.time*7)%2 else (103,230,244)
+                pygame.draw.line(canvas,warning_color,from_xy,to_xy,max(4,round(7*self.sx)))
+                if a['id'] not in self.warning_rotated:
+                    heading=math.degrees(math.atan2(to_xy[1]-from_xy[1],
+                                                    to_xy[0]-from_xy[0]))
+                    self.warning_rotated[a['id']]=pygame.transform.rotate(
+                        self.warning_img,90-heading)
+                tile=self.warning_rotated[a['id']]
+                segments=max(1,int(length(from_xy,to_xy)/24))
+                for n in range(segments+1):
+                    q=lerp(from_xy,to_xy,n/segments)
+                    self.blit_center(canvas,tile,q)
+            pts=a['trail']
+            if len(pts)<2 or not a['visible']:continue
+            for i in range(1,len(pts)):
+                aa=to_screen(pts[i-1]);bb=to_screen(pts[i])
+                dx,dy=bb[0]-aa[0],bb[1]-aa[1]
+                dist=math.hypot(dx,dy)
+                if dist<.2:continue
+                normal=(-dy/dist,dx/dist)
+                h=self.art[a['type']]['trail_height']*self.sy
+                # Six translucent rainbow bands, along the actual recent path.
+                for k,color in enumerate(((255,104,140),(255,188,106),(255,245,136),
+                                           (124,245,159),(117,211,255),(198,140,255))):
+                    shift=(k-2.5)*h/6.0
+                    start=(aa[0]+normal[0]*shift,aa[1]+normal[1]*shift)
+                    end=(bb[0]+normal[0]*shift,bb[1]+normal[1]*shift)
+                    pygame.draw.line(canvas,color,start,end,max(1,round(h/6)))
+                # Use supplied rainbow-tile artwork to accent trailing edges.
+                if i%2==0:
+                    image=self.tiles[a['type']][int(self.time*8+i)%2]
+                    angle=-math.degrees(math.atan2(dy,dx))
+                    quant=int(round(angle/12.0))*12
+                    wave=int(self.time*8+i)%2
+                    key=(a['type'],wave,quant)
+                    rotated=self.trail_rotation_cache.get(key)
+                    if rotated is None:
+                        rotated=pygame.transform.rotate(self.tiles[a['type']][wave],quant)
+                        self.trail_rotation_cache[key]=rotated
+                    self.blit_center(canvas,rotated,aa)
+            self.blit_center(canvas,self.tail_end,to_screen(pts[0]))
+        canvas.set_clip(clip)
+
+    def draw(self,canvas,to_screen):
+        clip=canvas.get_clip();canvas.set_clip(TRACK_RECT)
+        for i,a in enumerate(self.actors):
+            age=self.time-a['poof_at']
+            at=to_screen(a['pos'])
+            art=self.art[a['type']]
+            if 0<=age<1.2:
+                if age<.28:
+                    frame=min(3,int(age/.07))
+                    self.blit_center(canvas,art['poof'][frame],at)
+                continue
+            if not a['visible']:continue
+            frame=int(self.time*art['fps']+i*.47)%len(art['idle'])
+            # Cat art faces east; retain an upright, mirrored pose when westbound.
+            angle=((a['heading']+math.pi)%(math.tau))-math.pi
+            flip=abs(angle)>math.pi/2
+            turn=math.degrees(angle)
+            if flip:turn+=180 if turn<0 else -180
+            body=art['idle'][frame]
+            glow=art['glow']
+            if flip:
+                body=pygame.transform.flip(body,True,False)
+                glow=pygame.transform.flip(glow,True,False)
+            body=pygame.transform.rotate(body,-turn)
+            glow=pygame.transform.rotate(glow,-turn)
+            shadow=art['shadow']
+            self.blit_center(canvas,shadow,(at[0],at[1]+7))
+            self.blit_center(canvas,glow,at)
+            self.blit_center(canvas,body,at)
+        canvas.set_clip(clip)
+
+    def draw_swirl(self,canvas,to_screen,racer):
+        if racer.train_spin_left<=0 or getattr(racer,'spin_fx_kind',None)!='cat':
+            return
+        phase=1.0-racer.train_spin_left/max(.01,racer.train_spin_duration)
+        index=int(phase*racer.train_spin_duration/.06)%len(self.swirl)
+        self.blit_center(canvas,self.swirl[index],to_screen(racer.pos))
+
 class Racer:
     """One vehicle drives its entire child-drawn multi-lap spline ONCE."""
     def __init__(self,index,kart_id,route,is_ghost=False,laps=1):
@@ -1515,6 +1928,7 @@ class Racer:
         self.drafting=False
         self.bump_fx_left=0.0
         self.train_spin_left=0.0
+        self.spin_fx_kind=None
         self.train_spin_duration=MovingTrain.STUN_SECONDS
         self.train_spin_heading=0.0
         self.train_spin_turns=1.0
@@ -1591,6 +2005,7 @@ class Racer:
                 (self.is_ghost and not replay)):
             return False
         self.train_spin_heading=self.heading
+        self.spin_fx_kind=None
         self.train_spin_duration=MovingTrain.STUN_SECONDS
         self.train_spin_turns=1.0
         self.train_spin_motion=0.0
@@ -1610,6 +2025,7 @@ class Racer:
                 (self.is_ghost and not replay)):
             return False
         self.train_spin_heading=self.heading
+        self.spin_fx_kind=None
         self.train_spin_duration=GoldenGorgeLogs.SPIN_SECONDS
         self.train_spin_turns=2.0
         self.train_spin_motion=0.4
@@ -1637,6 +2053,21 @@ class Racer:
         if self.train_hit_events:
             event=self.train_hit_events[-1]
             if isinstance(event,list) and event[1]=='log':event[1]='phantom'
+        return True
+
+    def hit_by_fairy(self,elapsed=None):
+        if not self.hit_by_log(elapsed):return False
+        if self.train_hit_events:
+            event=self.train_hit_events[-1]
+            if isinstance(event,list) and event[1]=='log':event[1]='fairy'
+        return True
+
+    def hit_by_cat(self,elapsed=None):
+        if not self.hit_by_log(elapsed):return False
+        self.spin_fx_kind='cat'
+        if self.train_hit_events:
+            event=self.train_hit_events[-1]
+            if isinstance(event,list) and event[1]=='log':event[1]='cat'
         return True
 
     def hit_by_cactus(self,elapsed=None):
@@ -1812,8 +2243,10 @@ class Racer:
             event=self.ghost_train_hits[self.ghost_train_hits_index]
             trigger=event[0] if isinstance(event,(tuple,list)) else event
             if elapsed>=trigger:
-                if isinstance(event,(tuple,list)) and len(event)>1 and event[1] in ('log','comet','phantom'):
+                if isinstance(event,(tuple,list)) and len(event)>1 and event[1] in ('log','comet','phantom','fairy','cat'):
                     self.hit_by_log(replay=True)
+                    if isinstance(event,(tuple,list)) and len(event)>1 and event[1]=='cat':
+                        self.spin_fx_kind='cat'
                 elif isinstance(event,(tuple,list)) and len(event)>1 and event[1]=='fall':
                     self.begin_fall(replay=True)
                 else:
@@ -1960,6 +2393,8 @@ class WasteKartGame:
         self.gorge_hazards=None
         self.canyon_hazards=None
         self.phantom_hazards=None
+        self.glow_hazards=None
+        self.spiral_hazards=None
         self.fall_hazards=None
         self.draw_warning=None
         self.race_routes_layer=None  # Legacy field; used only during transition.
@@ -2000,6 +2435,18 @@ class WasteKartGame:
                 'image':'phantom_boardwalk/phantom_boardwalk_track.png',
                 'road_mask':'phantom_boardwalk/phantom_boardwalk_road_mask.png',
                 'geometry':'phantom_boardwalk/phantom_boardwalk_geometry.json'}
+        # Star Cup 2 and 3 are delivered as additive asset folders.
+        if len(catalog.get('tracks',[]))>=15:
+            catalog['tracks'][13]={
+                'name':'Glow Garden',
+                'image':'glow_garden/glow_garden_track.png',
+                'road_mask':'glow_garden/glow_garden_road_mask.png',
+                'geometry':'glow_garden/glow_garden_geometry.json'}
+            catalog['tracks'][14]={
+                'name':'Starlight Spiral',
+                'image':'starlight_spiral/starlight_spiral_track.png',
+                'road_mask':'starlight_spiral/starlight_spiral_road_mask.png',
+                'geometry':'starlight_spiral/starlight_spiral_geometry.json'}
         return catalog
 
     def load_karts(self):
@@ -2019,9 +2466,22 @@ class WasteKartGame:
         img=pygame.image.load(self.track.image_path).convert()
         self.map_surface=pygame.transform.smoothscale(img,TRACK_RECT.size)
         self.bridge_overlay_surface=None
+        self.bridge_overlay_xy=TRACK_RECT.topleft
         if self.track.overlay_path and os.path.exists(self.track.overlay_path):
             overlay=pygame.image.load(self.track.overlay_path).convert_alpha()
-            self.bridge_overlay_surface=pygame.transform.smoothscale(overlay,TRACK_RECT.size)
+            if self.track.glow_data:
+                # Tunnel occupies only ~266x131 of the 960x600 map. Crop once,
+                # rather than alpha-blending a full 740x462 sprite at 60 FPS.
+                bbox=overlay.get_bounding_rect(min_alpha=1)
+                if bbox.width and bbox.height:
+                    cropped=overlay.subsurface(bbox).copy()
+                    sx=TRACK_RECT.width/MAP_W;sy=TRACK_RECT.height/MAP_H
+                    size=(max(1,round(bbox.width*sx)),max(1,round(bbox.height*sy)))
+                    self.bridge_overlay_surface=pygame.transform.smoothscale(cropped,size)
+                    self.bridge_overlay_xy=(TRACK_RECT.left+round(bbox.left*sx),
+                                            TRACK_RECT.top+round(bbox.top*sy))
+            else:
+                self.bridge_overlay_surface=pygame.transform.smoothscale(overlay,TRACK_RECT.size)
         # Only Dusty Drive (and future train-manifest tracks) loads a consist.
         self.moving_train=(MovingTrain(self.track) if self.track.train_manifest_path else None)
         self.cactus_hazards=(CactusLaneHazards(self.track)
@@ -2034,6 +2494,12 @@ class WasteKartGame:
         self.phantom_hazards=(PhantomBoardwalk(self.track)
                               if self.track.phantom_manifest_path else None)
         self.track.phantom_hazards=self.phantom_hazards
+        self.glow_hazards=(GlowGardenFairies(self.track)
+                           if self.track.glow_manifest_path else None)
+        self.track.glow_hazards=self.glow_hazards
+        self.spiral_hazards=(StarlightSpiralCats(self.track)
+                             if self.track.spiral_manifest_path else None)
+        self.track.spiral_hazards=self.spiral_hazards
         self.fall_hazards=self.canyon_hazards or self.phantom_hazards
 
     def font(self,size):
@@ -2373,7 +2839,7 @@ class WasteKartGame:
 
     def draw_bridge_overlay(self):
         if self.bridge_overlay_surface is not None:
-            self.canvas.blit(self.bridge_overlay_surface, TRACK_RECT.topleft)
+            self.canvas.blit(self.bridge_overlay_surface, self.bridge_overlay_xy)
 
     def draw_powerup_boxes(self, race=False):
         """Small rotating, bobbing cubes with orbital sparkles and respawn effects.
@@ -2446,7 +2912,9 @@ class WasteKartGame:
 
     def ready_page(self):
         self.draw_bg()
-        self.title('YOUR TURN!',('PHANTOM BOARDWALK - STAR CUP 1/4'
+        self.title('YOUR TURN!',('GLOW GARDEN - STAR CUP 2/4' if self.track.glow_data else
+                          'STARLIGHT SPIRAL - STAR CUP 3/4' if self.track.spiral_data else
+                          'PHANTOM BOARDWALK - STAR CUP 1/4'
                           if self.track.phantom_data else
                           f'{self.catalog["cups"][self.cup]} - TRACK {self.track_index+1}/4'
                           if self.race_mode=='cup' else f'{self.track.name} - Pass the screen'))
@@ -2521,6 +2989,12 @@ class WasteKartGame:
             if self.phantom_hazards is not None:
                 self.phantom_hazards.draw(self.canvas,self.world_to_screen)
                 self.draw_bridge_overlay()
+            if self.glow_hazards is not None:
+                self.glow_hazards.draw(self.canvas,self.world_to_screen)
+                self.draw_bridge_overlay()
+            if self.spiral_hazards is not None:
+                self.spiral_hazards.draw_underlay(self.canvas,self.world_to_screen)
+                self.spiral_hazards.draw(self.canvas,self.world_to_screen)
         pygame.draw.rect(self.canvas,INK,(0,0,LOGICAL_W,72))
         self.text(f'P{self.draw_player+1} - DRAW LAP {len(self.drawn_laps)+1}/{self.laps}',(306,31),34,color)
         self.text(('\u221e' if self.time_left is None else f'{max(0,math.ceil(self.time_left))}s'),(713,30),44,YELLOW)
@@ -2756,6 +3230,13 @@ class WasteKartGame:
                     self.kart_rotation_cache[key]=faded
                 img=self.kart_rotation_cache[key]
             center=(int(xy[0]),int(xy[1]))
+            if (self.spiral_hazards is not None and r.train_spin_left>0 and
+                    r.spin_fx_kind=='cat'):
+                # The kart moves in a 10px visual circle, not its world route.
+                phase=1-r.train_spin_left/max(.01,r.train_spin_duration)
+                offset=(10*math.cos(math.tau*phase),10*math.sin(math.tau*phase))
+                center=(round(xy[0]+offset[0]),round(xy[1]+offset[1]))
+                self.spiral_hazards.draw_swirl(self.canvas,self.world_to_screen,r)
             self.boost_flame(r,center)
             self.powerup_visuals(r,center)
             self.draw_interaction_effect(r,center)
@@ -2795,6 +3276,8 @@ class WasteKartGame:
             self.gorge_hazards.draw(self.canvas,self.world_to_screen)
         if self.canyon_hazards is not None:
             self.canyon_hazards.draw(self.canvas,self.world_to_screen)
+        if self.spiral_hazards is not None:
+            self.spiral_hazards.draw_underlay(self.canvas,self.world_to_screen)
         if self.track and self.track.has_overpasses():
             self.display_racers(layer=0)
             self.draw_bridge_overlay()
@@ -2805,6 +3288,12 @@ class WasteKartGame:
                 self.phantom_hazards.draw(self.canvas,self.world_to_screen)
                 # Mansion glass roof is ABOVE both karts and ghost actors.
                 self.draw_bridge_overlay()
+            if self.glow_hazards is not None:
+                self.glow_hazards.draw(self.canvas,self.world_to_screen)
+                # The 17 tunnel ribs are a glass overlay ABOVE the karts/fairies.
+                self.draw_bridge_overlay()
+            if self.spiral_hazards is not None:
+                self.spiral_hazards.draw(self.canvas,self.world_to_screen)
         if self.moving_train is not None:
             self.moving_train.draw(self.canvas,self.world_to_screen)
         if self.cactus_hazards is not None:
@@ -3150,6 +3639,10 @@ class WasteKartGame:
             self.canyon_hazards.reset()
         if self.phantom_hazards is not None:
             self.phantom_hazards.reset()
+        if self.glow_hazards is not None:
+            self.glow_hazards.reset()
+        if self.spiral_hazards is not None:
+            self.spiral_hazards.reset()
         self.countdown=0.0
         self.elapsed=0.0
         self.paused=False
@@ -3503,6 +3996,10 @@ class WasteKartGame:
                     self.canyon_hazards.update(dt)
                 if self.phantom_hazards is not None:
                     self.phantom_hazards.update(dt,self.racers)
+                if self.glow_hazards is not None:
+                    self.glow_hazards.update(dt,self.racers)
+                if self.spiral_hazards is not None:
+                    self.spiral_hazards.update(dt,self.racers)
                 self.update_interactions(dt)
                 for racer in self.racers:
                     before=racer.pos
@@ -3567,6 +4064,18 @@ class WasteKartGame:
                         actor=self.phantom_hazards.hit_test(before,racer.pos)
                         if actor is not None and racer.hit_by_phantom(self.elapsed):
                             self.phantom_hazards.ghost_hit(actor)
+                    if (self.glow_hazards is not None and not racer.finished and
+                            not racer.fall_phase and not racer.flight_left and
+                            racer.train_immunity_left<=0 and not racer.train_spin_left):
+                        fairy=self.glow_hazards.hit_test(before,racer.pos)
+                        if fairy is not None and racer.hit_by_fairy(self.elapsed):
+                            self.glow_hazards.on_hit(fairy)
+                    if (self.spiral_hazards is not None and not racer.finished and
+                            not racer.fall_phase and not racer.flight_left and
+                            racer.train_immunity_left<=0 and not racer.train_spin_left):
+                        cat=self.spiral_hazards.hit_test(before,racer.pos)
+                        if cat is not None and racer.hit_by_cat(self.elapsed):
+                            self.spiral_hazards.on_hit(cat)
                     if not racer.fall_phase and not racer.flight_left:
                         self.try_collect_powerups(racer,before)
                 if self.active_ghost is not None:

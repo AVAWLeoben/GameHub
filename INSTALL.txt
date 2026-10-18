@@ -1,16 +1,26 @@
-WasteKart 2.3.0 - Phantom Boardwalk (Star Cup 1/4)
+WASTEKART 2.4.0 - STAR CUP 2/4 + 3/4
+========================================
+Merge WasteGame/ into the root of your existing GameHub repository.
+Replace WasteGame/wasteKart.py with the included file.
+Keep all existing WasteGame/assets/WasteKart/ files, including catalog.json,
+comet_canyon/ and phantom_boardwalk/. Do not delete earlier asset folders.
 
-Copy WasteGame/wasteKart.py over the existing Python game.
-Merge WasteGame/assets/WasteKart/phantom_boardwalk into the existing asset directory.
-Keep the other WasteKart assets and catalog.json unchanged.
+Glow Garden:
+    WasteGame/assets/WasteKart/glow_garden/
+Starlight Spiral:
+    WasteGame/assets/WasteKart/starlight_spiral/
 
-The updated game registers Star Cup track 1 (index 12) automatically.
-Desert Cup tracks, including Comet Canyon, are unchanged.
+Star Cup 1/4 Phantom Boardwalk is retained (requires its existing assets).
+Star Cup 2/4 Glow Garden is now loaded automatically.
+Star Cup 3/4 Starlight Spiral is now loaded automatically.
+Star Cup 4/4 is unchanged.
+The existing catalog.json does not need to be changed.
 
-Features: 8 moving original ghosts, fade/intangible phase, spin/poof
-collision, swamp fall and forward-safe rescue, route warnings, mansion
-hall glass overlay above karts and ghosts, 14 projected checkpoints/lap.
+Both new tracks use the original supplied PNGs and manifests plus their
+new *_geometry.json files. Each track has no fall zones; its off-road terrain
+slows karts to 0.55x. Fairy/cat impacts share the two-turn 0.9s stun and 0.6s
+post-stun immunity. Glow's tube tunnel overlays karts. Spiral's crossing is flat.
 
-Validation: Python compilation, mask/centerline geometry tests, 1- and
-3-lap checkpoint tests, swamp rescue and ghost hit/fade tests.
-A graphical pygame / Pygbag end-to-end run was not available here.
+No graphical Pygame/Pygbag runtime was available for verification here;
+Python compilation, asset existence, mask/geometry validation, and isolated
+headless hazard/collision and 1-lap/3-lap simulations passed.
