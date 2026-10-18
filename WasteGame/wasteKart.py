@@ -1,4 +1,4 @@
-"""WasteKart 2.4.0 - Glow Garden and Starlight Spiral, Star Cup 2/4 and 3/4.
+"""WasteKart 2.5.0 - Glow Garden and Starlight Spiral, Star Cup 2/4 and 3/4.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
@@ -46,10 +46,17 @@ POWERUP_COLORS = {'turbo': (255, 169, 59), 'tailwind': (91, 239, 240)}
 # while SRCALPHA layers make the one-pixel dashes blend into the road.
 RACE_LINE_OPACITY = 67
 GHOST_LINE_OPACITY = 42
-# Player action buttons live at the corners of the playfield, leaving Home
-# and Pause untouched while keeping each child's button easy to find.
-ACTION_BUTTON_SIZE = (132, 74)
-ACTION_BUTTON_SLOTS = ('tl', 'tr', 'bl', 'br')
+# A permanent, large circular amulet is allocated to each player. Coordinates
+# are IDENTICAL on kart selection, route drawing, countdown and race screens.
+# Retain the original buttons' centers so existing muscle memory still works.
+AMULET_RADIUS = 39
+AMULET_TOUCH_RADIUS = 41
+PLAYER_AMULETS = (
+    (TRACK_RECT.left + 74, TRACK_RECT.top + 45),    # P1: upper left
+    (TRACK_RECT.right - 74, TRACK_RECT.top + 45),   # P2: upper right
+    (TRACK_RECT.left + 74, TRACK_RECT.bottom - 45), # P3: lower left
+    (TRACK_RECT.right - 74, TRACK_RECT.bottom - 45) # P4: lower right
+)
 # The original 56x42 karts looked oversized in four-player races. 38x28 is
 # 68% of that footprint (about 50% *too large* means divide by 1.5).
 RACE_KART_SIZE = (38, 28)
@@ -2529,21 +2536,12 @@ class WasteKartGame:
         pygame.draw.rect(self.canvas,bg,r,border_radius=radius)
         pygame.draw.rect(self.canvas,border,r,2,border_radius=radius)
 
-    def player_action_rects(self):
-        """Stable corners of the track view for 1-4 local player buttons."""
-        w,h = ACTION_BUTTON_SIZE
-        margin = 8
-        left = TRACK_RECT.left + margin
-        right = TRACK_RECT.right - margin - w
-        top = TRACK_RECT.top + margin
-        bottom = TRACK_RECT.bottom - margin - h
-        slots = {
-            'tl': pygame.Rect(left, top, w, h),
-            'tr': pygame.Rect(right, top, w, h),
-            'bl': pygame.Rect(left, bottom, w, h),
-            'br': pygame.Rect(right, bottom, w, h),
-        }
-        return [slots[ACTION_BUTTON_SLOTS[i]] for i in range(self.players)]
+    def amulet_hit(self, pos, player):
+        """Touch the visible circle, not an invisible rectangular corner."""
+        if not 0 <= player < self.players:
+            return False
+        cx,cy=PLAYER_AMULETS[player]
+        return (pos[0]-cx)**2 + (pos[1]-cy)**2 <= AMULET_TOUCH_RADIUS**2
 
     def draw_bg(self):
         self.canvas.fill((25,35,61))
@@ -2743,7 +2741,7 @@ class WasteKartGame:
     def karts_page(self):
         self.draw_bg()
         current=self.kart_player
-        self.title('CHOOSE YOUR KART','Every racer gets a turn to pick a kart!')
+        self.title('CHOOSE YOUR KART','Your kart color stays in YOUR corner all race!')
         color=PALETTE[self.kart_ids[current]]
         self.text(f'PLAYER {current+1}',(400,129),50,color)
         for k in range(8):
@@ -2761,10 +2759,14 @@ class WasteKartGame:
                 pygame.draw.rect(self.canvas,(20,27,42),r,2,border_radius=18)
                 pygame.draw.line(self.canvas,(224,109,113),r.topleft,r.bottomright,4)
             else:self.action_buttons.append((r,('kart',k)))
+        # Four corner amulets show the complete seating arrangement BEFORE
+        # anyone starts drawing. The active player's amulet gets a gold halo.
+        self.text('SAME FOUR CORNERS FOR BOOSTS AND ITEMS!',(400,449),19,YELLOW)
         action='START DRAWING  >' if current==self.players-1 else 'NEXT PLAYER  >'
         self.button((222,472,356,75),action,('kart_next',None),selected=True,size=32)
         self.button((26,540,149,47),'< TRACKS',('state','tracks'),size=24)
         self.home()
+        self.draw_player_amulets('selection')
 
     def world_to_screen(self,pos):
         return (TRACK_RECT.left+pos[0]*TRACK_RECT.width/MAP_W,
@@ -2925,6 +2927,7 @@ class WasteKartGame:
         self.text('Start at the green dot. Your finger is the pencil.',(400,424),25,MUTED)
         self.button((220,473,360,79),'READY TO DRAW!',('start_draw',None),selected=True,size=37)
         self.home()
+        self.draw_player_amulets('preview')
 
     def ensure_draw_routes_layer(self):
         """Cache prior drawings once per turn, splitting overpass layers.
@@ -3009,6 +3012,7 @@ class WasteKartGame:
         self.text(f'LAPS DONE: {len(self.drawn_laps)}/{self.laps}   -   Lift to pause. CLEAR to retry.',(397,571),21,MUTED)
         self.button((624,550,150,43),'FINISH LAP',('draw_done',None),selected=True,size=23)
         self.home()
+        self.draw_player_amulets('preview')
 
     def racer_image(self,kart_id,angle):
         # The supplied kart artwork points to the LEFT in its base image.
@@ -3140,45 +3144,123 @@ class WasteKartGame:
                                            max(12,int(size*1.12)),max(12,int(size*1.12))),
                         -0.55,0.55,2)
 
-    def draw_item_buttons(self):
-        """Four fixed corner locations shared with the reflex-start buttons.
+    def draw_player_amulets(self, mode='game'):
+        """Four permanent corner amulets, with one identity and one tap zone.
 
-        Never use the legacy bottom action bar: for one to four children, each
-        player's entire button stays in the same playfield corner throughout
-        the countdown and the race.
+        'selection' shows the cart whose color belongs to that corner; 'preview'
+        keeps the same layout during route drawing. During the race, the INSIDE
+        of each amulet becomes its reflex button, then its item slot. The outer
+        ring never changes away from the selected kart color.
         """
-        rects = self.player_action_rects()
-        for index, racer in enumerate(self.racers):
-            rect = rects[index]
-            held = racer.held_powerup
-            active = racer.powerup_kind if racer.powerup_left > 0 else None
-            kind = held if held is not None else active
-            border = POWERUP_COLORS[kind] if kind else PALETTE[racer.kart_id]
+        for player,(cx,cy) in enumerate(PLAYER_AMULETS):
+            enabled = player < self.players
+            color = PALETTE[self.kart_ids[player]] if enabled else (84,96,112)
+            racer = (self.racers[player] if mode=='game' and enabled and
+                     player < len(self.racers) else None)
+            reflex = bool(racer is not None and self.reflex_start and
+                          (self.state=='countdown' or
+                           (self.state=='race' and self.elapsed<REACTION_WINDOW)))
+            active_selection = (enabled and mode in ('selection','preview') and
+                                (player==self.kart_player if mode=='selection'
+                                 else player==self.draw_player))
+            held = racer.held_powerup if racer is not None else None
+            running = (racer.powerup_kind if racer is not None and
+                       racer.powerup_left>0 else None)
+            item_ready = (bool(held) and self.state=='race' and not self.paused
+                          and not reflex and running is None)
+            clock = self.item_box_clock
+            centre=(cx,cy)
+            radius=AMULET_RADIUS
+            pygame.draw.circle(self.canvas,(10,17,29),(cx,cy+3),radius+3)
+            # Color identity remains visible even with the original yellow or
+            # turquoise item logo filling the centre of the amulet.
+            tint=(round(color[0]*.20+20),round(color[1]*.20+26),
+                  round(color[2]*.20+38))
+            pygame.draw.circle(self.canvas,tint,centre,radius-2)
+            pygame.draw.circle(self.canvas,color,centre,radius,6)
+            pygame.draw.circle(self.canvas,(171,192,208) if enabled else (81,93,107),
+                               centre,radius-7,1)
+            if active_selection or item_ready:
+                pulse=2+round(2*abs(math.sin(clock*4.8+player)))
+                pygame.draw.circle(self.canvas,YELLOW,centre,radius+pulse,2)
+            # The number is NOT replaced by a power-up. It remains a reliable
+            # label even for two players who choose similar-looking karts.
+            badge=(cx-27,cy-27)
+            pygame.draw.circle(self.canvas,(13,22,37),badge,15)
+            pygame.draw.circle(self.canvas,color,badge,13)
+            self.text(str(player+1),badge,20,INK if enabled else WHITE)
 
-            pygame.draw.rect(self.canvas, (15, 23, 39), rect.move(0, 3), border_radius=16)
-            pygame.draw.rect(self.canvas, (39, 51, 73), rect, border_radius=16)
-            pygame.draw.rect(self.canvas, border, rect, 4, border_radius=16)
-            badge = (rect.left+17, rect.top+17)
-            pygame.draw.circle(self.canvas, PALETTE[racer.kart_id], badge, 13)
-            self.text(str(index+1), badge, 19, INK)
-            icon_center = (rect.centerx+5, rect.centery-6)
-            self.draw_powerup_icon(kind, icon_center, 45)
+            if not enabled:
+                self.text('—', (cx,cy+2),30,(122,134,147))
+                continue
 
-            if held is not None:
-                sparkle = 3 + round(2*abs(math.sin(self.elapsed*8+index)))
-                pygame.draw.circle(self.canvas, (255, 250, 164),
-                                   (rect.right-16, rect.top+15), sparkle)
-                self.text('TAP!', (rect.centerx, rect.bottom-11), 17, WHITE)
-            elif active is not None:
-                fraction = clamp(racer.powerup_left/POWERUP_DURATION[active], 0, 1)
-                ring = pygame.Rect(icon_center[0]-27, icon_center[1]-27, 54, 54)
-                if fraction > 0.01:
-                    pygame.draw.arc(self.canvas, border, ring,
-                                    -math.pi/2, -math.pi/2+2*math.pi*fraction, 4)
-                self.text('GO!', (rect.centerx, rect.bottom-11), 17, WHITE)
+            if mode in ('selection','preview') or (mode=='game' and
+                                                 self.state=='countdown' and
+                                                 not self.reflex_start):
+                kart_id=self.kart_ids[player]
+                key=('amulet',kart_id)
+                if key not in self.kart_rotation_cache:
+                    self.kart_rotation_cache[key]=pygame.transform.smoothscale(
+                        self.kart_images[kart_id],(39,29))
+                img=self.kart_rotation_cache[key]
+                self.canvas.blit(img,img.get_rect(center=(cx,cy-3)))
+                label=('PICK' if active_selection else 'KART')
+                self.text(label,(cx,cy+24),16,YELLOW if active_selection else WHITE)
+            elif reflex:
+                status=self.reaction_status[player] if player<len(self.reaction_status) else 'waiting'
+                if status=='early':
+                    self.text('EARLY',(cx,cy-1),19,(255,163,164))
+                    self.text('WAIT',(cx,cy+24),16,WHITE)
+                elif status=='boost':
+                    self.text('BOOST',(cx,cy-1),20,YELLOW)
+                    self.text('GO!',(cx,cy+24),16,WHITE)
+                elif status=='late':
+                    self.text('OK!',(cx,cy),25,WHITE)
+                else:
+                    green=self.state=='race'
+                    self.draw_tap_icon((cx,cy-5),23,WHITE if green else MUTED)
+                    self.text('TAP!' if green else 'WAIT',
+                              (cx,cy+25),17,YELLOW if green else MUTED)
+                    if green:
+                        pygame.draw.circle(self.canvas,YELLOW,centre,radius+2,2)
+            elif self.powerups_enabled and racer is not None:
+                # Reuse the two established, recognizable TURBO and TAILWIND
+                # logos, including the original '?' empty item indicator.
+                kind=running if running else held
+                self.draw_powerup_icon(kind,(cx,cy-4),34)
+                if held and running is None:
+                    self.text('PAUSE' if self.paused else 'TAP!',
+                              (cx,cy+26),16 if self.paused else 17,
+                              MUTED if self.paused else YELLOW)
+                elif running:
+                    duration=POWERUP_DURATION[running]
+                    remaining=clamp(racer.powerup_left/duration,0,1)
+                    arc=pygame.Rect(cx-32,cy-32,64,64)
+                    if remaining>0:
+                        pygame.draw.arc(self.canvas,POWERUP_COLORS[running],arc,
+                                        -math.pi/2,-math.pi/2+math.tau*remaining,3)
+                    self.text('GO!',(cx,cy+26),16,WHITE)
+                else:
+                    self.text('EMPTY',(cx,cy+26),14,MUTED)
             else:
-                self.text('?', (rect.centerx, rect.bottom-11), 18, MUTED)
-            self.action_buttons.append((rect, ('powerup_press', index)))
+                # Items off: leave the amulet and the selected kart visible.
+                kart_id=self.kart_ids[player]
+                key=('amulet',kart_id)
+                if key not in self.kart_rotation_cache:
+                    self.kart_rotation_cache[key]=pygame.transform.smoothscale(
+                        self.kart_images[kart_id],(39,29))
+                sprite=self.kart_rotation_cache[key]
+                self.canvas.blit(sprite,sprite.get_rect(center=(cx,cy-3)))
+                self.text('KART',(cx,cy+24),16,WHITE)
+
+            # Only real racers in the playable state are touch-active. The same
+            # button handles both start reaction and later item activation.
+            if racer is not None and not self.paused and (reflex or
+                  (self.powerups_enabled and self.state=='race' and
+                   (not self.reflex_start or self.elapsed>=REACTION_WINDOW))):
+                touch=pygame.Rect(cx-AMULET_TOUCH_RADIUS,cy-AMULET_TOUCH_RADIUS,
+                                  AMULET_TOUCH_RADIUS*2,AMULET_TOUCH_RADIUS*2)
+                self.action_buttons.append((touch,('amulet',player)))
 
     def display_racers(self, layer=None):
         ordered=([self.active_ghost] if self.active_ghost is not None else [])+self.racers
@@ -3306,10 +3388,6 @@ class WasteKartGame:
             self.text(f'{self.elapsed:05.1f}s',(704,28),38,WHITE)
             self.text(f'{self.laps} LAP'+('S' if self.laps>1 else '')+(' - GHOST' if self.active_ghost else ''),(396,58),24,MUTED)
         pygame.draw.rect(self.canvas,INK,(0,544,LOGICAL_W,56))
-        item_buttons=(self.powerups_enabled and self.state=='race' and
-                      not self.paused and (not self.reflex_start or self.elapsed>=REACTION_WINDOW))
-        if item_buttons:
-            self.draw_item_buttons()
         w=(LOGICAL_W-24)/max(1,len(self.racers))
         for index,r in enumerate(self.racers):
             left=10+index*w
@@ -3329,9 +3407,6 @@ class WasteKartGame:
             pygame.draw.rect(self.canvas,(42,153,87),(281,117,238,89),border_radius=20)
             pygame.draw.rect(self.canvas,(242,226,135),(281,117,238,89),4,border_radius=20)
             self.text('GO!',(400,159),72,WHITE)
-        if self.reflex_start and (self.state=='countdown' or
-                                  (self.state=='race' and self.elapsed<REACTION_WINDOW)):
-            self.draw_reflex_buttons()
         if self.paused:
             panel=pygame.Surface((LOGICAL_W,LOGICAL_H),pygame.SRCALPHA)
             panel.fill((11,19,37,185));self.canvas.blit(panel,(0,0))
@@ -3339,6 +3414,7 @@ class WasteKartGame:
             self.button((250,322,300,80),'RESUME',('pause',None),selected=True,size=38)
         elif self.state=='race':
             self.button((668,11,120,48),'PAUSE',('pause',None),size=22)
+        self.draw_player_amulets('game')
 
     def draw_lights(self):
         r=pygame.Rect(209,181,382,192)
@@ -3353,37 +3429,6 @@ class WasteKartGame:
             pygame.draw.circle(self.canvas,c,(285+i*115,272),34)
             if active:pygame.draw.circle(self.canvas,(255,183,153),(276+i*115,263),9)
         self.text(f'{max(1,math.ceil(GREEN_AT-self.countdown))}',(400,358),56,YELLOW)
-
-    def draw_reflex_buttons(self):
-        """Draw each child's reaction button in their permanent playfield corner."""
-        for player, rect in enumerate(self.player_action_rects()):
-            color = PALETTE[self.kart_ids[player]]
-            status = self.reaction_status[player]
-            pygame.draw.rect(self.canvas, (15, 23, 39), rect.move(0, 3), border_radius=16)
-            pygame.draw.rect(self.canvas, (42, 56, 80), rect, border_radius=16)
-            pygame.draw.rect(self.canvas, color, rect, 4, border_radius=16)
-            badge = (rect.left+17, rect.top+17)
-            pygame.draw.circle(self.canvas, color, badge, 13)
-            self.text(str(player+1), badge, 19, INK)
-            if status == 'early':
-                self.text('EARLY', (rect.centerx, rect.centery), 27, (255, 166, 165))
-                footer = 'WAIT!'
-            elif status == 'boost':
-                self.text('BOOST!', (rect.centerx, rect.centery), 25, YELLOW)
-                pygame.draw.circle(self.canvas, YELLOW, (rect.right-17,rect.top+17), 6)
-                footer = 'FAST!'
-            elif status == 'late':
-                self.text('OK!', (rect.centerx,rect.centery), 30, WHITE)
-                footer = 'READY'
-            else:
-                self.draw_tap_icon((rect.centerx,rect.centery-4), 27, WHITE)
-                footer = 'TAP!'
-                self.action_buttons.append((rect, ('reflex_press', player)))
-            self.text(footer, (rect.centerx,rect.bottom-12), 18, WHITE)
-        if self.state == 'countdown':
-            self.text('WAIT FOR GREEN!', (400,431), 27, YELLOW)
-        else:
-            self.text('TAP YOUR CORNER FOR A BOOST!', (400,431), 27, YELLOW)
 
     def celebrate(self):
         self.confetti=[]
@@ -3892,7 +3937,15 @@ class WasteKartGame:
                     self.kart_ids[self.kart_player]=next(k for k in range(8) if k not in self.kart_ids[:self.kart_player])
             elif self.race_mode=='cup':self.start_championship()
             else:self.begin_new_race()
-        elif name=='reflex_press':self.press_reflex(value)
+        elif name=='amulet':
+            # No moving or disappearing control: one action at the same corner
+            # for the whole race. Reflex has priority during the green window.
+            if self.reflex_start and (self.state=='countdown' or
+                                      (self.state=='race' and self.elapsed<REACTION_WINDOW)):
+                if not self.paused:self.press_reflex(value)
+            else:
+                self.activate_held_powerup(value)
+        elif name=='reflex_press':self.press_reflex(value) # keyboard/legacy support
         elif name=='powerup_press':self.activate_held_powerup(value)
         elif name=='start_draw':self.begin_draw()
         elif name=='clear':
@@ -3912,6 +3965,8 @@ class WasteKartGame:
     def finger_press(self,pointer,pos):
         for rect,action in reversed(self.action_buttons):
             if rect.collidepoint(pos):
+                if action[0]=='amulet' and not self.amulet_hit(pos,action[1]):
+                    continue
                 self.handle_button(action)
                 return
         if self.state=='draw' and TRACK_RECT.collidepoint(pos) and self.draw_pointer is None:
