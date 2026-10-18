@@ -1,4 +1,4 @@
-"""WasteKart 2.7.2 - Rainbow Rocket, Star Cup 4/4, layered Cog Chompers and scaling.
+"""WasteKart 2.8.0 - Star invulnerability, rainbow karts and contact spinouts.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
@@ -9,6 +9,7 @@ Stars 1-3 have custom sprite hazards.
 """
 import asyncio
 import bisect
+import colorsys
 import json
 import math
 import os
@@ -41,9 +42,10 @@ TRAIL_CHUNK_WORLD = 240.0  # Pre-render short route spans, not whole paths every
 POWERUP_RESPAWN = 7.0      # Same shared box disappears temporarily for all players.
 POWERUP_PICKUP_RADIUS = 11.5  # Half the previous 23px collection radius (world pixels).
 PICKUP_VISUAL_SCALE = 0.50  # Keep the pickups, orbiting glints and respawn feedback proportionate.
-POWERUP_DURATION = {'turbo': 3.2, 'tailwind': 6.0}
+POWERUP_DURATION = {'turbo': 3.2, 'tailwind': 6.0, 'star': 6.0}
 POWERUP_MULTIPLIER = {'turbo': 1.48, 'tailwind': 1.20}
-POWERUP_COLORS = {'turbo': (255, 169, 59), 'tailwind': (91, 239, 240)}
+POWERUP_COLORS = {'turbo': (255, 169, 59), 'tailwind': (91, 239, 240),
+                  'star': (255, 233, 125)}
 # A deliberately subtle overlay: RGB colors keep each player's identity,
 # while SRCALPHA layers make the one-pixel dashes blend into the road.
 RACE_LINE_OPACITY = 67
@@ -2344,6 +2346,10 @@ class Racer:
             self.start_modifier=1.12+0.33*quickness
         self.start_effect_left=REACTION_EFFECT_SECONDS
 
+    @property
+    def star_active(self):
+        return self.powerup_kind=='star' and self.powerup_left>0 and not self.finished
+
     def activate_powerup(self, when):
         """Spend one held power-up; a second pickup can be saved for later."""
         if self.finished or self.held_powerup is None or self.powerup_left>0:
@@ -2359,6 +2365,11 @@ class Racer:
             return
         self.powerup_kind=kind
         self.powerup_left=POWERUP_DURATION[kind]
+        if kind=='star':
+            # A defensive pickup can immediately break an existing hazard stun.
+            self.train_spin_left=0.0
+            self.spin_fx_kind=None
+            self.train_spin_motion=0.0
 
     def route_sample(self, distance):
         """Traverse the entire unique drawing, never wrap or teleport."""
@@ -2366,7 +2377,7 @@ class Racer:
 
     def hit_by_train(self,elapsed=None,replay=False):
         """Stop, spin exactly once, and continue the same racing spline."""
-        if (self.finished or self.train_immunity_left>0 or
+        if (self.finished or self.star_active or self.train_immunity_left>0 or
                 (self.is_ghost and not replay)):
             return False
         self.train_spin_heading=self.heading
@@ -2386,7 +2397,7 @@ class Racer:
 
     def hit_by_log(self,elapsed=None,replay=False):
         """Two full spins in 0.9s while travelling at 40% normal speed."""
-        if (self.finished or self.train_immunity_left>0 or
+        if (self.finished or self.star_active or self.train_immunity_left>0 or
                 (self.is_ghost and not replay)):
             return False
         self.train_spin_heading=self.heading
@@ -2404,6 +2415,14 @@ class Racer:
             self.train_hit_events.append([round(elapsed,3),'log'])
         self.drafting=False
         self.interaction_factor=1.0
+        return True
+
+    def hit_by_star(self,elapsed=None,replay=False):
+        """Star contact: two spins in 0.9 s, 40% movement, post-hit immunity."""
+        if not self.hit_by_log(elapsed,replay=replay):return False
+        if not replay and self.train_hit_events:
+            event=self.train_hit_events[-1]
+            if isinstance(event,list) and event[1]=='log':event[1]='star'
         return True
 
     def hit_by_comet(self,elapsed=None):
@@ -2588,6 +2607,9 @@ class Racer:
     def update(self,dt,elapsed,track):
         if self.finished:return
         self.respawn_fx_left=max(0.0,self.respawn_fx_left-dt)
+        # Star time is real racing time; never freeze during jumps or stuns.
+        if self.powerup_kind=='star' and self.powerup_left>0:
+            self.powerup_left=max(0.0,self.powerup_left-dt)
         if self.fall_phase:
             self.update_fall(dt,track,elapsed)
             return
@@ -2617,7 +2639,7 @@ class Racer:
             event=self.ghost_train_hits[self.ghost_train_hits_index]
             trigger=event[0] if isinstance(event,(tuple,list)) else event
             if elapsed>=trigger:
-                if isinstance(event,(tuple,list)) and len(event)>1 and event[1] in ('log','comet','phantom','fairy','cat','rocket'):
+                if isinstance(event,(tuple,list)) and len(event)>1 and event[1] in ('log','comet','phantom','fairy','cat','rocket','star'):
                     self.hit_by_log(replay=True)
                     if isinstance(event,(tuple,list)) and len(event)>1 and event[1]=='cat':
                         self.spin_fx_kind='cat'
@@ -2665,11 +2687,12 @@ class Racer:
         if self.powerup_left>0 and self.powerup_kind in POWERUP_MULTIPLIER:
             temporary*=POWERUP_MULTIPLIER[self.powerup_kind]
             self.powerup_left=max(0.0,self.powerup_left-dt)
-        desired=(track.max_speed*bend*(ROAD_FACTOR if road else GRASS_FACTOR)
+        desired=(track.max_speed*bend*(ROAD_FACTOR if (road or self.star_active) else GRASS_FACTOR)
                   *min(1.95,temporary)*self.interaction_factor)
-        if track.canyon_hazards is not None:
+        if track.canyon_hazards is not None and not self.star_active:
             desired*=track.canyon_hazards.speed_factor(pos)
-        if track.phantom_data and track.phantom_mask('rail_wall_mask',pos):
+        if (track.phantom_data and not self.star_active and
+                track.phantom_mask('rail_wall_mask',pos)):
             # A softer fence collision respects the child's already-drawn path.
             desired*=.42
         for modifier in self.modifiers:
@@ -2758,6 +2781,7 @@ class WasteKartGame:
         self.routes=[]
         self.racers=[]
         self.bump_cooldowns={}  # (low player, high player) -> next allowed time.
+        self.star_contact_pairs=set()
         self.elapsed=0.0
         self.countdown=0.0
         self.paused=False
@@ -2787,6 +2811,9 @@ class WasteKartGame:
         self.track_cache={}
         self.thumb_cache={}
         self.kart_images=[]
+        self.star_item_icon=None
+        self.star_icon_cache={}
+        self.load_star_icon()
         self.kart_rotation_cache={}
         self.confetti=[]
         self.rng=random.Random()
@@ -2834,6 +2861,15 @@ class WasteKartGame:
                 'road_mask':'rainbow_rocket/rainbow_rocket_road_mask_all.png',
                 'geometry':'rainbow_rocket/rainbow_rocket_geometry.json'}
         return catalog
+
+    def load_star_icon(self):
+        """Use the shared WasteGame/assets/star.png, without duplicating assets."""
+        source=os.path.join(ROOT,'assets','star.png')
+        if os.path.isfile(source):
+            try:
+                self.star_item_icon=pygame.image.load(source).convert_alpha()
+            except (OSError,pygame.error):
+                self.star_item_icon=None
 
     def load_karts(self):
         for entry in self.catalog['karts']:
@@ -3527,6 +3563,9 @@ class WasteKartGame:
         ux,uy=math.cos(r.heading),math.sin(r.heading)
         nx,ny=-uy,ux
         t=self.elapsed
+        if r.powerup_kind=='star':
+            # Rainbow tint is applied to the kart sprite in display_racers.
+            return
         if r.powerup_kind=='turbo':
             # Strong, hot exhaust flames with gold sparks behind the bumper.
             for side in (-7,7):
@@ -3552,6 +3591,39 @@ class WasteKartGame:
                     pygame.draw.line(self.canvas,(74,235,234),a,b,3 if k==0 else 2)
             pygame.draw.circle(self.canvas,(161,255,243),center,21,2)
 
+    def star_rainbow(self,phase):
+        """Cyclic HSV colour shared by kart pulse and glowing amulet ring."""
+        rgb=colorsys.hsv_to_rgb(phase%1.0,.90,1.0)
+        return tuple(round(255*v) for v in rgb)
+
+    def rainbow_star_kart(self,r,img,center):
+        """Tint only the small kart sprite; keep rotations and road scaling intact."""
+        if not r.star_active:return img
+        pulse=.5+.5*math.sin(self.elapsed*math.tau*2.4+r.index)
+        hue=(self.elapsed*.7+r.index*.17)%1.0
+        rgb=self.star_rainbow(hue)
+        strength=.66+.34*pulse
+        tint=tuple(round((50+205*c/255)*strength) for c in rgb)
+        image=img.copy()
+        image.fill(tint,special_flags=pygame.BLEND_RGB_MULT)
+        radius=max(17,round(max(img.get_width(),img.get_height())*.48+5+3*pulse))
+        pygame.draw.circle(self.canvas,self.star_rainbow(hue+.5),center,radius+3,2)
+        pygame.draw.circle(self.canvas,rgb,center,radius,3)
+        # A subtle moving glint identifies the protected kart at small scales.
+        a=self.elapsed*math.tau*1.9
+        glint=(round(center[0]+radius*math.cos(a)),
+               round(center[1]+radius*math.sin(a)))
+        pygame.draw.circle(self.canvas,(255,255,231),glint,3)
+        return image
+
+    def draw_star_amulet_halo(self,center,radius):
+        rect=pygame.Rect(center[0]-radius,center[1]-radius,radius*2,radius*2)
+        offset=self.item_box_clock*.95
+        for i in range(12):
+            begin=-math.pi/2+i*math.tau/12
+            pygame.draw.arc(self.canvas,self.star_rainbow(offset+i/12),
+                            rect,begin,begin+math.tau/12+.035,3)
+
     def draw_powerup_icon(self,kind,center,size=34):
         """Recognizable, text-free icons for children who cannot read yet.
 
@@ -3560,7 +3632,23 @@ class WasteKartGame:
         """
         x,y=round(center[0]),round(center[1])
         r=max(11,round(size*.49))
-        if kind=='turbo':
+        if kind=='star':
+            pygame.draw.circle(self.canvas,(48,42,90),(x,y),r)
+            pygame.draw.circle(self.canvas,(255,224,123),(x,y),r,2)
+            art=getattr(self,'star_item_icon',None)
+            if art is not None:
+                edge=max(8,round(size*.84))
+                if edge not in self.star_icon_cache:
+                    k=min(edge/max(1,art.get_width()),edge/max(1,art.get_height()))
+                    dims=(max(1,round(art.get_width()*k)),
+                          max(1,round(art.get_height()*k)))
+                    self.star_icon_cache[edge]=pygame.transform.smoothscale(art,dims)
+                icon=self.star_icon_cache[edge]
+                self.canvas.blit(icon,icon.get_rect(center=(x,y)))
+            else:
+                # Fallback only for installations lacking the shared star.png.
+                self.draw_star((x,y),size*.39,(255,231,87),(255,251,218))
+        elif kind=='turbo':
             pygame.draw.circle(self.canvas,(92,43,30),(x,y),r)
             pygame.draw.circle(self.canvas,(255,174,56),(x,y),r,2)
             def coords(points):
@@ -3643,12 +3731,15 @@ class WasteKartGame:
                 self.canvas.blit(bg,(cx-48,cy-48))
                 halo=('halo_turbo' if running=='turbo' else
                       'halo_tailwind' if running=='tailwind' else
+                      'halo_gold' if running=='star' else
                       'halo_gold' if (active_selection or item_ready or
                                       (reflex and self.state=='race' and
                                        player<len(self.reaction_status) and
                                        self.reaction_status[player]=='waiting')) else None)
                 if halo:
                     self.draw_amulet_halo(halo,player,cx,cy)
+                if running=='star':
+                    self.draw_star_amulet_halo((cx,cy),radius+2)
                 if (racer is not None and
                         self.item_box_clock<self.amulet_pressed_until[player]):
                     self.canvas.blit(art['fx']['pressed_overlay'],(cx-48,cy-48))
@@ -3664,6 +3755,8 @@ class WasteKartGame:
                 if active_selection or item_ready:
                     pulse=2+round(2*abs(math.sin(clock*4.8+player)))
                     pygame.draw.circle(self.canvas,YELLOW,centre,radius+pulse,2)
+                if running=='star':
+                    self.draw_star_amulet_halo(centre,radius+2)
             badge=(cx-27,cy-27)
 
             if not enabled:
@@ -3839,8 +3932,10 @@ class WasteKartGame:
                     pygame.draw.circle(self.canvas,(255,255,235),star,2)
             # The kart blinks during the 1.5 seconds of tow immunity.
             visible=not (self.fall_hazards is not None and r.train_immunity_left>0
-                         and r.fall_phase is None and int(self.elapsed*16)%2==0)
+                         and not r.star_active and r.fall_phase is None and
+                         int(self.elapsed*16)%2==0)
             if visible:
+                img=self.rainbow_star_kart(r,img,center)
                 self.canvas.blit(img,img.get_rect(center=center))
             if self.fall_hazards is not None and (r.respawn_fx_left>0 or
                     (r.train_immunity_left>0 and r.fall_count>0)):
@@ -4217,6 +4312,7 @@ class WasteKartGame:
         self.racers=[Racer(i,self.kart_ids[i],self.routes[i],laps=self.laps)
                      for i in range(self.players)]
         self.bump_cooldowns={}
+        self.star_contact_pairs=set()
         if self.fall_hazards is not None:
             for racer in self.racers:
                 racer.canyon_checkpoints=self.fall_hazards.checkpoint_route(racer.route)
@@ -4308,6 +4404,8 @@ class WasteKartGame:
                     if (self.track.point_on_overpass(a.pos,angle_a) !=
                             self.track.point_on_overpass(b.pos,angle_b)):
                         continue
+                if a.star_active or b.star_active:
+                    continue  # Star contact is resolved after position updates.
                 # Drafting only works behind a moving kart, facing the same
                 # direction. Side-by-side, opposite, or crossing karts do not
                 # create unrealistic turbo wind. Neither benefit can stack.
@@ -4349,6 +4447,42 @@ class WasteKartGame:
                             a.speed*=0.78
                             b.speed*=0.78
 
+    def update_star_contacts(self,prior_positions):
+        """Swept kart/star collisions, independent of optional draft/bump mode.
+
+        Contact must be on the same bridge level. Once a pair touches, it
+        must separate before that star can hit it again; this avoids repeated
+        spinouts when two routes run together during a six-second shield.
+        """
+        touching=set()
+        for i,a in enumerate(self.racers):
+            if a.finished or a.fall_phase or a.flight_left>0:continue
+            for b in self.racers[i+1:]:
+                if b.finished or b.fall_phase or b.flight_left>0:continue
+                if not (a.star_active or b.star_active):continue
+                pair=(a.index,b.index)
+                ah=a.route.sample(a.distance)[1] if self.track.rocket_data else a.heading
+                bh=b.route.sample(b.distance)[1] if self.track.rocket_data else b.heading
+                if self.track.has_overpasses() and (self.track.point_on_overpass(a.pos,ah) !=
+                                                    self.track.point_on_overpass(b.pos,bh)):
+                    continue
+                previous_a=prior_positions[i];previous_b=prior_positions[b.index]
+                rel_a=(previous_a[0]-previous_b[0],previous_a[1]-previous_b[1])
+                rel_b=(a.pos[0]-b.pos[0],a.pos[1]-b.pos[1])
+                radius=BUMP_DISTANCE*(a.kart_scale+b.kart_scale)*.5
+                swept=segment_near_point(rel_a,rel_b,(0,0))<=radius
+                is_close=length(a.pos,b.pos)<=radius
+                if not swept:continue
+                if is_close:touching.add(pair)
+                if pair in self.star_contact_pairs:continue
+                if a.star_active and not b.star_active:
+                    if b.hit_by_star(self.elapsed):
+                        a.bump_fx_left=BUMP_EFFECT_SECONDS
+                elif b.star_active and not a.star_active:
+                    if a.hit_by_star(self.elapsed):
+                        b.bump_fx_left=BUMP_EFFECT_SECONDS
+        self.star_contact_pairs=touching
+
     def draw_interaction_effect(self,r,center):
         """Small, allocation-free wake and impact stars under the kart."""
         if (r.is_ghost or self.state!='race' or not self.interactions_enabled):
@@ -4384,7 +4518,7 @@ class WasteKartGame:
                     segment_near_point(previous,racer.pos,box.pos)<=POWERUP_PICKUP_RADIUS):
                 box.collect(self.elapsed)
                 if racer.held_powerup is None:
-                    racer.held_powerup=self.rng.choice(('turbo','tailwind'))
+                    racer.held_powerup=self.rng.choice(('turbo','tailwind','star'))
                 # If the kart is already carrying an item, the box STILL
                 # despawns but the existing inventory is never replaced.
 
@@ -4591,6 +4725,7 @@ class WasteKartGame:
                 if self.rocket_hazards is not None:
                     self.rocket_hazards.update(dt,self.racers)
                 self.update_interactions(dt)
+                prior_positions=[r.pos for r in self.racers]
                 for racer in self.racers:
                     before=racer.pos
                     before_distance=racer.distance
@@ -4643,48 +4778,52 @@ class WasteKartGame:
                                 racer.begin_fall(self.elapsed)
                                 break
                     if (self.moving_train is not None and not racer.finished and
-                            self.moving_train.hit_test(racer.pos)):
+                            not racer.star_active and self.moving_train.hit_test(racer.pos)):
                         racer.hit_by_train(self.elapsed)
                     if (self.cactus_hazards is not None and not racer.finished and
-                            self.cactus_hazards.hit_test(racer.pos)):
+                            not racer.star_active and self.cactus_hazards.hit_test(racer.pos)):
                         racer.hit_by_cactus(self.elapsed)
                     if self.gorge_hazards is not None and not racer.finished and \
-                            racer.train_immunity_left<=0.0:
+                            racer.train_immunity_left<=0.0 and not racer.star_active:
                         log=self.gorge_hazards.hit_test(before,racer.pos)
                         if log is not None and racer.hit_by_log(self.elapsed):
                             self.gorge_hazards.nudge_on_hit(log,racer.pos)
                     if (self.canyon_hazards is not None and not racer.finished and
                             not racer.fall_phase and not racer.flight_left and
-                            racer.train_immunity_left<=0):
+                            racer.train_immunity_left<=0 and not racer.star_active):
                         if self.canyon_hazards.hit_test(before,racer.pos):
                             racer.hit_by_comet(self.elapsed)
                     if (self.phantom_hazards is not None and not racer.finished
                             and not racer.fall_phase and not racer.flight_left
                             and racer.train_immunity_left<=0.0 and
-                            not racer.train_spin_left):
+                            not racer.train_spin_left and not racer.star_active):
                         actor=self.phantom_hazards.hit_test(before,racer.pos)
                         if actor is not None and racer.hit_by_phantom(self.elapsed):
                             self.phantom_hazards.ghost_hit(actor)
                     if (self.glow_hazards is not None and not racer.finished and
                             not racer.fall_phase and not racer.flight_left and
-                            racer.train_immunity_left<=0 and not racer.train_spin_left):
+                            racer.train_immunity_left<=0 and not racer.train_spin_left
+                            and not racer.star_active):
                         fairy=self.glow_hazards.hit_test(before,racer.pos)
                         if fairy is not None and racer.hit_by_fairy(self.elapsed):
                             self.glow_hazards.on_hit(fairy)
                     if (self.spiral_hazards is not None and not racer.finished and
                             not racer.fall_phase and not racer.flight_left and
-                            racer.train_immunity_left<=0 and not racer.train_spin_left):
+                            racer.train_immunity_left<=0 and not racer.train_spin_left
+                            and not racer.star_active):
                         cat=self.spiral_hazards.hit_test(before,racer.pos)
                         if cat is not None and racer.hit_by_cat(self.elapsed):
                             self.spiral_hazards.on_hit(cat)
                     if (self.rocket_hazards is not None and not racer.finished and
                             not racer.fall_phase and not racer.flight_left and
-                            racer.train_immunity_left<=0 and not racer.train_spin_left):
+                            racer.train_immunity_left<=0 and not racer.train_spin_left
+                            and not racer.star_active):
                         chomper=self.rocket_hazards.hit_test(before,racer.pos,racer)
                         if chomper is not None and racer.hit_by_rocket(self.elapsed):
                             self.rocket_hazards.on_hit(chomper)
                     if not racer.fall_phase and not racer.flight_left:
                         self.try_collect_powerups(racer,before)
+                self.update_star_contacts(prior_positions)
                 if self.active_ghost is not None:
                     ghost=self.active_ghost
                     previous=ghost.pos
