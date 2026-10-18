@@ -1,4 +1,4 @@
-"""WasteKart 2.7.0 - Rainbow Rocket, Star Cup 4/4, layered Cog Chompers and scaling.
+"""WasteKart 2.7.1 - Rainbow Rocket, Star Cup 4/4, layered Cog Chompers and scaling.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
@@ -38,7 +38,8 @@ REACTION_EFFECT_SECONDS = 3.0
 EARLY_START_MODIFIER = 0.82 # A gentle, temporary false-start penalty.
 TRAIL_CHUNK_WORLD = 240.0  # Pre-render short route spans, not whole paths every frame.
 POWERUP_RESPAWN = 7.0      # Same shared box disappears temporarily for all players.
-POWERUP_PICKUP_RADIUS = 23.0  # World pixels: must draw near a box, not just follow road center.
+POWERUP_PICKUP_RADIUS = 11.5  # Half the previous 23px collection radius (world pixels).
+PICKUP_VISUAL_SCALE = 0.50  # Keep the pickups, orbiting glints and respawn feedback proportionate.
 POWERUP_DURATION = {'turbo': 3.2, 'tailwind': 6.0}
 POWERUP_MULTIPLIER = {'turbo': 1.48, 'tailwind': 1.20}
 POWERUP_COLORS = {'turbo': (255, 169, 59), 'tailwind': (91, 239, 240)}
@@ -2902,33 +2903,21 @@ class WasteKartGame:
         if self.track.overlay_path and os.path.exists(self.track.overlay_path):
             overlay=pygame.image.load(self.track.overlay_path).convert_alpha()
             if self.track.rocket_data:
-                # The supplied rainbow deck overlay has ROUND end caps. Those
-                # caps are already in the base map: re-blitting them between
-                # kart layers incorrectly paints semicircles OVER karts on the
-                # upper ramp approaches. The overlay is needed only WHERE
-                # the upper deck actually crosses a lower road. Clip to two
-                # lower-road corridors; upper-road racers are rendered later.
-                cover=pygame.Surface(overlay.get_size(),pygame.SRCALPHA)
-                for crossing in self.track.rocket_data['layers']['crossings']:
-                    at=min(self.track.rocket_samples,
-                           key=lambda sample:abs(sample['s']-crossing['lower_index']))
-                    x,y=map(float,crossing['point'])
-                    tx,ty=float(at['tx']),float(at['ty'])
-                    mag=math.hypot(tx,ty) or 1.0
-                    tx/=mag;ty/=mag
-                    nx,ny=-ty,tx
-                    half_width=float(at['half_width'])+14.0  # Kart/sprite margin.
-                    half_length=90.0
-                    corners=[(x+along*tx+across*nx,y+along*ty+across*ny)
-                             for along,across in ((-half_length,-half_width),
-                                                  (half_length,-half_width),
-                                                  (half_length,half_width),
-                                                  (-half_length,half_width))]
-                    pygame.draw.polygon(cover,(255,255,255,255),corners)
-                overlay.blit(cover,(0,0),special_flags=pygame.BLEND_RGBA_MULT)
-            if self.track.glow_data or self.track.rocket_data:
-                # Tunnel / space decks occupy only ~266x131 of the 960x600 map. Crop once,
-                # rather than alpha-blending a full 740x462 sprite at 60 FPS.
+                # The prepared deck overlay contains ONLY the bridge surface at
+                # the two crossing footprints. All pixels are copied from the
+                # actual background track (no separately painted semicircular
+                # ramps), so lower-level racers pass beneath the SAME artwork.
+                # Scale the FULL surface before cropping: the texture sampling
+                # then stays aligned to the already-scaled base map, avoiding
+                # 1px seams at the clip boundary on Pygbag and desktop pygame.
+                scaled=pygame.transform.smoothscale(overlay,TRACK_RECT.size)
+                bbox=scaled.get_bounding_rect(min_alpha=1)
+                if bbox.width and bbox.height:
+                    self.bridge_overlay_surface=scaled.subsurface(bbox).copy()
+                    self.bridge_overlay_xy=(TRACK_RECT.left+bbox.left,
+                                            TRACK_RECT.top+bbox.top)
+            elif self.track.glow_data:
+                # Glow Garden tunnel is sparse; crop before the scale transform.
                 bbox=overlay.get_bounding_rect(min_alpha=1)
                 if bbox.width and bbox.height:
                     cropped=overlay.subsurface(bbox).copy()
@@ -3297,57 +3286,64 @@ class WasteKartGame:
             self.canvas.blit(self.bridge_overlay_surface, self.bridge_overlay_xy)
 
     def draw_powerup_boxes(self, race=False):
-        """Small rotating, bobbing cubes with orbital sparkles and respawn effects.
+        """Half-size item boxes; all orbit, glow and pickup effects match their size.
 
-        The animation uses deterministic per-box phases, no per-frame image
-        transforms, and no particle surfaces: inexpensive on Pygbag/iPad.
+        The item positions and inventory logic are unchanged. A single cached
+        small '?' glyph and cheap Pygame polygons keep the effect Pygbag-safe.
         """
         if not self.powerups_enabled or not self.pickups:return
+        scale=PICKUP_VISUAL_SCALE
         if self.question_mark is None:
-            self.question_mark=self.font(30).render('?',True,(255,251,220))
+            self.question_mark=self.font(19).render('?',True,(255,251,220))
         t=self.item_box_clock
         for box in self.pickups:
             x,y=self.world_to_screen(box.pos)
             if race and not box.available(self.elapsed):
                 age=self.elapsed-box.picked_at
                 if 0<=age<.52:
-                    radius=round(8+age*49)
-                    pygame.draw.circle(self.canvas,(255,226,130),(round(x),round(y)),radius,3)
-                    pygame.draw.circle(self.canvas,(147,237,248),(round(x),round(y)),max(3,radius-6),2)
+                    radius=round((8+age*49)*scale)
+                    center=(round(x),round(y))
+                    pygame.draw.circle(self.canvas,(255,226,130),center,radius,2)
+                    pygame.draw.circle(self.canvas,(147,237,248),center,max(2,radius-3),1)
                     for j in range(4):
                         theta=j*math.pi/2+age*4
                         self.draw_sparkle((x+math.cos(theta)*radius,y+math.sin(theta)*radius),
-                                          3+(1-age)*3,(255,242,166))
+                                          max(2,(3+(1-age)*3)*scale),(255,242,166))
                 continue
             phase=t*3.0+box.slot*.91
-            bob=math.sin(phase)*4.0
+            bob=math.sin(phase)*4.0*scale
             cx,cy=round(x),round(y+bob)
-            # Orbiting motes make the pickup visually lively even when the cube
-            # is almost edge-on in its fake 3D rotation.
+            # The orbit used to be 25px. Keep it at ~12.5px, matching the cube.
             for j in range(3):
                 theta=t*(1.45+j*.15)+box.slot*1.37+j*2*math.pi/3
-                orbit=25+2*math.sin(t*2+j+box.slot)
+                orbit=(25+2*math.sin(t*2+j+box.slot))*scale
                 sx=cx+math.cos(theta)*orbit
                 sy=cy+math.sin(theta)*orbit*.62
                 mote_color=((255,234,147),(133,244,255),(227,177,255))[j]
-                self.draw_sparkle((sx,sy),3.2+1.6*abs(math.sin(phase+j)),mote_color)
+                self.draw_sparkle((sx,sy),max(2,(3.2+1.6*abs(math.sin(phase+j)))*scale),mote_color)
             spin=math.sin(phase)
-            wide=10+round(7*abs(math.cos(phase)))
-            depth=7 if spin>=0 else -7
-            pts=[(cx-wide,cy-13),(cx+wide,cy-13),(cx+wide,cy+13),(cx-wide,cy+13)]
-            side=[pts[1],(pts[1][0]+depth,pts[1][1]-5),
-                  (pts[2][0]+depth,pts[2][1]-5),pts[2]] if spin>=0 else [
-                  pts[0],(pts[0][0]+depth,pts[0][1]-5),
-                  (pts[3][0]+depth,pts[3][1]-5),pts[3]]
-            pygame.draw.ellipse(self.canvas,(37,35,71),(cx-18,cy+14,36,8))
+            wide=(10+7*abs(math.cos(phase)))*scale
+            depth=7*scale if spin>=0 else -7*scale
+            h=13*scale
+            pts=[(cx-wide,cy-h),(cx+wide,cy-h),
+                 (cx+wide,cy+h),(cx-wide,cy+h)]
+            side=[pts[1],(pts[1][0]+depth,pts[1][1]-5*scale),
+                  (pts[2][0]+depth,pts[2][1]-5*scale),pts[2]] if spin>=0 else [
+                  pts[0],(pts[0][0]+depth,pts[0][1]-5*scale),
+                  (pts[3][0]+depth,pts[3][1]-5*scale),pts[3]]
+            pygame.draw.ellipse(self.canvas,(37,35,71),
+                                (cx-18*scale,cy+14*scale,36*scale,8*scale))
             pygame.draw.polygon(self.canvas,(67,187,228),side)
             pygame.draw.polygon(self.canvas,(144,86,211),pts)
-            pygame.draw.polygon(self.canvas,(218,176,255),pts,3)
-            pygame.draw.line(self.canvas,(255,238,173),(cx-wide+4,cy-9),(cx+wide-3,cy-9),2)
-            self.canvas.blit(self.question_mark,self.question_mark.get_rect(center=(cx,cy+1)))
-            self.draw_sparkle((cx+wide+depth+3,cy-15),
-                              4+2*abs(math.sin(t*4+box.slot)),(255,251,177))
-
+            pygame.draw.polygon(self.canvas,(218,176,255),pts,2)
+            pygame.draw.line(self.canvas,(255,238,173),
+                             (cx-wide+4*scale,cy-9*scale),
+                             (cx+wide-3*scale,cy-9*scale),1)
+            self.canvas.blit(self.question_mark,
+                             self.question_mark.get_rect(center=(cx,cy)))
+            self.draw_sparkle((cx+wide+depth+2*scale,cy-15*scale),
+                              max(2,(4+2*abs(math.sin(t*4+box.slot)))*scale),
+                              (255,251,177))
 
     def draw_start(self):
         if not self.track:return
@@ -3430,7 +3426,13 @@ class WasteKartGame:
             if len(self.draft)>1:
                 self.draw_route_layered(self.draft,color,6,dashed=False,layer=0)
             self.draw_start()
-            self.draw_bridge_overlay()
+            if (self.rocket_hazards is None or len(self.draft)>1 or
+                    self.routes or self.drawn_laps):
+                # Hide lower-layer pencil strokes beneath the upper crossings.
+                # No empty-screen redraw on Rainbow Rocket: the base map already
+                # has the bridge art. Its *replacement* overlay uses only the
+                # source pixels around both crossings, with no round endcaps.
+                self.draw_bridge_overlay()
             if self.rocket_hazards is not None:
                 self.rocket_hazards.draw(self.canvas,self.world_to_screen,layer=1)
             if self.draw_routes_layer_overpass is not None:

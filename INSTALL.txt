@@ -1,26 +1,22 @@
-WASTEKART 2.4.0 - STAR CUP 2/4 + 3/4
-========================================
-Merge WasteGame/ into the root of your existing GameHub repository.
-Replace WasteGame/wasteKart.py with the included file.
-Keep all existing WasteGame/assets/WasteKart/ files, including catalog.json,
-comet_canyon/ and phantom_boardwalk/. Do not delete earlier asset folders.
+WasteKart 2.7.1 - Rainbow Rocket bridge repair and smaller item boxes
 
-Glow Garden:
-    WasteGame/assets/WasteKart/glow_garden/
-Starlight Spiral:
-    WasteGame/assets/WasteKart/starlight_spiral/
+Extract this ZIP in the GameHub repository root; overwrite the existing files.
 
-Star Cup 1/4 Phantom Boardwalk is retained (requires its existing assets).
-Star Cup 2/4 Glow Garden is now loaded automatically.
-Star Cup 3/4 Starlight Spiral is now loaded automatically.
-Star Cup 4/4 is unchanged.
-The existing catalog.json does not need to be changed.
+REQUIRED REPLACEMENTS
+  WasteGame/wasteKart.py
+  WasteGame/assets/WasteKart/rainbow_rocket/rainbow_rocket_deck_overlay.png
 
-Both new tracks use the original supplied PNGs and manifests plus their
-new *_geometry.json files. Each track has no fall zones; its off-road terrain
-slows karts to 0.55x. Fairy/cat impacts share the two-turn 0.9s stun and 0.6s
-post-stun immunity. Glow's tube tunnel overlays karts. Spiral's crossing is flat.
+The Python file and deck overlay must be installed together. Otherwise the
+old rounded bridge overlay may still appear. Rainbow Rocket's base track,
+geometry, masks, cup registration, widths, and rescue points are unchanged.
 
-No graphical Pygame/Pygbag runtime was available for verification here;
-Python compilation, asset existence, mask/geometry validation, and isolated
-headless hazard/collision and 1-lap/3-lap simulations passed.
+Item-box collision radius: 23 -> 11.5 world pixels. Item boxes, floating
+glints and collection animations are reduced to approximately half scale.
+Existing turbo/tailwind graphics and four permanent player amulets unchanged.
+
+Complete ZIP includes the previous 2.7.0 1x amulet artwork for easy setup.
+The smaller patch ZIP includes ONLY the two required replacements.
+
+Tested: syntax, six Cog Chompers, 438 track samples, both crossing masks,
+pickup radius boundary tests, amulet test, 1- and 3-lap route progression.
+Pygame and Pygbag visual validation still needs to be carried out on device.
