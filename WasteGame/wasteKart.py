@@ -1,4 +1,4 @@
-"""WasteKart 2.6.0 - Rainbow Rocket, Star Cup 4/4, layered Cog Chompers and scaling.
+"""WasteKart 2.7.0 - Rainbow Rocket, Star Cup 4/4, layered Cog Chompers and scaling.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
@@ -2792,6 +2792,8 @@ class WasteKartGame:
         self.action_buttons=[]
         self.catalog=self.load_catalog()
         self.load_karts()
+        self.load_amulet_art()
+        self.amulet_pressed_until=[-1.0]*4
 
     def load_catalog(self):
         with open(os.path.join(ASSET_ROOT,'catalog.json'),encoding='utf8') as stream:
@@ -2837,6 +2839,54 @@ class WasteKartGame:
             image=pygame.image.load(path).convert_alpha()
             self.kart_images.append(image)
 
+    def load_amulet_art(self):
+        """Preload the supplied 1x (800x600 logical pixel) amulet artwork.
+
+        2x and 4x are editing masters, not needed in the runtime. If assets
+        are absent, retain the original Pygame circles as a safe fallback.
+        """
+        self.amulet_art=None
+        root=os.path.join(ASSET_ROOT,'amulets')
+        manifest_file=os.path.join(root,'amulet_manifest.json')
+        if not os.path.isfile(manifest_file):
+            return
+        try:
+            with open(manifest_file,encoding='utf8') as source:
+                manifest=json.load(source)
+            directory=os.path.join(root,'1x')
+            def sprite(relative):
+                return pygame.image.load(os.path.join(directory,*relative.split('/'))).convert_alpha()
+            names=manifest['palette_index_to_name']
+            self.amulet_art={
+                'plain':[sprite(f'amulets/amulet_{i}_{names[str(i)]}_plain.png') for i in range(8)],
+                'socket':[sprite(f'amulets/amulet_{i}_{names[str(i)]}_socket.png') for i in range(8)],
+                'off_plain':sprite('amulets/amulet_off_plain.png'),
+                'off_socket':sprite('amulets/amulet_off_socket.png'),
+                'badges':[[sprite(f'badges/badge_{i}_{names[str(i)]}_p{p}.png')
+                           for p in range(1,5)] for i in range(8)],
+                'off_badges':[sprite(f'badges/badge_off_p{p}.png') for p in range(1,5)],
+                'fx':{name:sprite(f'fx/{name}.png') for name in
+                      ('halo_gold','halo_turbo','halo_tailwind','pressed_overlay')},
+                'halo_cache':{},
+            }
+        except (OSError,ValueError,KeyError,pygame.error):
+            # Never block GameHub startup because an optional art pack is absent.
+            self.amulet_art=None
+
+    def draw_amulet_halo(self,name,player,cx,cy):
+        """Small quantized alpha palette avoids allocating images each frame."""
+        art=self.amulet_art
+        if not art:return
+        opacity=round((.64+.32*abs(math.sin(self.item_box_clock*4.8+player)))*255/16)*16
+        opacity=int(clamp(opacity,0,255))
+        key=(name,opacity)
+        img=art['halo_cache'].get(key)
+        if img is None:
+            img=art['fx'][name].copy()
+            img.set_alpha(opacity)
+            art['halo_cache'][key]=img
+        self.canvas.blit(img,(cx-48,cy-48))
+
     def load_track(self):
         self.draw_routes_layer_key=None
         index=self.cup*4+self.track_index
@@ -2851,6 +2901,31 @@ class WasteKartGame:
         self.bridge_overlay_xy=TRACK_RECT.topleft
         if self.track.overlay_path and os.path.exists(self.track.overlay_path):
             overlay=pygame.image.load(self.track.overlay_path).convert_alpha()
+            if self.track.rocket_data:
+                # The supplied rainbow deck overlay has ROUND end caps. Those
+                # caps are already in the base map: re-blitting them between
+                # kart layers incorrectly paints semicircles OVER karts on the
+                # upper ramp approaches. The overlay is needed only WHERE
+                # the upper deck actually crosses a lower road. Clip to two
+                # lower-road corridors; upper-road racers are rendered later.
+                cover=pygame.Surface(overlay.get_size(),pygame.SRCALPHA)
+                for crossing in self.track.rocket_data['layers']['crossings']:
+                    at=min(self.track.rocket_samples,
+                           key=lambda sample:abs(sample['s']-crossing['lower_index']))
+                    x,y=map(float,crossing['point'])
+                    tx,ty=float(at['tx']),float(at['ty'])
+                    mag=math.hypot(tx,ty) or 1.0
+                    tx/=mag;ty/=mag
+                    nx,ny=-ty,tx
+                    half_width=float(at['half_width'])+14.0  # Kart/sprite margin.
+                    half_length=90.0
+                    corners=[(x+along*tx+across*nx,y+along*ty+across*ny)
+                             for along,across in ((-half_length,-half_width),
+                                                  (half_length,-half_width),
+                                                  (half_length,half_width),
+                                                  (-half_length,half_width))]
+                    pygame.draw.polygon(cover,(255,255,255,255),corners)
+                overlay.blit(cover,(0,0),special_flags=pygame.BLEND_RGBA_MULT)
             if self.track.glow_data or self.track.rocket_data:
                 # Tunnel / space decks occupy only ~266x131 of the 960x600 map. Crop once,
                 # rather than alpha-blending a full 740x462 sprite at 60 FPS.
@@ -3554,27 +3629,48 @@ class WasteKartGame:
             clock = self.item_box_clock
             centre=(cx,cy)
             radius=AMULET_RADIUS
-            pygame.draw.circle(self.canvas,(10,17,29),(cx,cy+3),radius+3)
-            # Color identity remains visible even with the original yellow or
-            # turquoise item logo filling the centre of the amulet.
-            tint=(round(color[0]*.20+20),round(color[1]*.20+26),
-                  round(color[2]*.20+38))
-            pygame.draw.circle(self.canvas,tint,centre,radius-2)
-            pygame.draw.circle(self.canvas,color,centre,radius,6)
-            pygame.draw.circle(self.canvas,(171,192,208) if enabled else (81,93,107),
-                               centre,radius-7,1)
-            if active_selection or item_ready:
-                pulse=2+round(2*abs(math.sin(clock*4.8+player)))
-                pygame.draw.circle(self.canvas,YELLOW,centre,radius+pulse,2)
-            # The number is NOT replaced by a power-up. It remains a reliable
-            # label even for two players who choose similar-looking karts.
+            art=self.amulet_art
+            socket=bool(enabled and mode=='game' and not reflex and
+                        self.powerups_enabled and racer is not None and
+                        self.state=='race')
+            if art:
+                # 96x96 art is centered at (48,48); touch circle still radius 41.
+                bg=(art['socket' if socket else 'plain'][self.kart_ids[player]]
+                    if enabled else art['off_plain'])
+                self.canvas.blit(bg,(cx-48,cy-48))
+                halo=('halo_turbo' if running=='turbo' else
+                      'halo_tailwind' if running=='tailwind' else
+                      'halo_gold' if (active_selection or item_ready or
+                                      (reflex and self.state=='race' and
+                                       player<len(self.reaction_status) and
+                                       self.reaction_status[player]=='waiting')) else None)
+                if halo:
+                    self.draw_amulet_halo(halo,player,cx,cy)
+                if (racer is not None and
+                        self.item_box_clock<self.amulet_pressed_until[player]):
+                    self.canvas.blit(art['fx']['pressed_overlay'],(cx-48,cy-48))
+            else:
+                # Preserve the old native Pygame rendering without the art pack.
+                pygame.draw.circle(self.canvas,(10,17,29),(cx,cy+3),radius+3)
+                tint=(round(color[0]*.20+20),round(color[1]*.20+26),
+                      round(color[2]*.20+38))
+                pygame.draw.circle(self.canvas,tint,centre,radius-2)
+                pygame.draw.circle(self.canvas,color,centre,radius,6)
+                pygame.draw.circle(self.canvas,(171,192,208) if enabled else (81,93,107),
+                                   centre,radius-7,1)
+                if active_selection or item_ready:
+                    pulse=2+round(2*abs(math.sin(clock*4.8+player)))
+                    pygame.draw.circle(self.canvas,YELLOW,centre,radius+pulse,2)
             badge=(cx-27,cy-27)
-            pygame.draw.circle(self.canvas,(13,22,37),badge,15)
-            pygame.draw.circle(self.canvas,color,badge,13)
-            self.text(str(player+1),badge,20,INK if enabled else WHITE)
 
             if not enabled:
                 self.text('—', (cx,cy+2),30,(122,134,147))
+                if art:
+                    self.canvas.blit(art['off_badges'][player],(cx-43,cy-43))
+                else:
+                    pygame.draw.circle(self.canvas,(13,22,37),badge,15)
+                    pygame.draw.circle(self.canvas,color,badge,13)
+                    self.text(str(player+1),badge,20,WHITE)
                 continue
 
             if mode in ('selection','preview') or (mode=='game' and
@@ -3604,7 +3700,7 @@ class WasteKartGame:
                     self.draw_tap_icon((cx,cy-5),23,WHITE if green else MUTED)
                     self.text('TAP!' if green else 'WAIT',
                               (cx,cy+25),17,YELLOW if green else MUTED)
-                    if green:
+                    if green and not art:
                         pygame.draw.circle(self.canvas,YELLOW,centre,radius+2,2)
             elif self.powerups_enabled and racer is not None:
                 # Reuse the two established, recognizable TURBO and TAILWIND
@@ -3635,6 +3731,15 @@ class WasteKartGame:
                 sprite=self.kart_rotation_cache[key]
                 self.canvas.blit(sprite,sprite.get_rect(center=(cx,cy-3)))
                 self.text('KART',(cx,cy+24),16,WHITE)
+
+            # Identity badge on TOP of pocket/logos, as authored in the manifest.
+            if art:
+                self.canvas.blit(art['badges'][self.kart_ids[player]][player],
+                                 (cx-43,cy-43))
+            else:
+                pygame.draw.circle(self.canvas,(13,22,37),badge,15)
+                pygame.draw.circle(self.canvas,color,badge,13)
+                self.text(str(player+1),badge,20,INK)
 
             # Only real racers in the playable state are touch-active. The same
             # button handles both start reaction and later item activation.
@@ -4361,6 +4466,8 @@ class WasteKartGame:
             elif self.race_mode=='cup':self.start_championship()
             else:self.begin_new_race()
         elif name=='amulet':
+            if 0<=value<self.players and not self.paused:
+                self.amulet_pressed_until[value]=self.item_box_clock+.12
             # No moving or disappearing control: one action at the same corner
             # for the whole race. Reflex has priority during the green window.
             if self.reflex_start and (self.state=='countdown' or

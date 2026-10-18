@@ -1,0 +1,60 @@
+{
+ "name": "WasteKart player amulets",
+ "sprite_canvas_px": [
+  96,
+  96
+ ],
+ "centre_in_sprite": [
+  48,
+  48
+ ],
+ "scales": {
+  "1x": "96x96 (logical pixels, use this at 800x600)",
+  "2x": "192x192",
+  "4x": "384x384 (master)"
+ },
+ "geometry_unchanged": {
+  "AMULET_RADIUS": 39,
+  "AMULET_TOUCH_RADIUS": 41,
+  "note": "visible medallion has exactly radius 39 (6 px colour rim = r 33..39); soft drop shadow (offset +3 px down) is baked in and reaches r 43"
+ },
+ "placement": {
+  "blit_top_left": "(cx - 48, cy - 48) where (cx, cy) is the PLAYER_AMULETS entry",
+  "badge_top_left": "(cx - 27 - 16, cy - 27 - 16)  [badge sprite is 32x32, centred on the old badge point]",
+  "halo_top_left": "(cx - 48, cy - 48)",
+  "overlay_top_left": "(cx - 48, cy - 48)"
+ },
+ "files": {
+  "amulets/amulet_<i>_<name>_socket.png": "rim in PALETTE[i] colour + dark glass dish with a recessed pocket (radius 21, centred at (cx, cy-4)) for the existing TURBO / TAILWIND / ? logos (drawn by draw_powerup_icon at (cx, cy-4), size 34)",
+  "amulets/amulet_<i>_<name>_plain.png": "same without the pocket: use for KART / selection / PICK / reflex TAP, EARLY, BOOST text states",
+  "amulets/amulet_off_socket.png / amulet_off_plain.png": "grey disabled corner (player not in the game); the em dash is still drawn by code",
+  "badges/badge_<i>_<name>_p<1-4>.png": "number badge, colour of the kart, number baked (dark ink)",
+  "badges/badge_<i>_<name>_blank.png": "badge without number if you prefer self.text()",
+  "badges/badge_off_p<1-4>.png / badge_off_blank.png": "grey badge for disabled corners",
+  "fx/halo_gold.png": "gold ready / active-selection glow ring, replaces the pygame circle(YELLOW); pulse with alpha 0.55..1.0 or scale 1.0..1.06 around the centre",
+  "fx/halo_turbo.png, fx/halo_tailwind.png": "same ring in the two boost colours, for the running-boost state",
+  "fx/pressed_overlay.png": "draw on top of the amulet (under the logo) for ~0.12 s on tap"
+ },
+ "palette_index_to_name": {
+  "0": "red",
+  "1": "blue",
+  "2": "green",
+  "3": "gold",
+  "4": "violet",
+  "5": "orange",
+  "6": "teal",
+  "7": "pink"
+ },
+ "draw_order_per_corner": [
+  "amulet sprite (it already contains the shadow)",
+  "optional halo / pressed overlay",
+  "existing logo via draw_powerup_icon (cx, cy-4, 34) or the kart image / text",
+  "badge sprite",
+  "text labels (TAP!, GO!, KART ...)",
+  "boost timer arc (pygame.draw.arc, radius 32 fits inside the rim)"
+ ],
+ "notes": [
+  "The pocket sits at (cx, cy-4); the old kart image (39x29 at cy-3) also fits inside the dish when you use the plain variant.",
+  "Pre-load all sprites once; the 4 corners only need the 8 colours x 2 variants plus 1 off sprite."
+ ]
+}
