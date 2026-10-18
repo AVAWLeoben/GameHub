@@ -1,22 +1,26 @@
-WasteKart 2.7.1 - Rainbow Rocket bridge repair and smaller item boxes
+WasteKart 2.7.2 - Rainbow Rocket continuous bridge rebuild
 
-Extract this ZIP in the GameHub repository root; overwrite the existing files.
+INSTALL (existing GameHub / WasteKart installation)
+- Extract the patch into your GameHub repository root.
+- Replace WasteGame/wasteKart.py.
+- Replace ALL six Rainbow Rocket PNGs included in this ZIP.
+- Do not keep the old rainbow_rocket_track.png; it contains the rounded
+  bridge-piece art. Changing the overlay alone cannot remove those caps.
+- No changes to catalog.json, geometry, width profiles, respawn checkpoints,
+  or power-up/amulet behavior are necessary.
 
-REQUIRED REPLACEMENTS
-  WasteGame/wasteKart.py
-  WasteGame/assets/WasteKart/rainbow_rocket/rainbow_rocket_deck_overlay.png
+The complete upgrade adds the original Rainbow Rocket sprites, metadata and
+existing 1x amulet artwork for convenience. Other WasteKart cups and original
+GameHub assets are still expected in their normal repository directories.
 
-The Python file and deck overlay must be installed together. Otherwise the
-old rounded bridge overlay may still appear. Rainbow Rocket's base track,
-geometry, masks, cup registration, widths, and rescue points are unchanged.
+Why the change? The sausage-shaped bridge caps were baked into the *base track
+image*, not just the above-kart overlay. A new rasterizer uses the unchanged
+438-position 960x600 width/height profile to draw continuous rainbow tiles and
+edge lines through both overpasses. All collision/fall/layer masks are generated
+from the exact same geometry. The upper deck overlay is cropped directly from
+those final map pixels for no differently-painted bridge strips.
 
-Item-box collision radius: 23 -> 11.5 world pixels. Item boxes, floating
-glints and collection animations are reduced to approximately half scale.
-Existing turbo/tailwind graphics and four permanent player amulets unchanged.
-
-Complete ZIP includes the previous 2.7.0 1x amulet artwork for easy setup.
-The smaller patch ZIP includes ONLY the two required replacements.
-
-Tested: syntax, six Cog Chompers, 438 track samples, both crossing masks,
-pickup radius boundary tests, amulet test, 1- and 3-lap route progression.
-Pygame and Pygbag visual validation still needs to be carried out on device.
+Validation: compile, RGBA overdraw identity, both crossing masks, all 438
+profile samples, kart-center and midroad positions, 19 respawn points per lap,
+1-lap and 3-lap completion, forward rescue to safe roadway.
+Full visual testing in Pygame/Pygbag still required.

@@ -1,10 +1,11 @@
-"""WasteKart 2.7.1 - Rainbow Rocket, Star Cup 4/4, layered Cog Chompers and scaling.
+"""WasteKart 2.7.2 - Rainbow Rocket, Star Cup 4/4, layered Cog Chompers and scaling.
 
 Pygame-ce / Pygbag compatible GameHub entry point:
     await wasteKart.main(screen, clock)
 
 Original four-cup, sixteen-course art resides in assets/WasteKart.
-Races retain all original courses. Stars 1-3 have custom sprite hazards.
+Races retain all original courses. Rainbow Rocket bridges use continuous road art.
+Stars 1-3 have custom sprite hazards.
 """
 import asyncio
 import bisect
