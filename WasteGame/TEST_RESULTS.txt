@@ -1,0 +1,26 @@
+test_all_screen_states_render_without_assets_and_at_other_sizes (test_hungryHedgie.GameChecks.test_all_screen_states_render_without_assets_and_at_other_sizes) ... ok
+test_basket_capacity_keeps_excess_food_in_the_field (test_hungryHedgie.GameChecks.test_basket_capacity_keeps_excess_food_in_the_field) ... ok
+test_browser_store_roundtrip_and_denied_storage (test_hungryHedgie.GameChecks.test_browser_store_roundtrip_and_denied_storage) ... ok
+test_complete_adventure_by_tapping_and_walking (test_hungryHedgie.GameChecks.test_complete_adventure_by_tapping_and_walking) ... ok
+test_completed_save_opens_its_reward_and_replay_starts_cleanly (test_hungryHedgie.GameChecks.test_completed_save_opens_its_reward_and_replay_starts_cleanly) ... ok
+test_corrupt_or_out_of_range_save_cannot_break_progression (test_hungryHedgie.GameChecks.test_corrupt_or_out_of_range_save_cannot_break_progression) ... ok
+test_delivery_is_counted_once_without_negative_carried_food (test_hungryHedgie.GameChecks.test_delivery_is_counted_once_without_negative_carried_food) ... ok
+test_existing_asset_names_load_when_present (test_hungryHedgie.GameChecks.test_existing_asset_names_load_when_present) ... ok
+test_frame_rate_independent_travel_and_diagonal_speed (test_hungryHedgie.GameChecks.test_frame_rate_independent_travel_and_diagonal_speed) ... ok
+test_gamehub_entry_point_returns_without_quitting_pygame (test_hungryHedgie.GameChecks.test_gamehub_entry_point_returns_without_quitting_pygame) ... ok
+test_hud_and_modal_clicks_do_not_steer (test_hungryHedgie.GameChecks.test_hud_and_modal_clicks_do_not_steer) ... ok
+test_lantern_expires_without_changing_base_rules (test_hungryHedgie.GameChecks.test_lantern_expires_without_changing_base_rules) ... ok
+test_neighbour_keeps_food_and_home_is_safe (test_hungryHedgie.GameChecks.test_neighbour_keeps_food_and_home_is_safe) ... ok
+test_one_pickup_is_one_berry_and_cannot_be_collected_twice (test_hungryHedgie.GameChecks.test_one_pickup_is_one_berry_and_cannot_be_collected_twice) ... ok
+test_pause_and_focus_loss_freeze_gameplay_and_clear_input (test_hungryHedgie.GameChecks.test_pause_and_focus_loss_freeze_gameplay_and_clear_input) ... ok
+test_real_desktop_store_roundtrip_and_invalid_json (test_hungryHedgie.GameChecks.test_real_desktop_store_roundtrip_and_invalid_json) ... ok
+test_releasing_keyboard_stops_without_a_backward_step (test_hungryHedgie.GameChecks.test_releasing_keyboard_stops_without_a_backward_step) ... ok
+test_save_during_delivery_cannot_lose_or_duplicate_food (test_hungryHedgie.GameChecks.test_save_during_delivery_cannot_lose_or_duplicate_food) ... ok
+test_save_resume_carried_food_and_partial_stage (test_hungryHedgie.GameChecks.test_save_resume_carried_food_and_partial_stage) ... ok
+test_tap_walks_after_release_and_drag_changes_target (test_hungryHedgie.GameChecks.test_tap_walks_after_release_and_drag_changes_target) ... ok
+test_touch_uses_scaled_coordinates_and_ignores_duplicate_mouse (test_hungryHedgie.GameChecks.test_touch_uses_scaled_coordinates_and_ignores_duplicate_mouse) ... ok
+
+----------------------------------------------------------------------
+Ran 21 tests in 0.630s
+
+OK
