@@ -1,0 +1,510 @@
+{
+ "track": "Rainbow Rocket",
+ "cup": "Star Cup 4/4",
+ "canvas_px": [
+  960,
+  600
+ ],
+ "lap_length_px": 2624,
+ "base_road_width_px": 86.0,
+ "files": {
+  "track": "rainbow_rocket_track.png",
+  "road_layer0": "rainbow_rocket_road_mask_layer0.png",
+  "road_layer1_deck": "rainbow_rocket_road_mask_layer1_deck.png",
+  "road_all": "rainbow_rocket_road_mask_all.png",
+  "fall_zone": "rainbow_rocket_fall_zone_mask.png",
+  "deck_overlay": "rainbow_rocket_deck_overlay.png",
+  "width_profile": "rainbow_rocket_width_profile.json",
+  "chomper_paths": "rainbow_rocket_chomper_paths.json"
+ },
+ "layout": "three-lobe chain with two overpass crossings; widths change from 62 to 114 px (kart scale 0.72 .. 1.33)",
+ "layers": {
+  "rule": "layer 0 = ground road (includes the narrow strand under each deck), layer 1 = deck. A kart switches layer by index: layer1_ranges in width_profile.json. Draw order: track, layer-0 karts, deck_overlay, layer-1 karts.",
+  "crossings": [
+   {
+    "id": "X1",
+    "point": [
+     348.1,
+     331.9
+    ],
+    "upper_index": 2263,
+    "lower_index": 424
+   },
+   {
+    "id": "X2",
+    "point": [
+     642.7,
+     302.4
+    ],
+    "upper_index": 943,
+    "lower_index": 1745
+   }
+  ]
+ },
+ "start": {
+  "x": 162.9488797455154,
+  "y": 226.12668925457345,
+  "tx": 0.5443157553002067,
+  "ty": -0.8388804196856461,
+  "idx": 150,
+  "half_width": 52.0
+ },
+ "draw_order": [
+  "track",
+  "shadows",
+  "layer-0 karts + chompers",
+  "deck_overlay",
+  "layer-1 karts + chompers",
+  "fx"
+ ],
+ "surfaces": {
+  "road": 1.0,
+  "off_road": "none - outside the road is the fall zone (no slow zone)"
+ },
+ "fall": {
+  "fall_zone_mask": "rainbow_rocket_fall_zone_mask.png",
+  "check": "kart centre is outside the road mask of its own layer (layer 0: road_mask_layer0, layer 1: road_mask_layer1_deck), including a 3 px tolerance = fall_zone_mask for the open space",
+  "animation": {
+   "duration_s": 0.9,
+   "scale": [
+    1.0,
+    0.15
+   ],
+   "rotation_deg": 540,
+   "alpha": [
+    1.0,
+    0.5
+   ],
+   "at_end": "fall/stardust_0..4 (0.08 s per frame)"
+  },
+  "recovery": {
+   "wait_s": 0.6,
+   "rescue_cloud": [
+    "fall/rescue_cloud_a.png",
+    "fall/rescue_cloud_b.png"
+   ],
+   "time_penalty_s": 1.2,
+   "respawn_speed": 0.0,
+   "invulnerable_s": 1.5,
+   "blink_hz": 8,
+   "respawn_effect": [
+    "fall/respawn_sparkle_0.png",
+    "fall/respawn_sparkle_1.png",
+    "fall/respawn_sparkle_2.png",
+    "fall/respawn_sparkle_3.png"
+   ]
+  },
+  "respawn_points": [
+   {
+    "id": "R00",
+    "x": 116.9,
+    "y": 325.4,
+    "heading_deg_clockwise_from_east": -84.9,
+    "index": 40,
+    "layer": 0,
+    "kart_scale": 1.054
+   },
+   {
+    "id": "R01",
+    "x": 183.9,
+    "y": 204.9,
+    "heading_deg_clockwise_from_east": -32.9,
+    "index": 180,
+    "layer": 0,
+    "kart_scale": 1.205
+   },
+   {
+    "id": "R02",
+    "x": 301.8,
+    "y": 241.3,
+    "heading_deg_clockwise_from_east": 63.3,
+    "index": 320,
+    "layer": 0,
+    "kart_scale": 1.135
+   },
+   {
+    "id": "R03",
+    "x": 365.8,
+    "y": 365.8,
+    "heading_deg_clockwise_from_east": 62.5,
+    "index": 460,
+    "layer": 0,
+    "kart_scale": 0.774
+   },
+   {
+    "id": "R04",
+    "x": 431.5,
+    "y": 489.2,
+    "heading_deg_clockwise_from_east": 46.3,
+    "index": 600,
+    "layer": 0,
+    "kart_scale": 1.003
+   },
+   {
+    "id": "R05",
+    "x": 558.4,
+    "y": 482.3,
+    "heading_deg_clockwise_from_east": -48.8,
+    "index": 740,
+    "layer": 0,
+    "kart_scale": 0.889
+   },
+   {
+    "id": "R06",
+    "x": 618.3,
+    "y": 356.1,
+    "heading_deg_clockwise_from_east": -65.9,
+    "index": 880,
+    "layer": 1,
+    "kart_scale": 1.23
+   },
+   {
+    "id": "R07",
+    "x": 677.1,
+    "y": 229.0,
+    "heading_deg_clockwise_from_east": -65.0,
+    "index": 1020,
+    "layer": 1,
+    "kart_scale": 1.159
+   },
+   {
+    "id": "R08",
+    "x": 780.4,
+    "y": 159.9,
+    "heading_deg_clockwise_from_east": 17.2,
+    "index": 1160,
+    "layer": 0,
+    "kart_scale": 0.93
+   },
+   {
+    "id": "R09",
+    "x": 859.8,
+    "y": 270.1,
+    "heading_deg_clockwise_from_east": 65.1,
+    "index": 1300,
+    "layer": 0,
+    "kart_scale": 0.872
+   },
+   {
+    "id": "R10",
+    "x": 831.8,
+    "y": 400.9,
+    "heading_deg_clockwise_from_east": 115.4,
+    "index": 1440,
+    "layer": 0,
+    "kart_scale": 1.151
+   },
+   {
+    "id": "R11",
+    "x": 718.0,
+    "y": 442.8,
+    "heading_deg_clockwise_from_east": -146.9,
+    "index": 1580,
+    "layer": 0,
+    "kart_scale": 1.133
+   },
+   {
+    "id": "R12",
+    "x": 651.1,
+    "y": 321.8,
+    "heading_deg_clockwise_from_east": -113.5,
+    "index": 1720,
+    "layer": 0,
+    "kart_scale": 0.762
+   },
+   {
+    "id": "R13",
+    "x": 594.5,
+    "y": 193.7,
+    "heading_deg_clockwise_from_east": -114.9,
+    "index": 1860,
+    "layer": 0,
+    "kart_scale": 1.016
+   },
+   {
+    "id": "R14",
+    "x": 490.0,
+    "y": 125.9,
+    "heading_deg_clockwise_from_east": 167.9,
+    "index": 2000,
+    "layer": 0,
+    "kart_scale": 0.866
+   },
+   {
+    "id": "R15",
+    "x": 399.9,
+    "y": 222.3,
+    "heading_deg_clockwise_from_east": 115.7,
+    "index": 2140,
+    "layer": 0,
+    "kart_scale": 1.157
+   },
+   {
+    "id": "R16",
+    "x": 340.3,
+    "y": 349.0,
+    "heading_deg_clockwise_from_east": 114.5,
+    "index": 2280,
+    "layer": 1,
+    "kart_scale": 1.32
+   },
+   {
+    "id": "R17",
+    "x": 269.3,
+    "y": 466.7,
+    "heading_deg_clockwise_from_east": 153.0,
+    "index": 2420,
+    "layer": 0,
+    "kart_scale": 1.116
+   },
+   {
+    "id": "R18",
+    "x": 153.8,
+    "y": 421.1,
+    "heading_deg_clockwise_from_east": -117.0,
+    "index": 2560,
+    "layer": 0,
+    "kart_scale": 1.023
+   }
+  ],
+  "respawn_rule": "last respawn point passed along the lap; respawn on that point layer and with its kart_scale"
+ },
+ "chomp_hit": {
+  "effect": "spin 2 turns over 0.9 s, speed x0.4",
+  "immunity_s": 0.6,
+  "applies_when": "kart on the same layer as the chomper and circle overlap (hitbox_radius_px * kart_scale)",
+  "on_hit": "the chomper keeps moving; play its charge_a frame for 0.25 s as a chomp animation (poof_0..3 are optional spare effects)"
+ },
+ "chomper_sprites": {
+  "cogchomp_s": {
+   "canvas_px": [
+    35,
+    35
+   ],
+   "faces": "east (right); rotate to heading, mirror vertically when heading left",
+   "hitbox_radius_px": 17.0,
+   "idle": [
+    "chompers/cogchomp_s_idle_a.png",
+    "chompers/cogchomp_s_idle_b.png"
+   ],
+   "charge": [
+    "chompers/cogchomp_s_charge_a.png",
+    "chompers/cogchomp_s_charge_b.png"
+   ],
+   "poof": [
+    "chompers/cogchomp_s_poof_0.png",
+    "chompers/cogchomp_s_poof_1.png",
+    "chompers/cogchomp_s_poof_2.png",
+    "chompers/cogchomp_s_poof_3.png"
+   ],
+   "glow": "chompers/cogchomp_s_glow.png",
+   "shadow": "chompers/cogchomp_s_shadow.png",
+   "hires": "chompers/hires_4x/",
+   "anim_hz": 4.0,
+   "roll": "rotate the sprite about its centre by travelled_distance / radius radians (rolling ball) - optional"
+  },
+  "cogchomp_l": {
+   "canvas_px": [
+    52,
+    52
+   ],
+   "faces": "east (right); rotate to heading, mirror vertically when heading left",
+   "hitbox_radius_px": 26.0,
+   "idle": [
+    "chompers/cogchomp_l_idle_a.png",
+    "chompers/cogchomp_l_idle_b.png"
+   ],
+   "charge": [
+    "chompers/cogchomp_l_charge_a.png",
+    "chompers/cogchomp_l_charge_b.png"
+   ],
+   "poof": [
+    "chompers/cogchomp_l_poof_0.png",
+    "chompers/cogchomp_l_poof_1.png",
+    "chompers/cogchomp_l_poof_2.png",
+    "chompers/cogchomp_l_poof_3.png"
+   ],
+   "glow": "chompers/cogchomp_l_glow.png",
+   "shadow": "chompers/cogchomp_l_shadow.png",
+   "hires": "chompers/hires_4x/",
+   "anim_hz": 4.0,
+   "roll": "rotate the sprite about its centre by travelled_distance / radius radians (rolling ball) - optional"
+  }
+ },
+ "chompers": [
+  {
+   "id": "C0",
+   "type": "cogchomp_s",
+   "motion": "along_centreline",
+   "start_index": 250,
+   "direction": "with_lap",
+   "speed_px_s": 58.0,
+   "weave": {
+    "amplitude_halfwidth": 0.55,
+    "period_px": 130.0,
+    "note": "lateral offset = amplitude * half_width(s) * sin(2*pi*s_travelled/period) so it stays on the road in narrow sections"
+   },
+   "lunge": {
+    "cycle_s": 4.2,
+    "roam_s": 2.4,
+    "windup_s": 0.9,
+    "lunge_s": 0.5,
+    "lunge_speed_px_s": 230.0,
+    "windup": "stand still, shake +-1.5 px at 14 Hz, charge_a/b frames, flame grows",
+    "lunge_rule": "after the lunge it coasts back to roam speed over 0.4 s"
+   },
+   "scale_rule": "scale sprite, hitbox and chain by kart_scale at the chomper own index (see width_profile.json)",
+   "chain": {
+    "links": 4,
+    "spacing_px": 9.0,
+    "sprite": "chompers/chain_link_small.png",
+    "rule": "links trail along the path behind the chomper, link k at distance (k+1)*spacing; harmless; alternate rotation 90 deg per link"
+   }
+  },
+  {
+   "id": "C1",
+   "type": "cogchomp_s",
+   "motion": "along_centreline",
+   "start_index": 690,
+   "direction": "against_lap",
+   "speed_px_s": 58.0,
+   "weave": {
+    "amplitude_halfwidth": 0.55,
+    "period_px": 130.0,
+    "note": "lateral offset = amplitude * half_width(s) * sin(2*pi*s_travelled/period) so it stays on the road in narrow sections"
+   },
+   "lunge": {
+    "cycle_s": 4.2,
+    "roam_s": 2.4,
+    "windup_s": 0.9,
+    "lunge_s": 0.5,
+    "lunge_speed_px_s": 230.0,
+    "windup": "stand still, shake +-1.5 px at 14 Hz, charge_a/b frames, flame grows",
+    "lunge_rule": "after the lunge it coasts back to roam speed over 0.4 s"
+   },
+   "scale_rule": "scale sprite, hitbox and chain by kart_scale at the chomper own index (see width_profile.json)",
+   "chain": {
+    "links": 4,
+    "spacing_px": 9.0,
+    "sprite": "chompers/chain_link_small.png",
+    "rule": "links trail along the path behind the chomper, link k at distance (k+1)*spacing; harmless; alternate rotation 90 deg per link"
+   }
+  },
+  {
+   "id": "C2",
+   "type": "cogchomp_s",
+   "motion": "along_centreline",
+   "start_index": 1160,
+   "direction": "with_lap",
+   "speed_px_s": 58.0,
+   "weave": {
+    "amplitude_halfwidth": 0.55,
+    "period_px": 130.0,
+    "note": "lateral offset = amplitude * half_width(s) * sin(2*pi*s_travelled/period) so it stays on the road in narrow sections"
+   },
+   "lunge": {
+    "cycle_s": 4.2,
+    "roam_s": 2.4,
+    "windup_s": 0.9,
+    "lunge_s": 0.5,
+    "lunge_speed_px_s": 230.0,
+    "windup": "stand still, shake +-1.5 px at 14 Hz, charge_a/b frames, flame grows",
+    "lunge_rule": "after the lunge it coasts back to roam speed over 0.4 s"
+   },
+   "scale_rule": "scale sprite, hitbox and chain by kart_scale at the chomper own index (see width_profile.json)",
+   "chain": {
+    "links": 4,
+    "spacing_px": 9.0,
+    "sprite": "chompers/chain_link_small.png",
+    "rule": "links trail along the path behind the chomper, link k at distance (k+1)*spacing; harmless; alternate rotation 90 deg per link"
+   }
+  },
+  {
+   "id": "C3",
+   "type": "cogchomp_s",
+   "motion": "along_centreline",
+   "start_index": 1620,
+   "direction": "against_lap",
+   "speed_px_s": 58.0,
+   "weave": {
+    "amplitude_halfwidth": 0.55,
+    "period_px": 130.0,
+    "note": "lateral offset = amplitude * half_width(s) * sin(2*pi*s_travelled/period) so it stays on the road in narrow sections"
+   },
+   "lunge": {
+    "cycle_s": 4.2,
+    "roam_s": 2.4,
+    "windup_s": 0.9,
+    "lunge_s": 0.5,
+    "lunge_speed_px_s": 230.0,
+    "windup": "stand still, shake +-1.5 px at 14 Hz, charge_a/b frames, flame grows",
+    "lunge_rule": "after the lunge it coasts back to roam speed over 0.4 s"
+   },
+   "scale_rule": "scale sprite, hitbox and chain by kart_scale at the chomper own index (see width_profile.json)",
+   "chain": {
+    "links": 4,
+    "spacing_px": 9.0,
+    "sprite": "chompers/chain_link_small.png",
+    "rule": "links trail along the path behind the chomper, link k at distance (k+1)*spacing; harmless; alternate rotation 90 deg per link"
+   }
+  },
+  {
+   "id": "C4",
+   "type": "cogchomp_l",
+   "motion": "along_centreline",
+   "start_index": 555,
+   "direction": "with_lap",
+   "speed_px_s": 40.0,
+   "weave": {
+    "amplitude_halfwidth": 0.42,
+    "period_px": 170.0,
+    "note": "lateral offset = amplitude * half_width(s) * sin(2*pi*s_travelled/period) so it stays on the road in narrow sections"
+   },
+   "lunge": {
+    "cycle_s": 5.5,
+    "roam_s": 3.2,
+    "windup_s": 0.9,
+    "lunge_s": 0.5,
+    "lunge_speed_px_s": 150.0,
+    "windup": "stand still, shake +-1.5 px at 14 Hz, charge_a/b frames, flame grows",
+    "lunge_rule": "after the lunge it coasts back to roam speed over 0.4 s"
+   },
+   "scale_rule": "scale sprite, hitbox and chain by kart_scale at the chomper own index (see width_profile.json)",
+   "chain": {
+    "links": 5,
+    "spacing_px": 11.0,
+    "sprite": "chompers/chain_link.png",
+    "rule": "links trail along the path behind the chomper, link k at distance (k+1)*spacing; harmless; alternate rotation 90 deg per link"
+   }
+  },
+  {
+   "id": "C5",
+   "type": "cogchomp_l",
+   "motion": "along_centreline",
+   "start_index": 1960,
+   "direction": "against_lap",
+   "speed_px_s": 40.0,
+   "weave": {
+    "amplitude_halfwidth": 0.42,
+    "period_px": 170.0,
+    "note": "lateral offset = amplitude * half_width(s) * sin(2*pi*s_travelled/period) so it stays on the road in narrow sections"
+   },
+   "lunge": {
+    "cycle_s": 5.5,
+    "roam_s": 3.2,
+    "windup_s": 0.9,
+    "lunge_s": 0.5,
+    "lunge_speed_px_s": 150.0,
+    "windup": "stand still, shake +-1.5 px at 14 Hz, charge_a/b frames, flame grows",
+    "lunge_rule": "after the lunge it coasts back to roam speed over 0.4 s"
+   },
+   "scale_rule": "scale sprite, hitbox and chain by kart_scale at the chomper own index (see width_profile.json)",
+   "chain": {
+    "links": 5,
+    "spacing_px": 11.0,
+    "sprite": "chompers/chain_link.png",
+    "rule": "links trail along the path behind the chomper, link k at distance (k+1)*spacing; harmless; alternate rotation 90 deg per link"
+   }
+  }
+ ]
+}
