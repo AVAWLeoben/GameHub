@@ -141,10 +141,25 @@ class Game:
         self.leaves = [[rng.uniform(0,W), rng.uniform(165,470), rng.uniform(0,6.28), rng.uniform(.7,1.3)] for _ in range(14)]
 
     def text(self, text, x, y, size=28, color=WHITE, center=False):
+        if getattr(self, '_deferred_text', None) is not None:
+            self._deferred_text.append((str(text),x,y,size,color,center))
+            return
         s = self.fonts[size].render(str(text), True, color)
         self.canvas.blit(s, s.get_rect(center=(x,y)) if center else (x,y))
 
     def box(self, rect, color=PANEL, radius=16):
+        # Opaque panels must also hide any text deferred from the scene below.
+        pending=getattr(self, '_deferred_text', None)
+        if pending is not None:
+            panel=pygame.Rect(rect)
+            visible=[]
+            for entry in pending:
+                label,x,y,size,col,center=entry
+                bounds=pygame.Rect((0,0),self.fonts[size].size(label))
+                if center: bounds.center=(x,y)
+                else: bounds.topleft=(x,y)
+                if not panel.colliderect(bounds): visible.append(entry)
+            pending[:]=visible
         pygame.draw.rect(self.canvas,color,rect,border_radius=radius)
 
     def button(self, rect, label, action, selected=False, enabled=True):
@@ -612,91 +627,163 @@ class Game:
             self.button((450,500,380,64),'Home','exit')
         return self.canvas
 
-def browser_size(fallback):
-    """Use CSS viewport pixels, not the device's expensive Retina backing size."""
-    if sys.platform == 'emscripten':
+class BrowserDisplay:
+    """Pair canvas CSS bounds with a capped HiDPI SDL backing buffer.
+
+    A set_mode call alone does not control pygbag's surrounding HTML layout.
+    Restore all inline styles and the hub buffer when this game returns.
+    """
+    def __init__(self, screen):
+        self.previous_size=screen.get_size()
+        self.previous_flags=screen.get_flags() & pygame.RESIZABLE
+        self.canvas=None
+        self.window=None
+        self.style=None
+        self.key=None
+        self.pixel_ratio=1.
+        if sys.platform=='emscripten':
+            try:
+                import platform
+                canvas=platform.document.querySelector('canvas')
+                if canvas:
+                    self.canvas=canvas
+                    self.window=platform.window
+                    self.style=str(canvas.style.cssText)
+            except (AttributeError,TypeError):
+                self.canvas=None
+
+    def sync(self, screen):
+        if self.canvas is None: return screen,False
+        w=self.window
         try:
-            import platform
-            window = platform.window
-            width, height = int(window.innerWidth), int(window.innerHeight)
-            if width > 0 and height > 0:
-                return width, height
-        except (AttributeError, TypeError, ValueError):
-            pass
-    return fallback
+            viewport=w.visualViewport
+            width,height=float(viewport.width),float(viewport.height)
+            left,top=float(viewport.offsetLeft),float(viewport.offsetTop)
+        except (AttributeError,TypeError):
+            width,height=float(w.innerWidth),float(w.innerHeight)
+            left=top=0.
+        if width<1 or height<1: return screen,False
+        # 2x text on retina screens without the cost of a 3x fullscreen buffer.
+        self.pixel_ratio=clamp(float(w.devicePixelRatio or 1),1.,2.)
+        target=(round(width*self.pixel_ratio),round(height*self.pixel_ratio))
+        key=(target,round(left,2),round(top,2),round(width,2),round(height,2))
+        changed=key!=self.key
+        if screen.get_size()!=target:
+            screen=pygame.display.set_mode(target,pygame.RESIZABLE)
+        # Important declarations also override template max-width/max-height rules.
+        properties={'position':'fixed','left':f'{left}px','top':f'{top}px',
+                    'width':f'{width}px','height':f'{height}px','max-width':'none',
+                    'max-height':'none','min-width':'0','min-height':'0',
+                    'margin':'0','padding':'0','border':'0','transform':'none',
+                    'box-sizing':'border-box','display':'block','z-index':'2147483646',
+                    'touch-action':'none','image-rendering':'auto'}
+        for name,value in properties.items():
+            self.canvas.style.setProperty(name,value,'important')
+        self.key=key
+        return screen,changed
+
+    def restore(self):
+        if self.canvas is not None:
+            try:
+                if pygame.display.get_init() and pygame.display.get_surface().get_size()!=self.previous_size:
+                    pygame.display.set_mode(self.previous_size,self.previous_flags)
+            finally:
+                self.canvas.style.cssText=self.style
 
 
 def render_view(game, size):
-    """Reflow the battle view without stretching tanks, art, or touch targets.
-
-    Keep the HUD and controls anchored to the screen edges. A wide phone
-    crops empty upper sky; a 4:3 tablet gains sky. World/physics stay unchanged.
-    Menus retain their proportional two-column layout.
-    Button rectangles are returned in display pixels for identical touch mapping.
-    """
+    """Anchor battle panels to screen edges and rasterize fonts after layout."""
     sw,sh=size
-    result=pygame.Surface(size)
-    result.fill(BG)
+    ratio=getattr(game,'pixel_ratio',1.)
+    inset=round((24 if sw/sh>1.9 else 8)*ratio)
+    width=sw-2*inset
+    result=pygame.Surface(size); result.fill(BG)
     battle=game.state not in ('menu','build')
-    # A little horizontal breathing room for rounded corners / the phone notch.
-    inset=24 if sw/sh>1.9 else 8
-    scale=(sw-2*inset)/W
-    height=round(sh/scale)
-    if battle and height>=540:
-        dy=height-H
-        game.camera_top=142-dy
-        # Draw the world without modal boxes before assembling the viewport.
+    game._deferred_text=[]
+    if battle:
+        scale=width/W
+        hud=round(142*scale); controls=round(150*scale)
+        field_height=sh-hud-controls
+        # Keep both tanks and the obstacle visible on unusually short viewports.
+        world_scale=min(scale,field_height/370.)
+        camera_top=max(0.,650-field_height/world_scale)
+        game.camera_top=camera_top
         game.buttons=[]
         game.draw_field()
         base=game.canvas.copy()
-        view=pygame.Surface((W,height))
-        view.fill((107,155,176))
-        view.set_clip((0,142,W,height-292))
-        view.blit(base,(0,142+dy),pygame.Rect(0,142,W,508))
-        view.set_clip(None)
-        view.blit(base,(0,0),pygame.Rect(0,0,W,142))
-        view.blit(base,(0,height-150),pygame.Rect(0,650,W,150))
-        buttons=[(r.move(0,dy),a,on) for r,a,on in game.buttons]
+        labels=list(game._deferred_text)
+        buttons=list(game.buttons)
+        world_x=(sw-W*world_scale)/2
+        world_y=hud-camera_top*world_scale
+        regions=[(pygame.Rect(0,0,W,142),pygame.Rect(inset,0,width,hud)),
+                 (pygame.Rect(0,650,W,150),pygame.Rect(inset,sh-controls,width,controls))]
+        field=pygame.Rect(inset,hud,width,field_height)
+        result.fill((107,155,176),field)
+        result.set_clip(field)
+        # Extend the ground to the screen edges when a short viewport needs zoom-out.
+        for side,ground in enumerate(game.grounds):
+            gy=round(world_y+ground*world_scale)
+            pygame.draw.rect(result,(61,81,78),(inset+side*width//2,gy,width//2+1,sh-gy))
+            pygame.draw.rect(result,(143,159,105),(inset+side*width//2,gy,width//2+1,max(1,round(9*world_scale))))
+        world=pygame.transform.smoothscale(base,(round(W*world_scale),round(H*world_scale)))
+        result.blit(world,(round(world_x),round(world_y)))
+        result.set_clip(None)
+        for source,dest in regions:
+            result.blit(pygame.transform.smoothscale(base.subsurface(source),dest.size),dest)
+        def mapping(x,y):
+            if y<142: return inset+x*scale,y*scale,scale
+            if y>=650: return inset+x*scale,sh-controls+(y-650)*scale,scale
+            return world_x+x*world_scale,world_y+y*world_scale,world_scale
+        mapped=[(r,a,on,mapping(r.x,r.y)) for r,a,on in buttons]
+        text_jobs=[(entry,mapping(entry[1],entry[2])) for entry in labels]
         if game.paused or game.state in ('handoff','result'):
-            # Draw modal at the center of the new viewport, with matching input.
-            original=game.draw()
+            game._deferred_text=[]
+            overlay=game.draw()
             source=pygame.Rect(390,210,500,400) if game.paused else pygame.Rect(325,235,630,320)
-            dest=source.copy(); dest.centery=height//2
-            view.blit(original,dest,source)
-            delta=dest.y-source.y
-            buttons=[(r.move(0,delta),a,on) for r,a,on in game.buttons if source.contains(r)]
-        result.blit(pygame.transform.smoothscale(view,(sw-2*inset,sh)),(inset,0))
-        sx=(sw-2*inset)/W; sy=sh/height
-        game.buttons=[(pygame.Rect(round(r.x*sx)+inset,round(r.y*sy),round(r.w*sx),round(r.h*sy)),a,on) for r,a,on in buttons]
+            modal_scale=min(scale,(sh-24*ratio)/source.h)
+            dest=pygame.Rect(0,0,round(source.w*modal_scale),round(source.h*modal_scale));dest.center=(sw//2,sh//2)
+            # Remove background label jobs hidden by the opaque modal.
+            text_jobs=[job for job in text_jobs if not dest.collidepoint(job[1][:2])]
+            result.blit(pygame.transform.smoothscale(overlay.subsurface(source),dest.size),dest)
+            def modal(x,y): return dest.x+(x-source.x)*modal_scale,dest.y+(y-source.y)*modal_scale,modal_scale
+            mapped=[(r,a,on,modal(r.x,r.y)) for r,a,on in game.buttons if source.contains(r)]
+            text_jobs += [(entry,modal(entry[1],entry[2])) for entry in game._deferred_text if source.collidepoint(entry[1:3])]
     else:
         game.camera_top=142
         base=game.draw()
-        scale=min((sw-2*inset)/W,sh/H)
+        scale=min(width/W,sh/H)
         vw,vh=round(W*scale),round(H*scale)
         ox,oy=(sw-vw)//2,(sh-vh)//2
         result.blit(pygame.transform.smoothscale(base,(vw,vh)),(ox,oy))
-        game.buttons=[(pygame.Rect(round(r.x*scale)+ox,round(r.y*scale)+oy,round(r.w*scale),round(r.h*scale)),a,on) for r,a,on in game.buttons]
+        mapped=[(r,a,on,(ox+r.x*scale,oy+r.y*scale,scale)) for r,a,on in game.buttons]
+        text_jobs=[(entry,(ox+entry[1]*scale,oy+entry[2]*scale,scale)) for entry in game._deferred_text]
+    game._deferred_text=None
+    for (label,x,y,font_size,color,center),(dx,dy,scale) in text_jobs:
+        pixels=max(1,round(font_size*scale))
+        if pixels not in game.fonts: game.fonts[pixels]=pygame.font.Font(None,pixels)
+        glyphs=game.fonts[pixels].render(label,True,color)
+        pos=(round(dx),round(dy))
+        result.blit(glyphs,glyphs.get_rect(center=pos) if center else pos)
+    game.buttons=[(pygame.Rect(round(x),round(y),round(r.w*scale),round(r.h*scale)),a,on)
+                  for r,a,on,(x,y,scale) in mapped]
     return result
 
 
 async def run(screen=None, clock=None):
-    """Use browser viewport in-game; restore the caller's display on return."""
+    """Adapt the browser canvas and restore the hub on exit."""
     pygame.init()
-    supplied=screen is not None
-    previous_size=screen.get_size() if supplied else None
-    previous_flags=screen.get_flags() if supplied else 0
     if screen is None:
-        screen=pygame.display.set_mode(browser_size((W,H)),pygame.RESIZABLE)
+        screen=pygame.display.set_mode((W,H),pygame.RESIZABLE)
+    display=BrowserDisplay(screen)
     game=Game()
     if clock is None:
         clock=pygame.time.Clock()
     try:
         while game.running:
             dt=min(clock.tick(60)/1000,.05)
-            desired=browser_size(screen.get_size())
-            if desired != screen.get_size():
-                game.cancel_input()
-                screen=pygame.display.set_mode(desired,pygame.RESIZABLE)
+            screen,resized=display.sync(screen)
+            if resized: game.cancel_input()
+            game.pixel_ratio=display.pixel_ratio
             sw,sh=screen.get_size()
             portrait=sh>sw
             if portrait: game.cancel_input()
@@ -730,8 +817,7 @@ async def run(screen=None, clock=None):
             pygame.display.flip()
             await asyncio.sleep(0)
     finally:
-        if supplied and pygame.display.get_init() and screen.get_size()!=previous_size:
-            pygame.display.set_mode(previous_size, previous_flags & pygame.RESIZABLE)
+        display.restore()
     return None
 
 
