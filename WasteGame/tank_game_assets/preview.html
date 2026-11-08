@@ -1,0 +1,1214 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tank rig preview</title>
+<style>
+body{margin:0;background:#1f1f38;color:#eee;font:14px system-ui,sans-serif}
+#stage{position:relative;overflow:hidden;background:linear-gradient(#34345c,#262642);width:100%}
+#world{position:absolute;left:0;top:0;transform-origin:0 0;width:480px;height:200px}
+#ground{position:absolute;left:0;right:0;bottom:0;height:34px;background:#0d1a0b}
+.node{position:absolute;width:0;height:0}
+.fx{position:absolute;pointer-events:none}
+#ui{padding:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+label{display:flex;flex-direction:column;font-size:12px;color:#aab}
+select,input[type=range],button{font-size:14px;margin-top:3px}
+button{padding:8px;border:0;border-radius:6px;background:#ff8a1f;font-weight:700}
+</style></head><body>
+<div id="stage"><div id="world"><div id="ground"></div><div id="tank" class="node"></div></div></div>
+<div id="ui">
+<label>Tank<select id="tank_sel"></select></label>
+<label>Colour<select id="color_sel"></select></label>
+<label>Weapon<select id="weapon_sel"></select></label>
+<label>Aim <span id="aim_v"></span><input id="aim" type="range"></label>
+<label>Hull tilt <span id="tilt_v"></span><input id="tilt" type="range" min="-30" max="30" value="0"></label>
+<label><span>Drive (wheels spin)</span><input id="drive" type="checkbox"></label>
+<label><span>Face left</span><input id="flip" type="checkbox"></label>
+<button id="fire">FIRE</button>
+</div>
+<script>
+const RIG = {
+  "version": 1,
+  "units": "logical px (PNG files are rendered at pngScale x this size)",
+  "pngScale": 2,
+  "angles": {
+    "unit": "degrees",
+    "positive": "clockwise on screen (y axis down)",
+    "zero": "pointing right (tank faces right; mirror the root for left)",
+    "up": "-90 = straight up"
+  },
+  "notes": [
+    "Every node's 'position' is where its pivot sits, measured from the PARENT's pivot, before the parent's rotation.",
+    "'pivot' is the pixel point inside the sprite that is the joint (rotation center), in logical px.",
+    "'z' orders siblings only (higher = in front). Children render with their parent.",
+    "To face left, mirror the whole tank root horizontally (scale.x = -1).",
+    "Tank Y origin = hull pivot (bottom centre of the hull). groundContacts are relative to it."
+  ],
+  "tanks": {
+    "scout": {
+      "name": "Scout",
+      "colors": [
+        "green",
+        "blue",
+        "red",
+        "wreck"
+      ],
+      "groundContacts": [
+        [
+          -48,
+          19.5
+        ],
+        [
+          48,
+          19.5
+        ]
+      ],
+      "weaponSlot": "weapon_slot",
+      "nodes": [
+        {
+          "id": "hull",
+          "parent": null,
+          "sprite": "png/tanks/scout/{color}/hull.png",
+          "size": [
+            136,
+            44
+          ],
+          "pivot": [
+            68,
+            41
+          ],
+          "position": [
+            0,
+            0
+          ],
+          "z": 0,
+          "joint": {
+            "type": "hinge",
+            "role": "body tilt (follow terrain slope)",
+            "rotation": {
+              "min": -30,
+              "max": 30,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "turret",
+          "parent": "hull",
+          "sprite": "png/tanks/scout/{color}/turret.png",
+          "size": [
+            62,
+            32
+          ],
+          "pivot": [
+            31,
+            30
+          ],
+          "position": [
+            -4,
+            -26
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "optional recoil kick",
+            "rotation": {
+              "min": -4,
+              "max": 4,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "weapon_slot",
+          "parent": "turret",
+          "sprite": null,
+          "size": null,
+          "pivot": [
+            0,
+            0
+          ],
+          "position": [
+            21,
+            -13
+          ],
+          "z": 2,
+          "joint": {
+            "type": "hinge",
+            "role": "weapon aim",
+            "rotation": {
+              "min": -85,
+              "max": 15,
+              "default": -30
+            }
+          }
+        },
+        {
+          "id": "track",
+          "parent": "hull",
+          "sprite": "png/tanks/scout/track.png",
+          "size": [
+            146,
+            32
+          ],
+          "pivot": [
+            73.0,
+            0
+          ],
+          "position": [
+            0,
+            -10
+          ],
+          "z": 2,
+          "joint": null
+        },
+        {
+          "id": "wheel_0",
+          "parent": "track",
+          "sprite": "png/tanks/scout/wheel.png",
+          "size": [
+            24,
+            24
+          ],
+          "pivot": [
+            12.0,
+            12.0
+          ],
+          "position": [
+            -48,
+            16
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "wheel_1",
+          "parent": "track",
+          "sprite": "png/tanks/scout/wheel.png",
+          "size": [
+            24,
+            24
+          ],
+          "pivot": [
+            12.0,
+            12.0
+          ],
+          "position": [
+            -16,
+            16
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "wheel_2",
+          "parent": "track",
+          "sprite": "png/tanks/scout/wheel.png",
+          "size": [
+            24,
+            24
+          ],
+          "pivot": [
+            12.0,
+            12.0
+          ],
+          "position": [
+            16,
+            16
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "wheel_3",
+          "parent": "track",
+          "sprite": "png/tanks/scout/wheel.png",
+          "size": [
+            24,
+            24
+          ],
+          "pivot": [
+            12.0,
+            12.0
+          ],
+          "position": [
+            48,
+            16
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        }
+      ],
+      "drawOrder": [
+        "hull",
+        "turret",
+        "weapon_slot/weapon",
+        "track",
+        "wheel_0",
+        "wheel_1",
+        "wheel_2",
+        "wheel_3"
+      ]
+    },
+    "heavy": {
+      "name": "Heavy",
+      "colors": [
+        "green",
+        "blue",
+        "red",
+        "wreck"
+      ],
+      "groundContacts": [
+        [
+          -72,
+          27.5
+        ],
+        [
+          72,
+          27.5
+        ]
+      ],
+      "weaponSlot": "weapon_slot",
+      "nodes": [
+        {
+          "id": "hull",
+          "parent": null,
+          "sprite": "png/tanks/heavy/{color}/hull.png",
+          "size": [
+            164,
+            58
+          ],
+          "pivot": [
+            82,
+            54
+          ],
+          "position": [
+            0,
+            0
+          ],
+          "z": 0,
+          "joint": {
+            "type": "hinge",
+            "role": "body tilt (follow terrain slope)",
+            "rotation": {
+              "min": -22,
+              "max": 22,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "turret",
+          "parent": "hull",
+          "sprite": "png/tanks/heavy/{color}/turret.png",
+          "size": [
+            94,
+            42
+          ],
+          "pivot": [
+            47,
+            40
+          ],
+          "position": [
+            -8,
+            -38
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "optional recoil kick",
+            "rotation": {
+              "min": -4,
+              "max": 4,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "weapon_slot",
+          "parent": "turret",
+          "sprite": null,
+          "size": null,
+          "pivot": [
+            0,
+            0
+          ],
+          "position": [
+            35,
+            -17
+          ],
+          "z": 2,
+          "joint": {
+            "type": "hinge",
+            "role": "weapon aim",
+            "rotation": {
+              "min": -80,
+              "max": 10,
+              "default": -30
+            }
+          }
+        },
+        {
+          "id": "track",
+          "parent": "hull",
+          "sprite": "png/tanks/heavy/track.png",
+          "size": [
+            186,
+            46
+          ],
+          "pivot": [
+            93.0,
+            0
+          ],
+          "position": [
+            0,
+            -16
+          ],
+          "z": 2,
+          "joint": null
+        },
+        {
+          "id": "wheel_0",
+          "parent": "track",
+          "sprite": "png/tanks/heavy/wheel.png",
+          "size": [
+            32,
+            32
+          ],
+          "pivot": [
+            16.0,
+            16.0
+          ],
+          "position": [
+            -72,
+            23
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "wheel_1",
+          "parent": "track",
+          "sprite": "png/tanks/heavy/wheel.png",
+          "size": [
+            32,
+            32
+          ],
+          "pivot": [
+            16.0,
+            16.0
+          ],
+          "position": [
+            -36,
+            23
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "wheel_2",
+          "parent": "track",
+          "sprite": "png/tanks/heavy/wheel.png",
+          "size": [
+            32,
+            32
+          ],
+          "pivot": [
+            16.0,
+            16.0
+          ],
+          "position": [
+            0,
+            23
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "wheel_3",
+          "parent": "track",
+          "sprite": "png/tanks/heavy/wheel.png",
+          "size": [
+            32,
+            32
+          ],
+          "pivot": [
+            16.0,
+            16.0
+          ],
+          "position": [
+            36,
+            23
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "wheel_4",
+          "parent": "track",
+          "sprite": "png/tanks/heavy/wheel.png",
+          "size": [
+            32,
+            32
+          ],
+          "pivot": [
+            16.0,
+            16.0
+          ],
+          "position": [
+            72,
+            23
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        }
+      ],
+      "drawOrder": [
+        "hull",
+        "turret",
+        "weapon_slot/weapon",
+        "track",
+        "wheel_0",
+        "wheel_1",
+        "wheel_2",
+        "wheel_3",
+        "wheel_4"
+      ]
+    },
+    "artillery": {
+      "name": "Artillery",
+      "colors": [
+        "green",
+        "blue",
+        "red",
+        "wreck"
+      ],
+      "groundContacts": [
+        [
+          -75,
+          19.5
+        ],
+        [
+          75,
+          19.5
+        ]
+      ],
+      "weaponSlot": "weapon_slot",
+      "nodes": [
+        {
+          "id": "hull",
+          "parent": null,
+          "sprite": "png/tanks/artillery/{color}/hull.png",
+          "size": [
+            178,
+            46
+          ],
+          "pivot": [
+            89,
+            42
+          ],
+          "position": [
+            0,
+            0
+          ],
+          "z": 0,
+          "joint": {
+            "type": "hinge",
+            "role": "body tilt (follow terrain slope)",
+            "rotation": {
+              "min": -26,
+              "max": 26,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "turret",
+          "parent": "hull",
+          "sprite": "png/tanks/artillery/{color}/turret.png",
+          "size": [
+            88,
+            44
+          ],
+          "pivot": [
+            44,
+            42
+          ],
+          "position": [
+            -30,
+            -25
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "optional recoil kick",
+            "rotation": {
+              "min": -4,
+              "max": 4,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "weapon_slot",
+          "parent": "turret",
+          "sprite": null,
+          "size": null,
+          "pivot": [
+            0,
+            0
+          ],
+          "position": [
+            24,
+            -16
+          ],
+          "z": 2,
+          "joint": {
+            "type": "hinge",
+            "role": "weapon aim",
+            "rotation": {
+              "min": -88,
+              "max": -5,
+              "default": -30
+            }
+          }
+        },
+        {
+          "id": "track",
+          "parent": "hull",
+          "sprite": "png/tanks/artillery/track.png",
+          "size": [
+            192,
+            32
+          ],
+          "pivot": [
+            96.0,
+            0
+          ],
+          "position": [
+            0,
+            -10
+          ],
+          "z": 2,
+          "joint": null
+        },
+        {
+          "id": "wheel_0",
+          "parent": "track",
+          "sprite": "png/tanks/artillery/wheel.png",
+          "size": [
+            20,
+            20
+          ],
+          "pivot": [
+            10.0,
+            10.0
+          ],
+          "position": [
+            -75,
+            16
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "wheel_1",
+          "parent": "track",
+          "sprite": "png/tanks/artillery/wheel.png",
+          "size": [
+            20,
+            20
+          ],
+          "pivot": [
+            10.0,
+            10.0
+          ],
+          "position": [
+            -45,
+            16
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "wheel_2",
+          "parent": "track",
+          "sprite": "png/tanks/artillery/wheel.png",
+          "size": [
+            20,
+            20
+          ],
+          "pivot": [
+            10.0,
+            10.0
+          ],
+          "position": [
+            -15,
+            16
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "wheel_3",
+          "parent": "track",
+          "sprite": "png/tanks/artillery/wheel.png",
+          "size": [
+            20,
+            20
+          ],
+          "pivot": [
+            10.0,
+            10.0
+          ],
+          "position": [
+            15,
+            16
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "wheel_4",
+          "parent": "track",
+          "sprite": "png/tanks/artillery/wheel.png",
+          "size": [
+            20,
+            20
+          ],
+          "pivot": [
+            10.0,
+            10.0
+          ],
+          "position": [
+            45,
+            16
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        },
+        {
+          "id": "wheel_5",
+          "parent": "track",
+          "sprite": "png/tanks/artillery/wheel.png",
+          "size": [
+            20,
+            20
+          ],
+          "pivot": [
+            10.0,
+            10.0
+          ],
+          "position": [
+            75,
+            16
+          ],
+          "z": 1,
+          "joint": {
+            "type": "hinge",
+            "role": "wheel spin",
+            "rotation": {
+              "continuous": true,
+              "default": 0
+            }
+          }
+        }
+      ],
+      "drawOrder": [
+        "hull",
+        "turret",
+        "weapon_slot/weapon",
+        "track",
+        "wheel_0",
+        "wheel_1",
+        "wheel_2",
+        "wheel_3",
+        "wheel_4",
+        "wheel_5"
+      ]
+    }
+  },
+  "weapons": {
+    "cannon": {
+      "name": "Cannon",
+      "sprite": "png/weapons/cannon.png",
+      "size": [
+        80,
+        24
+      ],
+      "pivot": [
+        14,
+        12
+      ],
+      "muzzle": [
+        74,
+        12
+      ],
+      "recoil": {
+        "distance": 8,
+        "axis": [
+          -1,
+          0
+        ],
+        "returnMs": 250
+      },
+      "aimRange": [
+        -85,
+        15
+      ],
+      "projectile": "shell"
+    },
+    "twin_cannon": {
+      "name": "Twin Cannon",
+      "sprite": "png/weapons/twin_cannon.png",
+      "size": [
+        76,
+        32
+      ],
+      "pivot": [
+        14,
+        16
+      ],
+      "muzzle": [
+        70,
+        16
+      ],
+      "recoil": {
+        "distance": 7,
+        "axis": [
+          -1,
+          0
+        ],
+        "returnMs": 250
+      },
+      "aimRange": [
+        -85,
+        15
+      ],
+      "projectile": "shell",
+      "muzzles": [
+        [
+          70,
+          10
+        ],
+        [
+          70,
+          22
+        ]
+      ]
+    },
+    "mortar": {
+      "name": "Mortar",
+      "sprite": "png/weapons/mortar.png",
+      "size": [
+        56,
+        38
+      ],
+      "pivot": [
+        14,
+        19
+      ],
+      "muzzle": [
+        50,
+        19
+      ],
+      "recoil": {
+        "distance": 12,
+        "axis": [
+          -1,
+          0
+        ],
+        "returnMs": 250
+      },
+      "aimRange": [
+        -88,
+        -35
+      ],
+      "projectile": "bomb"
+    },
+    "rocket_pod": {
+      "name": "Rocket Pod",
+      "sprite": "png/weapons/rocket_pod.png",
+      "size": [
+        88,
+        40
+      ],
+      "pivot": [
+        14,
+        20
+      ],
+      "muzzle": [
+        82,
+        20
+      ],
+      "recoil": {
+        "distance": 4,
+        "axis": [
+          -1,
+          0
+        ],
+        "returnMs": 250
+      },
+      "aimRange": [
+        -80,
+        10
+      ],
+      "projectile": "rocket",
+      "muzzles": [
+        [
+          80,
+          12
+        ],
+        [
+          80,
+          20
+        ],
+        [
+          80,
+          28
+        ]
+      ]
+    },
+    "plasma_gun": {
+      "name": "Plasma Gun",
+      "sprite": "png/weapons/plasma_gun.png",
+      "size": [
+        88,
+        34
+      ],
+      "pivot": [
+        14,
+        17
+      ],
+      "muzzle": [
+        80,
+        17
+      ],
+      "recoil": {
+        "distance": 3,
+        "axis": [
+          -1,
+          0
+        ],
+        "returnMs": 250
+      },
+      "aimRange": [
+        -85,
+        15
+      ],
+      "projectile": "plasma"
+    }
+  },
+  "projectiles": {
+    "shell": {
+      "sprite": "png/projectiles/shell.png",
+      "size": [
+        28,
+        12
+      ],
+      "pivot": [
+        14,
+        6
+      ],
+      "orientToVelocity": true,
+      "trailColor": "#ffd9a0",
+      "impactFx": "explosion"
+    },
+    "bomb": {
+      "sprite": "png/projectiles/bomb.png",
+      "size": [
+        24,
+        24
+      ],
+      "pivot": [
+        12,
+        14
+      ],
+      "orientToVelocity": true,
+      "trailColor": "#bbbbbb",
+      "impactFx": "explosion"
+    },
+    "rocket": {
+      "sprite": "png/projectiles/rocket.png",
+      "size": [
+        48,
+        18
+      ],
+      "pivot": [
+        24,
+        9
+      ],
+      "orientToVelocity": true,
+      "trailColor": "#ff9a3a",
+      "impactFx": "explosion"
+    },
+    "plasma": {
+      "sprite": "png/projectiles/plasma_bolt.png",
+      "size": [
+        36,
+        24
+      ],
+      "pivot": [
+        18,
+        12
+      ],
+      "orientToVelocity": true,
+      "trailColor": "#5ef2ff",
+      "impactFx": "explosion"
+    }
+  },
+  "fx": {
+    "explosion_sheet": {
+      "sprite": "png/fx/explosion_sheet.png",
+      "frames": 8,
+      "frameWidthPx": 256,
+      "frameHeightPx": 256,
+      "logicalFrameSize": [
+        128,
+        128
+      ],
+      "fps": 18,
+      "loop": false,
+      "pivot": [
+        64.0,
+        64.0
+      ]
+    },
+    "muzzle_flash_sheet": {
+      "sprite": "png/fx/muzzle_flash_sheet.png",
+      "frames": 3,
+      "frameWidthPx": 96,
+      "frameHeightPx": 80,
+      "logicalFrameSize": [
+        48,
+        40
+      ],
+      "fps": 30,
+      "loop": false,
+      "pivot": [
+        4,
+        20
+      ]
+    },
+    "smoke_sheet": {
+      "sprite": "png/fx/smoke_sheet.png",
+      "frames": 4,
+      "frameWidthPx": 80,
+      "frameHeightPx": 80,
+      "logicalFrameSize": [
+        40,
+        40
+      ],
+      "fps": 10,
+      "loop": false,
+      "pivot": [
+        20.0,
+        20.0
+      ]
+    },
+    "crater_decal": {
+      "sprite": "png/fx/crater_decal.png",
+      "logicalSize": [
+        96,
+        24
+      ],
+      "pivot": [
+        48,
+        12
+      ]
+    },
+    "debris": {
+      "sprites": [
+        "png/fx/debris_0.png",
+        "png/fx/debris_1.png",
+        "png/fx/debris_2.png",
+        "png/fx/debris_3.png"
+      ],
+      "logicalSize": [
+        14,
+        14
+      ],
+      "pivot": [
+        7,
+        7
+      ]
+    }
+  }
+};
+const $ = id => document.getElementById(id);
+const WW = 480, WH = 200;
+let S = 1, nodeEls = {}, st = {tank:'scout', color:'green', weapon:'cannon', aim:-30, tilt:0, spin:0, recoil:0, flip:false};
+
+function fit(){ const w = $('stage').clientWidth; S = w / WW; $('world').style.transform = `scale(${S})`; $('stage').style.height = (WH*S)+'px'; }
+function opt(sel, items){ sel.innerHTML = items.map(i=>`<option>${i}</option>`).join(''); }
+opt($('tank_sel'), Object.keys(RIG.tanks)); opt($('color_sel'), RIG.tanks.scout.colors); opt($('weapon_sel'), Object.keys(RIG.weapons));
+
+function range(){
+  const slot = RIG.tanks[st.tank].nodes.find(n=>n.id==='weapon_slot').joint.rotation, w = RIG.weapons[st.weapon].aimRange;
+  return [Math.max(slot.min, w[0]), Math.min(slot.max, w[1])];
+}
+function build(){
+  const tank = RIG.tanks[st.tank], w = RIG.weapons[st.weapon];
+  const root = $('tank'); root.innerHTML = ''; nodeEls = {hull: null};
+  const ground = tank.groundContacts[0][1];
+  root.style.left = '170px'; root.style.top = (WH - 34 + 4 - ground) + 'px';
+  const nodes = tank.nodes.map(n=>({...n}));
+  nodes.push({id:'weapon', parent:'weapon_slot', position:[0,0], z:0, sprite:w.sprite, size:w.size, pivot:w.pivot});
+  nodes.forEach(n=>{
+    const d = document.createElement('div'); d.className='node';
+    d.style.left = n.position[0]+'px'; d.style.top = n.position[1]+'px'; d.style.zIndex = n.z;
+    if(n.sprite){
+      const im = new Image(); im.src = n.sprite.replace('{color}', st.color); im.draggable = false;
+      im.style.cssText = `position:absolute;z-index:0;width:${n.size[0]}px;height:${n.size[1]}px;left:${-n.pivot[0]}px;top:${-n.pivot[1]}px`;
+      d.appendChild(im);
+    }
+    if(n.id==='weapon'){ const m = document.createElement('div'); m.className='node'; m.id='muzzle';
+      m.style.left=(w.muzzle[0]-w.pivot[0])+'px'; m.style.top=(w.muzzle[1]-w.pivot[1])+'px'; d.appendChild(m); }
+    (n.parent ? nodeEls[n.parent] : root).appendChild(d); nodeEls[n.id] = d;
+  });
+  const [lo, hi] = range(); const a = $('aim'); a.min = lo; a.max = hi;
+  st.aim = Math.min(hi, Math.max(lo, st.aim)); a.value = st.aim;
+  const tl = tank.nodes[0].joint.rotation; $('tilt').min = tl.min; $('tilt').max = tl.max;
+  pose();
+}
+function pose(){
+  nodeEls.hull.style.transform = `rotate(${st.tilt}deg)`;
+  nodeEls.weapon_slot.style.transform = `rotate(${st.aim}deg)`;
+  nodeEls.weapon.style.transform = `translate(${-st.recoil}px,0)`;
+  Object.keys(nodeEls).filter(k=>k.startsWith('wheel')).forEach(k=>nodeEls[k].style.transform = `rotate(${st.spin}deg)`);
+  $('tank').style.transform = st.flip ? 'scaleX(-1)' : '';
+  $('aim_v').textContent = Math.round(st.aim)+'°'; $('tilt_v').textContent = Math.round(st.tilt)+'°';
+}
+function spawn(src, w, h, px, py, x, y){
+  const i = new Image(); i.src = src; i.className='fx';
+  i.style.cssText = `width:${w}px;height:${h}px;left:${x-px}px;top:${y-py}px`; $('world').appendChild(i); return i;
+}
+function fire(){
+  const w = RIG.weapons[st.weapon], p = RIG.projectiles[w.projectile];
+  const sr = $('stage').getBoundingClientRect(), mr = $('muzzle').getBoundingClientRect();
+  let x = (mr.left - sr.left)/S, y = (mr.top - sr.top)/S;
+  const dir = st.flip ? -1 : 1, ang = (st.tilt + st.aim) * Math.PI/180;
+  let vx = Math.cos(ang)*dir*330, vy = Math.sin(ang)*330;
+  const dist = w.recoil.distance, t0 = performance.now();
+  (function rc(now){ const k = Math.min(1,(now-t0)/w.recoil.returnMs);
+    st.recoil = dist * (k<0.15 ? k/0.15 : 1-(k-0.15)/0.85); pose(); if(k<1) requestAnimationFrame(rc); else {st.recoil=0; pose();} })(t0);
+  const mf = spawn('png/fx/muzzle_flash_1.png', 48, 40, 4, 20, x, y);
+  mf.style.transformOrigin='4px 20px'; mf.style.transform=`rotate(${(st.tilt+st.aim)*dir}deg) scaleX(${dir})`; setTimeout(()=>mf.remove(), 70);
+  const pr = spawn(p.sprite, p.size[0], p.size[1], p.pivot[0], p.pivot[1], 0, 0); let last = performance.now();
+  (function step(now){
+    const dt = Math.min(0.05,(now-last)/1000); last = now; vy += 380*dt; x += vx*dt; y += vy*dt;
+    pr.style.left=(x-p.pivot[0])+'px'; pr.style.top=(y-p.pivot[1])+'px';
+    pr.style.transform=`rotate(${Math.atan2(vy,vx)}rad)`;
+    if(y > WH-34 || x<-20 || x>WW+20){ pr.remove(); boom(x, Math.min(y, WH-34)); return; }
+    requestAnimationFrame(step); })(last);
+}
+function boom(x, y){
+  let i = 0; const e = spawn('png/fx/explosion_0.png', 128, 128, 64, 64, x, y);
+  const iv = setInterval(()=>{ i++; if(i>7){ clearInterval(iv); e.remove(); return; } e.src = `png/fx/explosion_${i}.png`; }, 1000/RIG.fx.explosion_sheet.fps);
+}
+$('tank_sel').onchange = e => { st.tank = e.target.value; build(); };
+$('color_sel').onchange = e => { st.color = e.target.value; build(); };
+$('weapon_sel').onchange = e => { st.weapon = e.target.value; build(); };
+$('aim').oninput = e => { st.aim = +e.target.value; pose(); };
+$('tilt').oninput = e => { st.tilt = +e.target.value; pose(); };
+$('flip').onchange = e => { st.flip = e.target.checked; pose(); };
+$('fire').onclick = fire;
+(function loop(){ if($('drive').checked){ st.spin = (st.spin + 6) % 360; pose(); } requestAnimationFrame(loop); })();
+addEventListener('resize', fit); fit(); build();
+</script></body></html>

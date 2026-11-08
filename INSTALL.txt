@@ -1,26 +1,31 @@
-WasteKart 2.7.2 - Rainbow Rocket continuous bridge rebuild
+Tank Duel — GameHub integration 1.0.1
 
-INSTALL (existing GameHub / WasteKart installation)
-- Extract the patch into your GameHub repository root.
-- Replace WasteGame/wasteKart.py.
-- Replace ALL six Rainbow Rocket PNGs included in this ZIP.
-- Do not keep the old rainbow_rocket_track.png; it contains the rounded
-  bridge-piece art. Changing the overlay alone cannot remove those caps.
-- No changes to catalog.json, geometry, width profiles, respawn checkpoints,
-  or power-up/amulet behavior are necessary.
+Merge this archive's WasteGame folder into the repository's WasteGame folder:
 
-The complete upgrade adds the original Rainbow Rocket sprites, metadata and
-existing 1x amulet artwork for convenience. Other WasteKart cups and original
-GameHub assets are still expected in their normal repository directories.
+1. Replace WasteGame/main.py with the included main.py.
+2. Add WasteGame/tankDuel.py (replace the earlier version if already present).
+3. Add the complete WasteGame/tank_game_assets folder.
+4. Keep all existing games, GUI.py and assets folders.
+5. Rebuild/deploy your pygbag game as usual.
 
-Why the change? The sausage-shaped bridge caps were baked into the *base track
-image*, not just the above-kart overlay. A new rasterizer uses the unchanged
-438-position 960x600 width/height profile to draw continuous rainbow tiles and
-edge lines through both overpasses. All collision/fall/layer masks are generated
-from the exact same geometry. The upper deck overlay is cropped directly from
-those final map pixels for no differently-painted bridge strips.
+Tank Duel is the fifth icon on the last row, beside WasteKart.
 
-Validation: compile, RGBA overdraw identity, both crossing masks, all 438
-profile samples, kart-center and midroad positions, 19 respawn points per lap,
-1-lap and 3-lap completion, forward rescue to safe roadway.
-Full visual testing in Pygame/Pygbag still required.
+The supplied main.py is based on the launcher pasted in this conversation.
+Changes: tankDuel import, GAMES entry, but25 callback, tank menu icon,
+and clearing drag state after returning from a game. Existing game order,
+button paths, coordinates and scrolling behavior are retained.
+
+Tank Duel now exposes async main(screen=None, clock=None) and
+run(screen=None, clock=None). It reuses the hub display and clock and
+returns without pygame.quit(). The standalone launcher from the earlier
+package is NOT the main.py in this integration archive: this main.py is
+the actual GameHub launcher.
+
+Verified: syntax, all six game regression tests, 25 game registrations,
+menu construction, Tank Duel callback, icon existence, a scaled click on
+Return to GameHub, and retention of the 800x600 hub display.
+The integration harness stubs other games and GUI.Button because those
+sources were not provided. Actual iPad Safari/pygbag testing remains.
+
+No GitHub files were changed remotely. Upload/commit these files to your
+repository, then run your normal build.
