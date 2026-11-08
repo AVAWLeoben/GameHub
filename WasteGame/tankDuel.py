@@ -37,10 +37,10 @@ class Player:
         self.owned = {'scout', 'cannon'}
         self.money = 1000
         self.wins = 0
-        self.angle, self.power = 55., 65.
+        self.angle, self.power = 55., 10.
         self.x = 210 if index == 0 else 1070
         self.hp = self.max_hp
-        self.fuel = 0
+        self.fuel = float(self.movement)
         self.wheel = 0
 
     @property
@@ -133,6 +133,10 @@ class Game:
         self.accum = 0
         self.settle = 0
         self.build_player = 0
+        self.charge_owner = None
+        self.charge_time = 0.
+        rng = random.Random(71)
+        self.leaves = [[rng.uniform(0,W), rng.uniform(165,470), rng.uniform(0,6.28), rng.uniform(.7,1.3)] for _ in range(14)]
 
     def text(self, text, x, y, size=28, color=WHITE, center=False):
         s = self.fonts[size].render(str(text), True, color)
@@ -147,6 +151,55 @@ class Game:
         pygame.draw.rect(self.canvas, GOLD if selected else (65,86,102), r, 2, border_radius=14)
         self.text(label,r.centerx,r.centery,24,WHITE if enabled else (105,121,133),True)
         self.buttons.append((r, action, enabled))
+
+    def icon(self, kind, center, color=WHITE, size=30):
+        x,y = center
+        if kind in ('left','right','up','down','play'):
+            points = [(-size/2,-size),(size/2,0),(-size/2,size)]
+            angle = {'left':180,'right':0,'up':-90,'down':90,'play':0}[kind]
+            pts = [pygame.Vector2(v).rotate(angle)+pygame.Vector2(x,y) for v in points]
+            pygame.draw.polygon(self.canvas,color,pts)
+        elif kind=='fire':
+            pygame.draw.circle(self.canvas,color,(x,y),size,4)
+            pygame.draw.circle(self.canvas,color,(x,y),size//3)
+            for dx,dy in [(1,0),(-1,0),(0,1),(0,-1)]:
+                pygame.draw.line(self.canvas,color,(x+dx*(size-7),y+dy*(size-7)),(x+dx*(size+9),y+dy*(size+9)),5)
+        elif kind=='armor':
+            pygame.draw.polygon(self.canvas,color,[(x-size,y-size),(x+size,y-size),(x+size*.8,y+size*.4),(x,y+size),(x-size*.8,y+size*.4)],4)
+        elif kind=='engine':
+            pygame.draw.circle(self.canvas,color,(x,y),size,5)
+            for angle in range(0,360,60):
+                v=pygame.Vector2(size-5,0).rotate(angle)
+                pygame.draw.line(self.canvas,color,(x,y),(x+v.x,y+v.y),4)
+        elif kind=='pause':
+            for dx in (-12,8): pygame.draw.rect(self.canvas,color,(x+dx,y-size,7,size*2),border_radius=3)
+        elif kind=='fuel':
+            pygame.draw.rect(self.canvas,color,(x-size*.6,y-size*.65,size*1.2,size*1.5),3,border_radius=4)
+            pygame.draw.rect(self.canvas,color,(x-size*.3,y-size,size*.6,size*.35),3)
+            pygame.draw.line(self.canvas,color,(x-size*.35,y),(x+size*.35,y+size*.5),3)
+        elif kind=='coin':
+            pygame.draw.circle(self.canvas,GOLD,(x,y),size)
+            pygame.draw.circle(self.canvas,BG,(x,y),size-6,3)
+        elif kind=='check':
+            pygame.draw.lines(self.canvas,color,False,[(x-size,y),(x-size/4,y+size*.7),(x+size,y-size)],5)
+
+    def cancel_input(self):
+        self.holds.clear()
+        self.charge_owner = None
+        self.charge_time = 0.
+
+    def charge(self, ident):
+        if self.state=='battle' and not self.paused and self.charge_owner is None:
+            self.charge_owner = ident
+            self.charge_time = 0.
+            self.players[self.active].power = 10.
+
+    def release(self, ident):
+        self.holds.pop(ident,None)
+        if ident == self.charge_owner:
+            self.charge_owner = None
+            if self.state=='battle' and not self.paused:
+                self.fire()
 
     def limits(self, p):
         rig = self.art.rig['tanks'][p.body]
@@ -164,6 +217,17 @@ class Game:
 
     def buy(self, kind, item):
         p = self.players[self.build_player]
+        if kind=='fuel':
+            if self.mode!='money' or self.state!='build': return
+            missing = max(0., p.movement-p.fuel)
+            amount = min(missing, p.money/2.)
+            if amount <= 0:
+                self.notice = 'Full!' if missing < .01 else 'Need coins'
+                return
+            p.money -= math.ceil(amount*2)
+            p.fuel = min(p.movement, p.fuel+amount)
+            self.notice = ''
+            return
         if kind in ('body','weapon'):
             price = (BODIES if kind=='body' else WEAPONS)[item][0]
             if self.mode=='money' and item not in p.owned:
@@ -185,6 +249,7 @@ class Game:
                     return
                 p.money -= price
             setattr(p,kind,level+1)
+        p.fuel = min(p.fuel, p.movement)
         p.angle = clamp(p.angle,*self.limits(p))
         self.notice = ''
 
@@ -204,10 +269,11 @@ class Game:
         self.begin_turn()
 
     def begin_turn(self):
-        self.players[self.active].fuel = self.players[self.active].movement
+        if self.mode=='free':
+            self.players[self.active].fuel = self.players[self.active].movement
         self.wind = random.randint(-35,35)
         self.state = 'handoff'
-        self.holds.clear()
+        self.cancel_input()
 
     def fire(self):
         if self.state != 'battle' or self.shots:
@@ -226,7 +292,7 @@ class Game:
             self.shots.append({'pos':muzzle,'vel':vec*speed,'age':0.,'trail':[],
                                'owner':p.index,'weapon':p.weapon,'damage':spec[1]*BODIES[p.body][3]})
         self.state = 'flight'
-        self.holds.clear()
+        self.cancel_input()
         self.accum = self.settle = 0
 
     def ground_at(self,x):
@@ -282,11 +348,18 @@ class Game:
             for p in self.players:
                 p.money += 1200 if p.index==self.winner else 700
         self.state = 'result'
-        self.holds.clear()
+        self.cancel_input()
 
     def update(self,dt):
         if self.paused:
             return
+        if self.state in ('battle','flight','handoff','result'):
+            for leaf in self.leaves:
+                leaf[2] += dt*2
+                leaf[0] = (leaf[0] + self.wind*2.8*leaf[3]*dt) % W
+                leaf[1] += (8 + math.sin(leaf[2])*5)*dt
+                if leaf[1] > min(620,self.ground_at(leaf[0])-10):
+                    leaf[1] = 155
         for fx in self.fx: fx[2] += dt
         self.fx = [f for f in self.fx if f[2]<.6]
         if self.state=='battle':
@@ -296,10 +369,12 @@ class Game:
             distance = min(p.fuel,dt*100)*direction
             old = p.x
             p.x = clamp(p.x+distance,90 if p.index==0 else 805,475 if p.index==0 else 1190)
-            p.fuel -= abs(p.x-old)
+            p.fuel = max(0.,p.fuel-abs(p.x-old))
             p.wheel -= (p.x-old)*4
             p.angle = clamp(p.angle+dt*32*(int('up' in actions)-int('down' in actions)),*self.limits(p))
-            p.power = clamp(p.power+dt*30*(int('power+' in actions)-int('power-' in actions)),10,100)
+            if self.charge_owner is not None:
+                self.charge_time += dt
+                p.power = min(100., 10. + 90.*self.charge_time/2.)
         elif self.state=='flight':
             self.accum += min(dt,.05)
             while self.accum >= 1/240:
@@ -315,10 +390,10 @@ class Game:
                         self.begin_turn()
 
     def action(self,a):
-        if a=='pause': self.paused=True; self.holds.clear()
+        if a=='pause': self.paused=True; self.cancel_input()
         elif a=='resume': self.paused=False
         elif a=='exit': self.running=False
-        elif a=='menu': self.paused=False; self.state='menu'; self.holds.clear()
+        elif a=='menu': self.paused=False; self.state='menu'; self.cancel_input()
         elif a.startswith('mode:'): self.new_campaign(a.split(':')[1])
         elif a.startswith('buy:'):
             _,kind,item = a.split(':'); self.buy(kind,item)
@@ -327,13 +402,15 @@ class Game:
             if self.build_player==0: self.build_player=1; self.notice=''
             else: self.start_round()
         elif a=='begin': self.state='battle'
-        elif a=='fire': self.fire()
+        elif a=='fire': pass  # Fire is handled by press/release ownership.
         elif a=='next': self.state='build'; self.build_player=0; self.notice=''
 
     def press(self,ident,pos):
         for rect,action,enabled in reversed(self.buttons):
             if rect.collidepoint(pos) and enabled:
-                if action in ('left','right','up','down','power+','power-'):
+                if action=='fire':
+                    self.charge(ident)
+                elif action in ('left','right','up','down'):
                     if self.state=='battle' and not self.paused: self.holds[ident]=action
                 else: self.action(action)
                 break
@@ -345,44 +422,72 @@ class Game:
         for i,p in enumerate(self.players):
             old=p.x; p.x=360+i*560
             self.art.tank(self.canvas,p,425,1.3); p.x=old
-        self.button((240,475,380,88),'FREE MODE','mode:free')
-        self.button((660,475,380,88),'MONEY MODE','mode:money')
-        self.text('All parts unlocked',430,594,28,MUTED,True)
-        self.text('Win rounds. Buy upgrades.',850,594,28,MUTED,True)
+        self.button((240,475,380,88),'Build & play','mode:free')
+        self.button((660,475,380,88),'Win coins','mode:money')
+        self.icon('engine',(430,607),GOLD,28)
+        self.icon('coin',(850,607),GOLD,28)
         self.text('Shared iPad  |  Landscape  |  One shot per turn',640,675,28,MUTED,True)
-        self.button((530,716,220,56),'Return to GameHub','exit')
+        self.button((530,716,220,56),'Home','exit')
 
     def draw_build(self):
         p = self.players[self.build_player]
-        self.text('WORKSHOP',42,28,56)
-        self.text(f'PLAYER {p.index+1}  /  '+('EVERYTHING UNLOCKED' if self.mode=='free' else f'${p.money}'),44,87,28,GOLD)
-        self.text('Choose a body',44,144,28)
+        self.text(f'PLAYER {p.index+1}',44,25,56,COLORS[p.color])
+        self.text('Build your tank',44,80,28)
+        if self.mode=='money':
+            self.icon('coin',(1110,55),size=23)
+            self.text(p.money,1150,40,40,GOLD)
+        else: self.text('FREE',1130,45,32,GOLD)
+        # Chassis cards use the actual assembled tanks instead of text-only choices.
         for i,(name,spec) in enumerate(BODIES.items()):
-            cost = 'Owned' if name in p.owned else '$'+str(spec[0])
-            self.button((44+i*192,183,180,68),title(name),'buy:body:'+name,p.body==name)
-            if self.mode=='money': self.text(cost,52+i*192,232,20,MUTED)
-        self.text('Choose a weapon',44,278,28)
+            x=36+i*202
+            self.button((x,140,190,140),'','buy:body:'+name,p.body==name)
+            demo=Player(0); demo.body=name; demo.color=p.color; demo.x=x+95; demo.angle=25
+            self.art.tank(self.canvas,demo,230,.7)
+            self.text(title(name),x+95,254,24,WHITE,True)
+            if self.mode=='money':
+                self.text('OK' if name in p.owned else str(spec[0]),x+95,158,20,GOLD,True)
         for i,(name,spec) in enumerate(WEAPONS.items()):
-            x=44+(i%3)*192; y=318+(i//3)*82
-            cost = 'Owned' if name in p.owned else '$'+str(spec[0])
-            self.button((x,y,180,68),title(name),'buy:weapon:'+name,p.weapon==name)
-            if self.mode=='money': self.text(cost,x+8,y+49,20,MUTED)
-        self.text('Paint / desaturated body tint',44,510,28)
+            x=36+(i%3)*202; y=298+(i//3)*118
+            self.button((x,y,190,108),'','buy:weapon:'+name,p.weapon==name)
+            w=self.art.rig['weapons'][name]
+            pic=self.art.sprite(w['sprite'],[v*.95 for v in w['size']])
+            self.canvas.blit(pic,pic.get_rect(center=(x+95,y+38)))
+            self.text(title(name),x+95,y+76,24,WHITE,True)
+            if self.mode=='money': self.text('OK' if name in p.owned else str(spec[0]),x+162,y+13,20,GOLD,True)
         for i,c in enumerate(COLORS):
-            self.button((44+i*90,550,74,58),'','color:'+str(i),p.color==i)
-            pygame.draw.circle(self.canvas,c,(81+i*90,579),17)
-        self.box((670,145,566,335))
-        old = p.x; p.x=955
-        self.art.tank(self.canvas,p,350,1.6); p.x=old
-        self.text(title(p.body)+' / '+title(p.weapon),953,411,32,WHITE,True)
-        self.text(f'Health {p.max_hp}    Move {p.movement}    Hit {round(WEAPONS[p.weapon][1]*BODIES[p.body][3])} x {WEAPONS[p.weapon][3]}',695,445,24,MUTED)
+            x=36+i*101
+            self.button((x,549,88,80),'','color:'+str(i),p.color==i)
+            pygame.draw.circle(self.canvas,c,(x+44,589),26)
+            if p.color==i: self.icon('check',(x+44,589),BG,15)
+        self.box((680,140,564,300))
+        old=p.x; p.x=960
+        self.art.tank(self.canvas,p,333,1.5); p.x=old
+        # Heart-like health pips and wheel pips show the tradeoff without reading stats.
+        self.icon('armor',(730,394),COLORS[p.color],18)
+        for i in range(round(p.max_hp/25)):
+            pygame.draw.circle(self.canvas,COLORS[p.color],(770+i*23,394),8)
         for i,kind in enumerate(('armor','engine')):
-            level = getattr(p,kind)
-            suffix = ('MAX' if level==3 else '$'+str(500+level*350)) if self.mode=='money' else 'tap to cycle'
-            self.button((680,510+i*85,546,68),f'{title(kind)} {level}/3  /  {suffix}','buy:'+kind+':upgrade')
-        self.text(self.notice or 'Armor adds health. Engine adds movement per turn.',44,650,24,GOLD)
-        self.button((44,709,230,62),'Main menu','menu')
-        self.button((800,709,426,62),'Ready / '+('Player 2 builds next' if p.index==0 else 'Start round'),'ready',True)
+            y=447+i*83; level=getattr(p,kind)
+            self.button((680,y,564,76),'','buy:'+kind+':upgrade')
+            self.icon(kind,(722,y+41),GOLD,23)
+            self.text('Armor' if kind=='armor' else 'Move',768,y+12,28)
+            for j in range(3):
+                pygame.draw.circle(self.canvas,GOLD if j<level else (70,87,103),(790+j*42,y+57),12)
+            self.text('+' if level<3 or self.mode=='free' else 'OK',1198,y+40,40,GOLD,True)
+            if self.mode=='money' and level<3: self.text(str(500+level*350),1060,y+30,28,GOLD)
+        if self.mode=='money':
+            cost = math.ceil(max(0.,p.movement-p.fuel)*2)
+            self.button((680,615,564,72),'','buy:fuel:refill',enabled=cost>0 and p.money>0)
+            self.icon('fuel',(721,650),GOLD,22)
+            self.text('Fuel',767,625,28)
+            self.box((768,656,232,12),(60,78,90),5)
+            if p.fuel>0: self.box((768,656,max(1,round(232*p.fuel/p.movement)),12),(113,210,140),5)
+            self.text('Full' if cost==0 else str(min(cost,p.money))+' coins',1040,638,28,GOLD)
+            self.text('+',1205,650,32,GOLD,True)
+        self.text(self.notice,40,654,28,GOLD)
+        self.button((36,700,190,76),'Home','menu')
+        self.button((680,694,564,88),'Ready','ready',True)
+        self.icon('check',(1155,738),GOLD,23)
 
     def draw_field(self):
         self.canvas.fill((107,155,176))
@@ -402,7 +507,29 @@ class Game:
         else:
             pygame.draw.rect(self.canvas,(99,110,100),(575,self.obstacle.top+45,130,450))
             pygame.draw.rect(self.canvas,(123,130,111),(600,self.obstacle.top,80,450))
+        for x,y,phase,scale in self.leaves:
+            if y >= self.ground_at(x): continue
+            angle = math.sin(phase)*35 + (20 if self.wind>=0 else -20)
+            center = pygame.Vector2(x,y)
+            pts = [center+pygame.Vector2(v).rotate(angle)*scale for v in [(-7,0),(-2,-4),(7,0),(2,4)]]
+            pygame.draw.polygon(self.canvas,(184,182,93),pts)
+            pygame.draw.line(self.canvas,(105,126,73),pts[0],pts[2],1)
         for p in self.players: self.art.tank(self.canvas,p,self.grounds[p.index])
+        if self.state in ('battle','handoff'):
+            p=self.players[self.active]
+            self.icon('down',(round(p.x),self.grounds[p.index]-124),GOLD,17)
+        if self.state=='battle':
+            p=self.players[self.active]
+            half=self.art.rig['tanks'][p.body]['nodes'][0]['size'][0]*.4
+            for direction,offset in [('left',-1),('right',1)]:
+                cx=round(clamp(p.x+offset*(half+32),30,W-30))
+                cy=self.grounds[p.index]-26
+                rect=pygame.Rect(cx-28,cy-32,56,64)
+                self.buttons.append((rect,direction,p.fuel>0))
+                color=(217,228,213) if p.fuel>0 else (122,140,132)
+                # Quiet outline chevrons with generous invisible touch areas.
+                sign=-1 if direction=='left' else 1
+                pygame.draw.lines(self.canvas,color,False,[(cx-sign*6,cy-12),(cx+sign*6,cy),(cx-sign*6,cy+12)],3)
         for s in self.shots:
             if len(s['trail'])>1: pygame.draw.lines(self.canvas,(242,223,164),False,s['trail'],2)
             spec = self.art.rig['projectiles'][self.art.rig['weapons'][s['weapon']]['projectile']]
@@ -424,19 +551,32 @@ class Game:
             self.text(f'{p.hp}/{p.max_hp} HP   |   {title(p.weapon)}',x,92,24)
         arrow = '<' if self.wind<0 else '>' if self.wind>0 else '-'
         self.text(f'ROUND {self.round}',640,25,24,MUTED,True)
-        self.text(f'{arrow} WIND {abs(self.wind)}',640,62,32,GOLD,True)
+        if self.wind:
+            self.icon('left' if self.wind<0 else 'right',(575,60),GOLD,19)
+        for i in range(5):
+            pygame.draw.circle(self.canvas,GOLD if abs(self.wind)>i*7 else (60,78,90),(620+i*22,60),7)
         self.text(f'PLAYER {self.active+1}'+(' / SHOT IN FLIGHT' if self.state=='flight' else ' / YOUR TURN'),640,105,24,WHITE,True)
         self.box((0,650,1280,150),BG,0)
         if self.state in ('battle','flight'):
             p=self.players[self.active]
-            self.text(f'MOVE {round(p.fuel)}',112,674,24,MUTED,True)
-            self.text(f'AIM {round(p.angle)} deg',370,674,24,MUTED,True)
-            self.text(f'POWER {round(p.power)}%',650,674,24,MUTED,True)
             enabled=self.state=='battle'
-            for x,label,a in [(24,'<','left'),(122,'>','right'),(280,'-','down'),(378,'+','up'),(560,'-','power-'),(658,'+','power+')]:
-                self.button((x,706,88,70),label,a,enabled=enabled)
-            self.button((792,698,292,82),'FIRE','fire',True,enabled)
-            self.button((1110,706,145,70),'Pause','pause')
+            self.text('Move',154,672,24,MUTED,True)
+            self.text('Aim',420,672,24,MUTED,True)
+            for x,a in [(24,'left'),(156,'right'),(290,'down'),(422,'up')]:
+                self.button((x,698,120,86),'',a,enabled=enabled)
+                self.icon(a,(x+60,741),WHITE if enabled else MUTED,23)
+            # Fuel is a visual bar underneath the movement label.
+            pygame.draw.rect(self.canvas,(60,78,90),(40,687,224,5))
+            pygame.draw.rect(self.canvas,GOLD,(40,687,round(224*p.fuel/p.movement),5))
+            self.button((570,698,510,86),'','fire',self.charge_owner is not None,enabled)
+            self.icon('fire',(622,741),GOLD,22)
+            power=p.power if self.charge_owner is not None or self.state=='flight' else 0
+            for i in range(10):
+                color=(113,210,140) if i<5 else GOLD if i<8 else (245,130,92)
+                pygame.draw.rect(self.canvas,color if power>i*10 else (57,75,89),(675+i*36,722,28,40),border_radius=6)
+            self.text('Release!' if self.charge_owner is not None else 'Hold to fire',825,672,28,GOLD,True)
+            self.button((1110,698,145,86),'','pause')
+            self.icon('pause',(1182,741),WHITE,23)
 
     def draw(self):
         self.buttons=[]
@@ -449,21 +589,25 @@ class Game:
                 self.box((325,235,630,320),BG)
                 if self.state=='handoff':
                     self.text(f'PLAYER {self.active+1}',640,290,56,COLORS[self.players[self.active].color],True)
-                    self.text('Move, aim, set power, then fire.',640,353,28,MUTED,True)
-                    self.text('Wind is fixed for your shot.',640,393,24,MUTED,True)
-                    self.button((435,450,410,74),'Start my turn','begin',True)
+                    self.icon('left',(472,356),WHITE,22)
+                    self.icon('up',(560,356),WHITE,22)
+                    self.icon('fire',(704,356),GOLD,24)
+                    self.icon('play',(810,356),GOLD,22)
+                    self.text('Hold to charge. Let go to fire!',640,404,28,GOLD,True)
+                    self.button((435,450,410,74),'Play!','begin',True)
+                    self.icon('play',(785,487),GOLD,21)
                 else:
                     self.text('DRAW' if self.winner is None else f'PLAYER {self.winner+1} WINS',640,290,56,GOLD,True)
-                    self.text('Winner +$1200 / Other player +$700' if self.mode=='money' else 'Rebuild your tanks for the next round.',640,353,28,MUTED,True)
-                    self.text('New terrain next round. Equipment is retained.',640,393,24,MUTED,True)
-                    self.button((435,450,410,74),'Next round / Workshop','next',True)
+                    self.icon('coin' if self.mode=='money' else 'check',(640,356),GOLD,28)
+                    self.text('Build again!',640,404,28,MUTED,True)
+                    self.button((435,450,410,74),'Play again','next',True)
         if self.paused:
             self.buttons=[]
             self.box((390,210,500,400),BG)
             self.text('PAUSED',640,264,56,WHITE,True)
             self.button((450,320,380,64),'Resume','resume',True)
             self.button((450,410,380,64),'End match / Main menu','menu')
-            self.button((450,500,380,64),'Return to GameHub','exit')
+            self.button((450,500,380,64),'Home','exit')
         return self.canvas
 
 async def run(screen=None, clock=None):
@@ -481,25 +625,26 @@ async def run(screen=None, clock=None):
         vw,vh=round(W*scale),round(H*scale)
         ox,oy=(sw-vw)//2,(sh-vh)//2
         portrait=sh>sw
+        if portrait: game.cancel_input()
         game.draw()
         for e in pygame.event.get():
             if e.type==pygame.QUIT: game.running=False
-            elif e.type==pygame.WINDOWFOCUSLOST: game.holds.clear(); game.paused=True
+            elif e.type==pygame.WINDOWFOCUSLOST: game.cancel_input(); game.paused=True
             elif e.type==pygame.KEYDOWN and e.key==pygame.K_ESCAPE:
-                game.paused=not game.paused; game.holds.clear()
-            elif e.type==pygame.FINGERUP: game.holds.pop(e.finger_id,None)
-            elif e.type==pygame.MOUSEBUTTONUP: game.holds.pop('mouse',None)
+                game.paused=not game.paused; game.cancel_input()
+            elif e.type==pygame.FINGERUP: game.release(e.finger_id)
+            elif e.type==pygame.MOUSEBUTTONUP and e.button==1 and not getattr(e,'touch',False): game.release('mouse')
             elif not portrait and e.type==pygame.FINGERDOWN:
                 game.press(e.finger_id,((e.x*sw-ox)/scale,(e.y*sh-oy)/scale))
             elif not portrait and e.type==pygame.MOUSEBUTTONDOWN and e.button==1 and not getattr(e,'touch',False):
                 game.press('mouse',((e.pos[0]-ox)/scale,(e.pos[1]-oy)/scale))
             elif e.type==pygame.KEYDOWN and not portrait and not game.paused:
-                keys={pygame.K_LEFT:'left',pygame.K_RIGHT:'right',pygame.K_UP:'up',pygame.K_DOWN:'down',pygame.K_q:'power-',pygame.K_e:'power+'}
+                keys={pygame.K_LEFT:'left',pygame.K_RIGHT:'right',pygame.K_UP:'up',pygame.K_DOWN:'down'}
                 if e.key in keys: game.holds[e.key]=keys[e.key]
-                elif e.key==pygame.K_SPACE: game.fire()
-            elif e.type==pygame.KEYUP: game.holds.pop(e.key,None)
+                elif e.key==pygame.K_SPACE: game.charge('space')
+            elif e.type==pygame.KEYUP: game.release('space' if e.key==pygame.K_SPACE else e.key)
         if portrait:
-            game.holds.clear()
+            game.cancel_input()
         else:
             game.update(dt)
         screen.fill(BG)
