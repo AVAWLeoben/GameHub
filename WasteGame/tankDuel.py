@@ -1,8 +1,10 @@
 """Tank Duel: local two-player pygame/pygbag artillery. await run(screen).
 
 Keep this file beside the existing tank_game_assets folder.
-Includes destructible height-map terrain, tank destruction effects, and a
-compact victory card that leaves the battlefield visible.
+Includes layered mountain scenery, optional trees from GameHub's WasteTrain
+assets, destructible terrain and trees, and a compact victory card.
+Trees are decoration: tanks and shots pass through them. No extra assets are
+required; small procedural trees are used if the shared sprites are missing.
 """
 import asyncio
 import json
@@ -22,13 +24,20 @@ GO_FILL = (40, 112, 74)
 RED = (245, 100, 92)
 DIM = (105, 121, 133)
 COLORS = [(79,195,235),(241,112,97),(148,206,113),(187,146,234),(244,191,75),(223,224,220)]
-BODIES = {'scout': (0,100,150,1.0), 'heavy': (1200,155,90,1.0), 'artillery': (900,110,110,1.15)}
+# Price, health, movement/fuel capacity, weapon damage multiplier.
+# Scout: mobility. Heavy: armor. Artillery: firepower and wider blasts.
+BODIES = {'scout': (0,100,150,1.0), 'heavy': (1200,155,90,1.0), 'artillery': (900,110,110,1.40)}
+BODY_BLAST = {'scout': 1.0, 'heavy': 1.0, 'artillery': 1.20}
 WEAPONS = {'cannon': (0,36,56,1,1.0), 'twin_cannon': (1000,24,48,2,1.0),
            'mortar': (800,49,85,1,1.15), 'rocket_pod': (1600,22,62,3,.8),
            'plasma_gun': (2000,62,43,1,.65)}
 ASSETS = Path(__file__).resolve().parent / 'tank_game_assets'
 PHYSICS_DT = 1 / 240
 TERRAIN_BOTTOM = 642
+# Scale physical battlefield geometry together; workshop previews remain readable.
+TANK_SIZE_MULTIPLIER = .70
+BATTLE_TANK_SCALE = .8 * TANK_SIZE_MULTIPLIER
+TANK_HITBOX_HEIGHT = 72 * TANK_SIZE_MULTIPLIER
 
 
 def clamp(v, lo, hi):
@@ -83,7 +92,7 @@ class Art:
             self.cache[key] = s
         return self.cache[key]
 
-    def pose(self, p, ground, scale=.8):
+    def pose(self, p, ground, scale=BATTLE_TANK_SCALE):
         rig = self.rig['tanks'][p.body]
         positions = {}
         for n in rig['nodes']:
@@ -92,13 +101,13 @@ class Art:
         root = pygame.Vector2(p.x, ground - rig['groundContacts'][0][1] * scale)
         return rig, positions, root
 
-    def mount(self, p, ground, scale=.8):
+    def mount(self, p, ground, scale=BATTLE_TANK_SCALE):
         _, pos, root = self.pose(p, ground, scale)
         v = pos['weapon_slot'] * scale
         v.x *= 1 if p.index == 0 else -1
         return root + v
 
-    def tank(self, target, p, ground, scale=.8):
+    def tank(self, target, p, ground, scale=BATTLE_TANK_SCALE):
         rig, pos, root = self.pose(p, ground, scale)
         facing = 1 if p.index == 0 else -1
         for ident in rig['drawOrder']:
@@ -119,6 +128,213 @@ class Art:
             if facing == -1:
                 s = pygame.transform.flip(s, True, False)
             target.blit(s, s.get_rect(center=root+v))
+
+
+class Scenery:
+    """Cached scenery, deliberately separate from gameplay collision and RNG."""
+    def __init__(self):
+        self.rng = random.Random(71)
+        self.sources = []
+        self.sprites = {}
+        self.trees = []
+        self.particles = []
+        self.background = pygame.Surface((W,H))
+        assets = Path(__file__).resolve().parent / 'assets'
+        for name in ('tree_broadleaf.png', 'tree_pine.png'):
+            pic = self.load_tree(assets / 'wasteTrain/scenery' / name)
+            if pic is not None: self.sources.append(pic)
+        if not self.sources:
+            pic = self.load_tree(assets / 'wasteGOL/tree.png')
+            if pic is not None: self.sources.append(pic)
+        if not self.sources:
+            self.sources = [self.fallback_tree(False), self.fallback_tree(True)]
+        self.make_background()
+
+    @staticmethod
+    def load_tree(path):
+        try:
+            pic = pygame.image.load(str(path)).convert_alpha()
+            bounds = pic.get_bounding_rect(min_alpha=8)
+            if bounds.width and bounds.height: return pic.subsurface(bounds).copy()
+        except (OSError, pygame.error):
+            pass
+        return None
+
+    @staticmethod
+    def fallback_tree(pine):
+        pic = pygame.Surface((120,160),pygame.SRCALPHA)
+        pygame.draw.polygon(pic,(108,72,43),[(49,155),(54,73),(66,73),(73,155)])
+        pygame.draw.line(pic,(169,115,62),(59,146),(61,87),5)
+        if pine:
+            for y,w in ((105,55),(76,45),(46,32)):
+                pygame.draw.polygon(pic,(41,104,65),[(60,y-44),(60-w,y+27),(60+w,y+27)])
+                pygame.draw.polygon(pic,(80,151,79),[(60,y-44),(60-w,y+20),(60,y+10)])
+        else:
+            for x,y,r in ((35,80,30),(84,80,31),(59,49,38),(60,90,38)):
+                pygame.draw.circle(pic,(49,111,53),(x,y),r)
+                pygame.draw.circle(pic,(97,159,64),(x-5,y-7),r-6)
+                pygame.draw.circle(pic,(144,185,77),(x-10,y-15),max(6,r//3))
+        return pic
+
+    def make_background(self):
+        # Flat colour shapes stay crisp and keep the playable ground distinct.
+        rng = self.rng
+        sky,far,lit,near,hill = rng.choice([
+            ((190,221,242),(115,158,103),(170,196,102),(86,132,88),(64,104,70)),
+            ((183,218,239),(124,161,95),(187,202,99),(94,137,76),(65,107,67)),
+            ((202,228,240),(110,154,109),(163,193,113),(81,130,93),(59,103,76)),
+        ])
+        self.palette = {'soil':(102,91,66),'grain':(124,111,77),
+                        'grass':(141,177,78),'grass_dark':(77,121,67),
+                        'rock':(131,133,101),'rock_top':(169,179,119)}
+        s = self.background
+        s.fill(sky)
+        sun = (rng.randint(930,1135),rng.randint(198,226))
+        pygame.draw.circle(s,(225,236,218),sun,54)
+        pygame.draw.circle(s,(255,238,169),sun,38)
+        for x,y,size in ((110,210,1.),(390,178,.8),(775,246,.85),(1150,292,.65)):
+            x += rng.randint(-35,35)
+            y += rng.randint(-12,12)
+            for dx,dy,r in ((-29,4,20),(-9,-8,25),(16,-3,21),(38,7,15)):
+                pygame.draw.circle(s,(234,245,248),(round(x+dx*size),round(y+dy*size)),round(r*size))
+            pygame.draw.rect(s,(234,245,248),(x-32*size,y,73*size,20*size),border_radius=10)
+        # Overlapping faceted peaks, like the reference's green mountain skyline.
+        for x,peak,width in ((40,273,260),(290,230,330),(565,293,315),(850,224,350),(1165,270,300)):
+            peak += rng.randint(-22,22)
+            x += rng.randint(-20,20)
+            left,right = x-width*.65,x+width*.65
+            ridge = [(left,505),(x-width*.19,peak+60),(x-12,peak+4),
+                     (x,peak),(x+15,peak+9),(right,505)]
+            pygame.draw.polygon(s,far,ridge)
+            pygame.draw.polygon(s,lit,[(x-width*.19,peak+60),(x-12,peak+4),
+                (x,peak),(x+15,peak+9),(x+width*.28,peak+115),
+                (x+width*.07,peak+94),(x-7,peak+104),(x-21,peak+85)])
+        for color,base,amplitude,phase in ((near,426,34,1.),(hill,483,24,3.2)):
+            points = [(x,round(base+math.sin(x/127+phase)*amplitude+
+                              math.sin(x/63+phase)*amplitude*.23)) for x in range(-10,W+11,10)]
+            pygame.draw.polygon(s,color,points+[(W,H),(0,H)])
+        # Tiny distant pines give the hills depth without competing with tanks.
+        for x in range(12,W,65):
+            y = round(483+math.sin(x/127+3.2)*24+math.sin(x/63+3.2)*24*.23)+2
+            h = rng.randint(10,21)
+            pygame.draw.polygon(s,hill,[(x,y-h),(x-h*.45,y+5),(x+h*.45,y+5)])
+
+    def sprite(self,kind,height,flip):
+        key = kind,height,flip
+        if key not in self.sprites:
+            source = self.sources[kind]
+            width = round(height*source.get_width()/source.get_height())
+            pic = pygame.transform.smoothscale(source,(width,height))
+            if flip: pic = pygame.transform.flip(pic,True,False)
+            ghost = pic.copy()
+            ghost.set_alpha(130)
+            self.sprites[key] = pic,ghost
+        return self.sprites[key]
+
+    def new_round(self,game):
+        # Do not consume random numbers used by wind, terrain or weapon effects.
+        self.rng.seed(7919*game.round+int(game.obstacle.top)*31)
+        self.make_background()
+        self.trees = []
+        self.particles = []
+        rng = self.rng
+        for side in (0,1):
+            layers = [False,False,False,True,True]
+            rng.shuffle(layers)
+            for slot,front in zip((70,170,270,370,475),layers):
+                x = slot+rng.randint(-15,15)
+                if side: x = W-x
+                pic,ghost = self.sprite(rng.randrange(len(self.sources)),rng.choice((94,110,126,142)),rng.choice((False,True)))
+                self.trees.append({'x':x,'y':game.ground_at(x),'pic':pic,'ghost':ghost,
+                    'front':front,'alive':True,'fall_age':0.,'fall_dir':1,'rotation':None})
+
+    @staticmethod
+    def tree_rect(tree):
+        return tree['pic'].get_rect(midbottom=(round(tree['x']),round(tree['y'])))
+
+    def blast(self,game,x,y,radius):
+        for tree in self.trees:
+            if not tree['alive']: continue
+            r = self.tree_rect(tree)
+            dx,dy = x-clamp(x,r.left,r.right),y-clamp(y,r.top,r.bottom)
+            undermined = game.ground_at(tree['x'])>tree['y']+9
+            if dx*dx+dy*dy <= radius*radius or undermined:
+                self.topple(tree,x)
+
+    def topple(self,tree,blast_x):
+        if not tree['alive']: return
+        tree['alive'] = False
+        tree['fall_dir'] = 1 if tree['x']>=blast_x else -1
+        rng = self.rng
+        width,height = tree['pic'].get_size()
+        for i in range(12):
+            leaf = i<9
+            self.particles.append({'pos':pygame.Vector2(tree['x']+rng.uniform(-width*.3,width*.3),
+                tree['y']-height*rng.uniform(.45,.85) if leaf else tree['y']-18),
+                'vel':pygame.Vector2(tree['fall_dir']*rng.uniform(25,100)+rng.uniform(-35,35),rng.uniform(-160,-45)),
+                'life':rng.uniform(1.2,2.2),'leaf':leaf,'phase':rng.uniform(0,math.tau),
+                'size':rng.randint(3,6),'color':rng.choice([(112,164,64),(170,188,73),(65,125,68)])
+                if leaf else (146,100,58)})
+
+    def update(self,game,dt):
+        for tree in self.trees:
+            if not tree['alive']: tree['fall_age'] = min(1.,tree['fall_age']+dt)
+        for part in self.particles:
+            part['life'] -= dt
+            part['phase'] += dt*8
+            part['vel'].x += game.wind*dt*(2.4 if part['leaf'] else .4)
+            part['vel'].y += (125 if part['leaf'] else 490)*dt
+            part['pos'] += part['vel']*dt
+            if part['leaf']: part['pos'].x += math.sin(part['phase'])*15*dt
+            x,y = part['pos']
+            if 0<=x<W and y>=game.ground_at(x):
+                part['pos'].y = game.ground_at(x)-2
+                part['vel'].update(0,0)
+                part['life'] = min(part['life'],.25)
+        self.particles = [p for p in self.particles if p['life']>0]
+
+    def draw_trees(self,target,game,front):
+        tank_rects = [game.tank_rect(p).inflate(18,12) for p in game.players if p.hp>0]
+        for tree in self.trees:
+            if tree['front']!=front: continue
+            x,y = tree['x'],tree['y']
+            if tree['alive']:
+                r = self.tree_rect(tree)
+                ghost = front and any(r.colliderect(tank) for tank in tank_rects)
+                # Grounded, subtle shadows; tank tracks remain legible in front.
+                if not ghost:
+                    pygame.draw.ellipse(target,(76,87,53),(x-r.width*.24,y-2,r.width*.48,6))
+                target.blit(tree['ghost'] if ghost else tree['pic'],r)
+                continue
+            # A small stump follows cratered ground; the falling crown fades away.
+            ground = round(game.ground_at(x))
+            pygame.draw.polygon(target,(111,79,49),[(x-6,ground),(x-4,ground-10),(x+3,ground-7),(x+6,ground)])
+            pygame.draw.line(target,(182,138,78),(x-4,ground-10),(x+3,ground-7),2)
+            age = tree['fall_age']
+            if age>=.95: continue
+            progress = min(1.,age/.85)**1.6
+            angle = -tree['fall_dir']*round(progress*84/6)*6
+            cached = tree['rotation']
+            if cached is None or cached[0]!=angle:
+                cached = (angle,pygame.transform.rotate(tree['pic'],angle))
+                tree['rotation'] = cached
+            pic = cached[1]
+            alpha = round(255*min(1.,(.95-age)/.45))
+            offset = pygame.Vector2(0,-tree['pic'].get_height()/2).rotate(-angle)
+            r = pic.get_rect(center=pygame.Vector2(x,y)+offset)
+            if front and any(r.colliderect(tank) for tank in tank_rects): alpha = min(130,alpha)
+            pic.set_alpha(alpha)
+            target.blit(pic,r)
+
+    def draw_particles(self,target):
+        for part in self.particles:
+            x,y = part['pos']
+            size = part['size']*min(1.,part['life']*4)
+            if part['leaf']:
+                width = size*max(.25,abs(math.sin(part['phase'])))
+                pygame.draw.polygon(target,part['color'],[(x-size,y),(x,y-width),(x+size,y),(x,y+width)])
+            else:
+                pygame.draw.line(target,part['color'],(x-size,y-size/2),(x+size,y+size/2),3)
 
 
 class Game:
@@ -169,6 +385,7 @@ class Game:
         self.result_time = 0.
         rng = random.Random(71)
         self.leaves = [[rng.uniform(0,W),rng.uniform(165,470),rng.uniform(0,6.28),rng.uniform(.7,1.3)] for _ in range(14)]
+        self.scenery = Scenery()
 
     def wave(self, speed=4.):
         return (math.sin(self.t*speed)+1)/2
@@ -403,6 +620,7 @@ class Game:
             p.hp=p.max_hp
             p.angle=clamp(p.angle,*self.limits(p))
         self.settle_tanks()
+        self.scenery.new_round(self)
         self.active=(self.round-1)%2
         self.state='battle'
         self.begin_turn()
@@ -420,7 +638,7 @@ class Game:
         direction=1 if p.index==0 else -1
         rad=math.radians(angle)
         vec=pygame.Vector2(direction*math.cos(rad),-math.sin(rad))
-        muzzle=origin+vec*((w['muzzle'][0]-w['pivot'][0])*.8)
+        muzzle=origin+vec*((w['muzzle'][0]-w['pivot'][0])*BATTLE_TANK_SCALE)
         return muzzle,vec*(310+power*5.1)
 
     def fire(self):
@@ -431,7 +649,8 @@ class Game:
             angle=p.angle+(i-(spec[3]-1)/2)*2
             muzzle,velocity=self.launch(p,angle,p.power)
             self.shots.append({'pos':muzzle,'vel':velocity,'age':0.,'trail':[],
-                               'owner':p.index,'weapon':p.weapon,'damage':spec[1]*BODIES[p.body][3]})
+                               'owner':p.index,'weapon':p.weapon,'damage':spec[1]*BODIES[p.body][3],
+                               'blast_radius':spec[2]*BODY_BLAST[p.body]})
         self.state='flight'
         self.tutorial=False
         self.aim_hint=False
@@ -447,8 +666,8 @@ class Game:
         return self.grounds[0 if x<640 else 1]
 
     def tank_rect(self,p):
-        width=self.art.rig['tanks'][p.body]['nodes'][0]['size'][0]*.8
-        return pygame.Rect(p.x-width/2,self.grounds[p.index]-72,width,72)
+        width=self.art.rig['tanks'][p.body]['nodes'][0]['size'][0]*BATTLE_TANK_SCALE
+        return pygame.Rect(p.x-width/2,self.grounds[p.index]-TANK_HITBOX_HEIGHT,width,TANK_HITBOX_HEIGHT)
 
     def settle_tanks(self):
         if self.terrain is None: return
@@ -475,7 +694,7 @@ class Game:
         self.shake=max(self.shake,.65)
         r=self.tank_rect(p)
         for dx,dy,delay,radius in [(0,-10,0.,120),(-32,0,-.10,78),(34,-28,-.22,90)]:
-            self.fx.append([r.centerx+dx,r.centery+dy,delay,radius])
+            self.fx.append([r.centerx+dx*TANK_SIZE_MULTIPLIER,r.centery+dy*TANK_SIZE_MULTIPLIER,delay,radius])
         for _ in range(28):
             angle=random.uniform(math.pi*1.08,math.pi*1.92)
             speed=random.uniform(110,350)
@@ -486,7 +705,7 @@ class Game:
 
     def explode(self,shot):
         x,y=shot['pos']
-        radius=WEAPONS[shot['weapon']][2]
+        radius=shot.get('blast_radius',WEAPONS[shot['weapon']][2])
         self.fx.append([x,y,0.,radius])
         self.shake=max(self.shake,.16)
         for p in self.players:
@@ -501,6 +720,7 @@ class Game:
                 if lost>0: self.floaters.append([r.centerx,r.top-10,0.,lost])
                 if p.hp==0: self.destroy_tank(p)
         self.carve_crater(x,y,radius*.85)
+        self.scenery.blast(self,x,y,radius)
         self.settle_tanks()
         for _ in range(10):
             self.debris.append({'pos':pygame.Vector2(x,y),
@@ -573,12 +793,13 @@ class Game:
             puff[2]+=dt
         self.smoke=[p for p in self.smoke if p[2]<2.2]
         if self.state in ('battle','flight','handoff','result'):
+            self.scenery.update(self,dt)
             self.smoke_timer+=dt
             if self.destroyed and self.smoke_timer>=.12:
                 self.smoke_timer=0.
                 for index in self.destroyed:
                     p=self.players[index]
-                    self.smoke.append([p.x+random.uniform(-15,15),self.grounds[index]-24,0.,random.randint(8,15)])
+                    self.smoke.append([p.x+random.uniform(-15,15),self.grounds[index]-24*TANK_SIZE_MULTIPLIER,0.,random.randint(8,15)])
             for leaf in self.leaves:
                 leaf[2]+=dt*2
                 leaf[0]=(leaf[0]+self.wind*2.8*leaf[3]*dt)%W
@@ -705,6 +926,10 @@ class Game:
             self.button(rect,'','buy:body:'+name,p.body==name)
             demo=Player(0); demo.body=name; demo.color=p.color; demo.x=x+95; demo.angle=25
             self.art.tank(self.canvas,demo,214,.7)
+            self.icon('boom',(x+20,230),GOLD,10)
+            self.text(f'x{spec[3]:.1f}',x+36,219,24,GOLD if spec[3]>1 else MUTED)
+            pygame.draw.circle(self.canvas,(245,130,92),(x+115,230),round(8*BODY_BLAST[name]),2)
+            self.text(f'x{BODY_BLAST[name]:.1f}',x+131,219,24,GOLD if BODY_BLAST[name]>1 else MUTED)
             for k in range(round(spec[1]/50)): self.icon('heart',(x+22+k*22,254),RED,8)
             for k in range(round(spec[2]/50)): self.icon('right',(x+168-k*20,254),GREEN,7)
             self.price_badge(rect,name,spec[0])
@@ -728,6 +953,10 @@ class Game:
         self.art.tank(self.canvas,p,330,1.5); p.x=old
         for i in range(round(p.max_hp/25)): self.icon('heart',(716+i*26,380),COLORS[p.color],9)
         for i in range(round(p.movement/35)): self.icon('right',(716+i*26,414),GREEN,8)
+        self.icon('boom',(1090,380),GOLD,14)
+        self.text(f'x{BODIES[p.body][3]:.1f}',1120,367,30,GOLD)
+        pygame.draw.circle(self.canvas,(245,130,92),(1090,414),round(12*BODY_BLAST[p.body]),3)
+        self.text(f'x{BODY_BLAST[p.body]:.1f}',1120,401,30,GOLD)
         for i,kind in enumerate(('armor','engine')):
             y=447+i*83; level=getattr(p,kind)
             self.button((680,y,564,76),'','buy:'+kind+':upgrade')
@@ -804,17 +1033,19 @@ class Game:
         # Cached layer is rebuilt only after an impact or a new round.
         if self.terrain_surface is None or self.terrain_dirty:
             layer=pygame.Surface((W,H),pygame.SRCALPHA)
+            palette=self.scenery.palette
             for x in range(W):
                 top=round(self.ground_at(x))
                 stone=self.obstacle.left<=x<=self.obstacle.right
-                color=(66,80,91) if stone and self.tower else (99,110,100) if stone else (61,81,78)
+                color=(83,101,112) if stone and self.tower else palette['rock'] if stone else palette['soil']
                 pygame.draw.line(layer,color,(x,top),(x,H-1))
-                rim=(116,132,142) if stone and self.tower else (143,159,105)
+                rim=(151,169,176) if stone and self.tower else palette['rock_top'] if stone else palette['grass']
                 pygame.draw.line(layer,rim,(x,top),(x,top+5))
+                if not stone: pygame.draw.line(layer,palette['grass_dark'],(x,top+6),(x,top+10))
             for x in range(20,W,42):
                 for y in range(180,H,36):
                     if y>max(self.ground_at(xx) for xx in range(x,min(W,x+15)))+14:
-                        pygame.draw.line(layer,(81,100,88),(x,y),(min(W-1,x+14),y),3)
+                        pygame.draw.line(layer,palette['grain'],(x,y),(min(W-1,x+14),y),3)
             if self.tower:
                 for y in range(self.obstacle.top+14,650,32):
                     for x in range(self.obstacle.left,self.obstacle.right):
@@ -826,21 +1057,20 @@ class Game:
 
     def draw_wreck(self,p):
         x,y=round(p.x),round(self.grounds[p.index])
-        pygame.draw.ellipse(self.canvas,(36,39,42),(x-44,y-12,88,18))
-        pygame.draw.polygon(self.canvas,(66,67,64),[(x-32,y),(x-22,y-22),(x+12,y-15),(x+33,y)])
-        pygame.draw.line(self.canvas,(91,85,73),(x-15,y-20),(x+18,y-36),7)
-        # Small colour-and-dot badge identifies the wreck too.
-        self.badge(p,(x,y-10),10)
+        scale=TANK_SIZE_MULTIPLIER
+        def pt(dx,dy): return round(x+dx*scale),round(y+dy*scale)
+        pygame.draw.ellipse(self.canvas,(36,39,42),(*pt(-44,-12),round(88*scale),round(18*scale)))
+        pygame.draw.polygon(self.canvas,(66,67,64),[pt(-32,0),pt(-22,-22),pt(12,-15),pt(33,0)])
+        pygame.draw.line(self.canvas,(91,85,73),pt(-15,-20),pt(18,-36),max(1,round(7*scale)))
+        self.badge(p,pt(0,-10),max(3,round(10*scale)))
         for k in range(3):
-            flame=round(6+self.wave(8+k)*8)
-            self.star((x-15+k*15,y-20),flame,flame*.45,5,(245,142,58))
+            flame=round((6+self.wave(8+k)*8)*scale)
+            self.star(pt(-15+k*15,-20),flame,flame*.45,5,(245,142,58))
 
     def draw_field(self):
-        self.canvas.fill((107,155,176))
-        pygame.draw.circle(self.canvas,(245,221,167),(1030,225),46)
-        for x,y in [(140,205),(890,310),(370,265)]:
-            pygame.draw.rect(self.canvas,(184,207,211),(x,y,110,13),border_radius=6)
+        self.canvas.blit(self.scenery.background,(0,0))
         self.draw_terrain()
+        self.scenery.draw_trees(self.canvas,self,False)
         for x,y,phase,scale in self.leaves:
             if y>=self.ground_at(x): continue
             angle=math.sin(phase)*35+(20 if self.wind>=0 else -20)
@@ -851,6 +1081,8 @@ class Game:
         for p in self.players:
             if p.hp>0: self.art.tank(self.canvas,p,self.grounds[p.index])
             else: self.draw_wreck(p)
+        self.scenery.draw_trees(self.canvas,self,True)
+        self.scenery.draw_particles(self.canvas)
         for x,y,age,size in self.smoke:
             shade=round(70+age*16)
             pygame.draw.circle(self.canvas,(shade,shade+6,shade+9),(round(x),round(y)),round(size+age*7))
@@ -860,13 +1092,13 @@ class Game:
         if self.state in ('battle','handoff'):
             p=self.players[self.active]
             bob=round(math.sin(self.t*6)*8)
-            self.icon('down',(round(p.x),round(self.grounds[p.index]-128+bob)),COLORS[p.color],20)
+            self.icon('down',(round(p.x),round(self.grounds[p.index]-128*TANK_SIZE_MULTIPLIER+bob)),COLORS[p.color],20)
         if self.state=='battle':
             p=self.players[self.active]
-            half=self.art.rig['tanks'][p.body]['nodes'][0]['size'][0]*.4
+            half=self.art.rig['tanks'][p.body]['nodes'][0]['size'][0]*BATTLE_TANK_SCALE/2
             for direction,offset in [('left',-1),('right',1)]:
                 cx=round(clamp(p.x+offset*(half+56),56,W-56))
-                cy=round(self.grounds[p.index]-30)
+                cy=round(self.grounds[p.index]-30*TANK_SIZE_MULTIPLIER)
                 rect=pygame.Rect(cx-48,cy-52,96,104)
                 self.buttons.append((rect,direction,p.fuel>0))
                 ok=p.fuel>0
