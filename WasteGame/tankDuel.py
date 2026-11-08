@@ -3,6 +3,7 @@ import asyncio
 import json
 import math
 import random
+import sys
 from pathlib import Path
 import pygame
 
@@ -135,6 +136,7 @@ class Game:
         self.build_player = 0
         self.charge_owner = None
         self.charge_time = 0.
+        self.camera_top = 142
         rng = random.Random(71)
         self.leaves = [[rng.uniform(0,W), rng.uniform(165,470), rng.uniform(0,6.28), rng.uniform(.7,1.3)] for _ in range(14)]
 
@@ -536,8 +538,8 @@ class Game:
             pic = self.art.sprite(spec['sprite'],[v*.55 for v in spec['size']])
             pic = pygame.transform.rotate(pic,-math.degrees(math.atan2(s['vel'].y,s['vel'].x)))
             self.canvas.blit(pic,pic.get_rect(center=s['pos']))
-            if s['pos'].y<142:
-                self.text('^',clamp(s['pos'].x,30,1250),155,32,GOLD,True)
+            if s['pos'].y<self.camera_top:
+                self.text('^',clamp(s['pos'].x,30,1250),self.camera_top+13,32,GOLD,True)
         for x,y,t,r in self.fx:
             pic=self.art.sprite(f'png/fx/explosion_{min(7,int(t*14))}.png',(r*2,r*2))
             self.canvas.blit(pic,pic.get_rect(center=(x,y)))
@@ -610,53 +612,128 @@ class Game:
             self.button((450,500,380,64),'Home','exit')
         return self.canvas
 
+def browser_size(fallback):
+    """Use CSS viewport pixels, not the device's expensive Retina backing size."""
+    if sys.platform == 'emscripten':
+        try:
+            import platform
+            window = platform.window
+            width, height = int(window.innerWidth), int(window.innerHeight)
+            if width > 0 and height > 0:
+                return width, height
+        except (AttributeError, TypeError, ValueError):
+            pass
+    return fallback
+
+
+def render_view(game, size):
+    """Reflow the battle view without stretching tanks, art, or touch targets.
+
+    Keep the HUD and controls anchored to the screen edges. A wide phone
+    crops empty upper sky; a 4:3 tablet gains sky. World/physics stay unchanged.
+    Menus retain their proportional two-column layout.
+    Button rectangles are returned in display pixels for identical touch mapping.
+    """
+    sw,sh=size
+    result=pygame.Surface(size)
+    result.fill(BG)
+    battle=game.state not in ('menu','build')
+    # A little horizontal breathing room for rounded corners / the phone notch.
+    inset=24 if sw/sh>1.9 else 8
+    scale=(sw-2*inset)/W
+    height=round(sh/scale)
+    if battle and height>=540:
+        dy=height-H
+        game.camera_top=142-dy
+        # Draw the world without modal boxes before assembling the viewport.
+        game.buttons=[]
+        game.draw_field()
+        base=game.canvas.copy()
+        view=pygame.Surface((W,height))
+        view.fill((107,155,176))
+        view.set_clip((0,142,W,height-292))
+        view.blit(base,(0,142+dy),pygame.Rect(0,142,W,508))
+        view.set_clip(None)
+        view.blit(base,(0,0),pygame.Rect(0,0,W,142))
+        view.blit(base,(0,height-150),pygame.Rect(0,650,W,150))
+        buttons=[(r.move(0,dy),a,on) for r,a,on in game.buttons]
+        if game.paused or game.state in ('handoff','result'):
+            # Draw modal at the center of the new viewport, with matching input.
+            original=game.draw()
+            source=pygame.Rect(390,210,500,400) if game.paused else pygame.Rect(325,235,630,320)
+            dest=source.copy(); dest.centery=height//2
+            view.blit(original,dest,source)
+            delta=dest.y-source.y
+            buttons=[(r.move(0,delta),a,on) for r,a,on in game.buttons if source.contains(r)]
+        result.blit(pygame.transform.smoothscale(view,(sw-2*inset,sh)),(inset,0))
+        sx=(sw-2*inset)/W; sy=sh/height
+        game.buttons=[(pygame.Rect(round(r.x*sx)+inset,round(r.y*sy),round(r.w*sx),round(r.h*sy)),a,on) for r,a,on in buttons]
+    else:
+        game.camera_top=142
+        base=game.draw()
+        scale=min((sw-2*inset)/W,sh/H)
+        vw,vh=round(W*scale),round(H*scale)
+        ox,oy=(sw-vw)//2,(sh-vh)//2
+        result.blit(pygame.transform.smoothscale(base,(vw,vh)),(ox,oy))
+        game.buttons=[(pygame.Rect(round(r.x*scale)+ox,round(r.y*scale)+oy,round(r.w*scale),round(r.h*scale)),a,on) for r,a,on in game.buttons]
+    return result
+
+
 async def run(screen=None, clock=None):
-    """GameHub entry point. Returns without pygame.quit or terminating the hub."""
+    """Use browser viewport in-game; restore the caller's display on return."""
     pygame.init()
+    supplied=screen is not None
+    previous_size=screen.get_size() if supplied else None
+    previous_flags=screen.get_flags() if supplied else 0
     if screen is None:
-        screen=pygame.display.set_mode((W,H),pygame.RESIZABLE)
+        screen=pygame.display.set_mode(browser_size((W,H)),pygame.RESIZABLE)
     game=Game()
     if clock is None:
         clock=pygame.time.Clock()
-    while game.running:
-        dt=min(clock.tick(60)/1000,.05)
-        sw,sh=screen.get_size()
-        scale=min(sw/W,sh/H)
-        vw,vh=round(W*scale),round(H*scale)
-        ox,oy=(sw-vw)//2,(sh-vh)//2
-        portrait=sh>sw
-        if portrait: game.cancel_input()
-        game.draw()
-        for e in pygame.event.get():
-            if e.type==pygame.QUIT: game.running=False
-            elif e.type==pygame.WINDOWFOCUSLOST: game.cancel_input(); game.paused=True
-            elif e.type==pygame.KEYDOWN and e.key==pygame.K_ESCAPE:
-                game.paused=not game.paused; game.cancel_input()
-            elif e.type==pygame.FINGERUP: game.release(e.finger_id)
-            elif e.type==pygame.MOUSEBUTTONUP and e.button==1 and not getattr(e,'touch',False): game.release('mouse')
-            elif not portrait and e.type==pygame.FINGERDOWN:
-                game.press(e.finger_id,((e.x*sw-ox)/scale,(e.y*sh-oy)/scale))
-            elif not portrait and e.type==pygame.MOUSEBUTTONDOWN and e.button==1 and not getattr(e,'touch',False):
-                game.press('mouse',((e.pos[0]-ox)/scale,(e.pos[1]-oy)/scale))
-            elif e.type==pygame.KEYDOWN and not portrait and not game.paused:
-                keys={pygame.K_LEFT:'left',pygame.K_RIGHT:'right',pygame.K_UP:'up',pygame.K_DOWN:'down'}
-                if e.key in keys: game.holds[e.key]=keys[e.key]
-                elif e.key==pygame.K_SPACE: game.charge('space')
-            elif e.type==pygame.KEYUP: game.release('space' if e.key==pygame.K_SPACE else e.key)
-        if portrait:
-            game.cancel_input()
-        else:
-            game.update(dt)
-        screen.fill(BG)
-        screen.blit(pygame.transform.smoothscale(game.draw(),(vw,vh)),(ox,oy))
-        if portrait:
-            screen.fill(BG)
-            f=pygame.font.Font(None,max(18,min(38,sw//18)))
-            msg=f.render('Rotate iPad to landscape',True,WHITE)
-            screen.blit(msg,msg.get_rect(center=(sw//2,sh//2)))
-        pygame.display.flip()
-        await asyncio.sleep(0)
+    try:
+        while game.running:
+            dt=min(clock.tick(60)/1000,.05)
+            desired=browser_size(screen.get_size())
+            if desired != screen.get_size():
+                game.cancel_input()
+                screen=pygame.display.set_mode(desired,pygame.RESIZABLE)
+            sw,sh=screen.get_size()
+            portrait=sh>sw
+            if portrait: game.cancel_input()
+            render_view(game,(sw,sh))
+            for e in pygame.event.get():
+                if e.type==pygame.QUIT: game.running=False
+                elif e.type==pygame.WINDOWFOCUSLOST: game.cancel_input(); game.paused=True
+                elif e.type==pygame.KEYDOWN and e.key==pygame.K_ESCAPE:
+                    game.paused=not game.paused; game.cancel_input()
+                elif e.type==pygame.FINGERUP: game.release(e.finger_id)
+                elif e.type==pygame.MOUSEBUTTONUP and e.button==1 and not getattr(e,'touch',False): game.release('mouse')
+                elif not portrait and e.type==pygame.FINGERDOWN:
+                    game.press(e.finger_id,(e.x*sw,e.y*sh))
+                elif not portrait and e.type==pygame.MOUSEBUTTONDOWN and e.button==1 and not getattr(e,'touch',False):
+                    game.press('mouse',e.pos)
+                elif e.type==pygame.KEYDOWN and not portrait and not game.paused:
+                    keys={pygame.K_LEFT:'left',pygame.K_RIGHT:'right',pygame.K_UP:'up',pygame.K_DOWN:'down'}
+                    if e.key in keys: game.holds[e.key]=keys[e.key]
+                    elif e.key==pygame.K_SPACE: game.charge('space')
+                elif e.type==pygame.KEYUP: game.release('space' if e.key==pygame.K_SPACE else e.key)
+            if portrait:
+                game.cancel_input()
+            else:
+                game.update(dt)
+            screen.blit(render_view(game,(sw,sh)),(0,0))
+            if portrait:
+                screen.fill(BG)
+                f=pygame.font.Font(None,max(18,min(38,sw//18)))
+                msg=f.render('Turn your device sideways',True,WHITE)
+                screen.blit(msg,msg.get_rect(center=(sw//2,sh//2)))
+            pygame.display.flip()
+            await asyncio.sleep(0)
+    finally:
+        if supplied and pygame.display.get_init() and screen.get_size()!=previous_size:
+            pygame.display.set_mode(previous_size, previous_flags & pygame.RESIZABLE)
     return None
+
 
 async def main(screen=None, clock=None):
     await run(screen, clock)
